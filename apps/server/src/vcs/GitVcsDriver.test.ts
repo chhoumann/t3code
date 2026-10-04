@@ -587,6 +587,47 @@ it.effect.skipIf(windowsHost)(
 );
 
 it.effect.skipIf(windowsHost)(
+  "a failed checkpoint publication leaves no pack without its index",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-publish-fail-" });
+      const { checkpointRef, listObjectStore } = yield* makeLargeFileFixture(
+        yield* GitVcsDriver.makeVcsDriverShape(),
+        cwd,
+      );
+      const objectStore = yield* listObjectStore;
+      const diskFull = (method: string, target: string) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "Unknown",
+            module: "FileSystem",
+            method,
+            pathOrDescriptor: target,
+            description: "ENOSPC",
+          }),
+        );
+      const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          link: (source, target) =>
+            target.endsWith(".idx") ? diskFull("link", target) : fs.link(source, target),
+          rename: (source, target) =>
+            target.endsWith(".idx") ? diskFull("rename", target) : fs.rename(source, target),
+        }),
+      );
+
+      const exit = yield* driver.checkpoints
+        .captureCheckpoint({ cwd, checkpointRef })
+        .pipe(Effect.exit);
+
+      assert.isTrue(Exit.isFailure(exit));
+      // Git ignores a pack without an index, and gc never removes one.
+      assert.deepEqual(yield* listObjectStore, objectStore);
+    }).pipe(Effect.scoped, Effect.provide(GitCaptureContractLayer)),
+);
+
+it.effect.skipIf(windowsHost)(
   "a killed checkpoint capture leaves none of its objects in the repository",
   () =>
     Effect.gen(function* () {

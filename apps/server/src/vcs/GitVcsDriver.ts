@@ -803,8 +803,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 
   // Moves a successful capture's new objects into the repository the way Git's own
   // quarantine migration does: never replacing an object, and each pack before its index.
-  const publishQuarantinedObjects = (quarantine: string, objectDirectory: string) =>
-    Effect.gen(function* () {
+  const publishQuarantinedObjects = (quarantine: string, objectDirectory: string) => {
+    const createdPackFiles: Array<string> = [];
+    return Effect.gen(function* () {
       const objectFiles = (yield* fileSystem.readDirectory(quarantine, { recursive: true }))
         .flatMap((entry) => {
           const rank = quarantinedObjectRank(entry.replaceAll("\\", "/"));
@@ -830,17 +831,28 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         const source = path.join(quarantine, entry);
         const target = path.join(objectDirectory, entry);
         // Objects are content-addressed, so an existing file already holds these bytes.
-        yield* fileSystem
-          .link(source, target)
-          .pipe(
-            Effect.catch((error) =>
-              error.reason._tag === "AlreadyExists"
-                ? Effect.void
-                : fileSystem.rename(source, target),
-            ),
-          );
+        const created = yield* fileSystem.link(source, target).pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            error.reason._tag === "AlreadyExists"
+              ? Effect.succeed(false)
+              : fileSystem.rename(source, target).pipe(Effect.as(true)),
+          ),
+        );
+        if (created && directory === "pack") createdPackFiles.push(target);
       }
-    });
+    }).pipe(
+      // Git ignores a pack without its index, and gc never removes one. Loose objects that were
+      // already published stay as ordinary unreachable objects, which gc does remove.
+      Effect.tapError(() =>
+        Effect.forEach(
+          createdPackFiles,
+          (file) => fileSystem.remove(file, { force: true }).pipe(Effect.ignore),
+          { discard: true },
+        ),
+      ),
+    );
+  };
 
   // Git renames loose objects and refs into place without fsync by default, so
   // an unclean restart can leave 0-byte files under refs/t3/** that break every
