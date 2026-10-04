@@ -586,46 +586,64 @@ it.effect.skipIf(windowsHost)(
     }).pipe(Effect.scoped, Effect.provide(GitCaptureContractLayer)),
 );
 
-it.effect.skipIf(windowsHost)(
-  "a failed checkpoint publication leaves no pack without its index",
-  () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-publish-fail-" });
-      const { checkpointRef, listObjectStore } = yield* makeLargeFileFixture(
-        yield* GitVcsDriver.makeVcsDriverShape(),
-        cwd,
-      );
-      const objectStore = yield* listObjectStore;
-      const diskFull = (method: string, target: string) =>
-        Effect.fail(
-          PlatformError.systemError({
-            _tag: "Unknown",
-            module: "FileSystem",
-            method,
-            pathOrDescriptor: target,
-            description: "ENOSPC",
+for (const failing of ["index", "loose object"] as const) {
+  it.effect.skipIf(windowsHost)(
+    `a checkpoint publication that fails on its ${failing} keeps every pack Git can read`,
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-publish-fail-" });
+        const { git, checkpointRef, listObjectStore } = yield* makeLargeFileFixture(
+          yield* GitVcsDriver.makeVcsDriverShape(),
+          cwd,
+        );
+        const objectStore = yield* listObjectStore;
+        const fails = (target: string) =>
+          failing === "index"
+            ? target.endsWith(".idx")
+            : /^[0-9a-f]{2}$/.test(path.basename(path.dirname(target)));
+        const diskFull = (method: string, target: string) =>
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "Unknown",
+              module: "FileSystem",
+              method,
+              pathOrDescriptor: target,
+              description: "ENOSPC",
+            }),
+          );
+        const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            link: (source, target) =>
+              fails(target) ? diskFull("link", target) : fs.link(source, target),
+            rename: (source, target) =>
+              fails(target) ? diskFull("rename", target) : fs.rename(source, target),
           }),
         );
-      const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fs,
-          link: (source, target) =>
-            target.endsWith(".idx") ? diskFull("link", target) : fs.link(source, target),
-          rename: (source, target) =>
-            target.endsWith(".idx") ? diskFull("rename", target) : fs.rename(source, target),
-        }),
-      );
 
-      const exit = yield* driver.checkpoints
-        .captureCheckpoint({ cwd, checkpointRef })
-        .pipe(Effect.exit);
+        const exit = yield* driver.checkpoints
+          .captureCheckpoint({ cwd, checkpointRef })
+          .pipe(Effect.exit);
 
-      assert.isTrue(Exit.isFailure(exit));
-      // Git ignores a pack without an index, and gc never removes one.
-      assert.deepEqual(yield* listObjectStore, objectStore);
-    }).pipe(Effect.scoped, Effect.provide(GitCaptureContractLayer)),
-);
+        assert.isTrue(Exit.isFailure(exit));
+        const published = (yield* listObjectStore).filter((entry) => !objectStore.includes(entry));
+        if (failing === "index") {
+          // Git ignores a pack without its index, and gc never removes one.
+          assert.deepEqual(published, []);
+        } else {
+          // Once its index is published, another capture may already use the pack.
+          assert.deepEqual(
+            published.map((entry) => path.extname(entry)),
+            [".idx", ".pack"],
+          );
+          const blob = (yield* git(["hash-object", "a-large.bin"])).stdout.trim();
+          yield* git(["cat-file", "-e", blob]);
+        }
+      }).pipe(Effect.scoped, Effect.provide(GitCaptureContractLayer)),
+  );
+}
 
 it.effect.skipIf(windowsHost)(
   "a killed checkpoint capture leaves none of its objects in the repository",

@@ -804,7 +804,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   // Moves a successful capture's new objects into the repository the way Git's own
   // quarantine migration does: never replacing an object, and each pack before its index.
   const publishQuarantinedObjects = (quarantine: string, objectDirectory: string) => {
-    const createdPackFiles: Array<string> = [];
+    // Files this capture created for packs whose index is not published yet.
+    const incompletePacks = new Map<string, Array<string>>();
     return Effect.gen(function* () {
       const objectFiles = (yield* fileSystem.readDirectory(quarantine, { recursive: true }))
         .flatMap((entry) => {
@@ -839,14 +840,20 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               : fileSystem.rename(source, target).pipe(Effect.as(true)),
           ),
         );
-        if (created && directory === "pack") createdPackFiles.push(target);
+        if (directory === "pack") {
+          const pack = path.basename(entry, path.extname(entry));
+          // A published index makes the pack visible, so other captures may already use it.
+          if (entry.endsWith(".idx")) incompletePacks.delete(pack);
+          else if (created)
+            incompletePacks.set(pack, [...(incompletePacks.get(pack) ?? []), target]);
+        }
       }
     }).pipe(
-      // Git ignores a pack without its index, and gc never removes one. Loose objects that were
-      // already published stay as ordinary unreachable objects, which gc does remove.
+      // Git ignores a pack without its index, and gc never removes one. Complete packs and
+      // loose objects that were already published are unreachable objects that gc removes.
       Effect.tapError(() =>
         Effect.forEach(
-          createdPackFiles,
+          [...incompletePacks.values()].flat(),
           (file) => fileSystem.remove(file, { force: true }).pipe(Effect.ignore),
           { discard: true },
         ),
