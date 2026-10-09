@@ -276,6 +276,17 @@ export class ServerSettingsService extends Context.Service<
       patch?: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
+    /**
+     * Replace the sandbox accounts, which the settings patch cannot change.
+     * `update` runs while settings writes are paused, so it sees the accounts
+     * it replaces.
+     */
+    readonly updateSandboxAccounts: <E, R>(
+      update: (
+        accounts: ServerSettings["sandboxAccounts"],
+      ) => Effect.Effect<ServerSettings["sandboxAccounts"], E, R>,
+    ) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>;
+
     /** Run an effect against a settings snapshot while settings writes are paused. */
     readonly withSettingsSnapshot: <A, E, R>(
       use: (settings: ServerSettings) => Effect.Effect<A, E, R>,
@@ -314,9 +325,11 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
     const writeSemaphore = yield* Semaphore.make(1);
     const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
 
-    const updateTestSettings = (
-      update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
-    ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    const updateTestSettings = <E = never, R = never>(
+      update: (
+        current: ServerSettings,
+      ) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>,
+    ): Effect.Effect<ServerSettings, E | ServerSettingsError, R> =>
       writeSemaphore.withPermits(1)(
         Ref.get(currentSettingsRef).pipe(
           Effect.flatMap(update),
@@ -345,6 +358,12 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             const patched = applyServerSettingsPatch(currentSettings, patch);
             return applyProviderInstanceMutation(patched, mutation);
           }),
+        ),
+      updateSandboxAccounts: (update) =>
+        updateTestSettings((currentSettings) =>
+          update(currentSettings.sandboxAccounts).pipe(
+            Effect.map((sandboxAccounts) => ({ ...currentSettings, sandboxAccounts })),
+          ),
         ),
       withSettingsSnapshot: (use) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
@@ -1247,9 +1266,9 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const updateAndPersistSettings = (
-    update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+  const updateAndPersistSettings = <E = never, R = never>(
+    update: (current: ServerSettings) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>,
+  ): Effect.Effect<ServerSettings, E | ServerSettingsError, R> =>
     writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
@@ -1415,6 +1434,12 @@ const make = Effect.gen(function* () {
           const patched = applyServerSettingsPatch(current, patch);
           return applyProviderInstanceMutation(patched, mutation);
         }),
+      ),
+    updateSandboxAccounts: (update) =>
+      updateAndPersistSettings((current) =>
+        update(current.sandboxAccounts).pipe(
+          Effect.map((sandboxAccounts) => ({ ...current, sandboxAccounts })),
+        ),
       ),
     withSettingsSnapshot,
     get streamChanges() {

@@ -5,7 +5,11 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  SandboxAccountId,
+  SandboxId,
   ThreadId,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -21,6 +25,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
@@ -403,3 +408,138 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );
+
+describe("sandbox RPC authorization", () => {
+  const tested = [
+    WS_METHODS.sandboxesSubscribe,
+    WS_METHODS.sandboxesLaunch,
+    WS_METHODS.sandboxesUpdate,
+    WS_METHODS.sandboxesConnect,
+    WS_METHODS.sandboxesSaveAccount,
+    WS_METHODS.sandboxesRemoveAccount,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+        !(tested as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+  const id = SandboxId.make("sbx-auth");
+  const accountId = SandboxAccountId.make("boat-work");
+  const view = {
+    id,
+    accountId,
+    title: "Fix the bug",
+    repository: { remoteUrl: "https://github.com/octocat/Hello-World", commit: null },
+    status: { _tag: "ready" as const },
+    environmentId: null,
+    httpBaseUrl: null,
+    createdAt: "2026-10-09T12:00:00.000Z",
+  };
+  const account = {
+    label: "Work",
+    provider: "boat" as const,
+    template: null,
+    providerEnvironment: null,
+    size: "small" as const,
+    stopAfterHours: 8,
+    machineSetupScript: null,
+  };
+
+  const connect = (scopes: Parameters<typeof RpcAuthorization.layer>[0]) =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const record = (method: string) => Effect.sync(() => void handled.push(method));
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.sandboxesSubscribe, () =>
+              Stream.fromEffect(record("subscribe").pipe(Effect.as([view]))),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesLaunch, () =>
+              record("launch").pipe(Effect.as(view)),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesUpdate, () =>
+              record("update").pipe(Effect.as(view)),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesConnect, () =>
+              record("connect").pipe(
+                Effect.as({
+                  environmentId: EnvironmentId.make("env-guest"),
+                  httpBaseUrl: "https://guest.example",
+                  pairingCredential: "grant",
+                }),
+              ),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesSaveAccount, () =>
+              record("saveAccount").pipe(Effect.as({ ...account, envNames: [] })),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesRemoveAccount, () => record("removeAccount")),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+      const calls = {
+        subscribe: client[WS_METHODS.sandboxesSubscribe]({}).pipe(Stream.runCollect),
+        launch: client[WS_METHODS.sandboxesLaunch]({
+          id,
+          accountId,
+          title: "Fix the bug",
+          message: "Fix it",
+          repository: view.repository,
+          driver: ProviderDriverKind.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        }),
+        update: client[WS_METHODS.sandboxesUpdate]({ id, desired: "stopped" }),
+        connect: client[WS_METHODS.sandboxesConnect]({ id }),
+        saveAccount: client[WS_METHODS.sandboxesSaveAccount]({
+          id: accountId,
+          ...account,
+          env: [],
+        }),
+        removeAccount: client[WS_METHODS.sandboxesRemoveAccount]({ id: accountId }),
+      };
+      return { calls, handled };
+    });
+
+  it.effect("lets a read-only session watch and connect, but not start, stop, or configure", () =>
+    Effect.gen(function* () {
+      const { calls, handled } = yield* connect([AuthOrchestrationReadScope]);
+      yield* calls.subscribe;
+      yield* calls.connect;
+      for (const call of [calls.launch, calls.update]) {
+        expect(yield* Effect.flip(call)).toMatchObject({
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+      }
+      for (const call of [calls.saveAccount, calls.removeAccount]) {
+        expect(yield* Effect.flip(call)).toMatchObject({
+          requiredPermission: AuthSettingsWriteScope,
+        });
+      }
+      expect(handled).toEqual(["subscribe", "connect"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps account changes behind settings write for a session that can operate", () =>
+    Effect.gen(function* () {
+      const { calls, handled } = yield* connect([
+        AuthOrchestrationReadScope,
+        AuthOrchestrationOperateScope,
+      ]);
+      yield* calls.launch;
+      yield* calls.update;
+      expect(yield* Effect.flip(calls.saveAccount)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(handled).toEqual(["launch", "update"]);
+
+      const settings = yield* connect([AuthSettingsWriteScope]);
+      yield* settings.calls.saveAccount;
+      yield* settings.calls.removeAccount;
+      expect(settings.handled).toEqual(["saveAccount", "removeAccount"]);
+    }).pipe(Effect.scoped),
+  );
+});

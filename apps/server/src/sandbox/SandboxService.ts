@@ -12,6 +12,7 @@
  * @module SandboxService
  */
 import {
+  type AuthGrantScope,
   CommandId,
   EnvironmentId,
   MessageId,
@@ -21,12 +22,14 @@ import {
   SandboxId,
   SandboxStatus,
   ThreadId,
+  type SandboxConnectResult,
   type SandboxFailedStep,
   type SandboxLaunchInput,
   type SandboxView,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -34,6 +37,7 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -88,6 +92,15 @@ export class SandboxDestroyedError extends Schema.TaggedError<SandboxDestroyedEr
   }
 }
 
+export class SandboxNotReadyError extends Schema.TaggedError<SandboxNotReadyError>()(
+  "SandboxNotReadyError",
+  { sandboxId: Schema.String },
+) {
+  override get message(): string {
+    return "The sandbox is not running. Start it, then connect.";
+  }
+}
+
 export class SandboxBuildUnavailableError extends Schema.TaggedError<SandboxBuildUnavailableError>()(
   "SandboxBuildUnavailableError",
   { version: Schema.String },
@@ -119,6 +132,22 @@ export class SandboxT3Build extends Context.Reference<SandboxT3BuildValue>(
   { defaultValue: () => ({ kind: "npm", version: packageJson.version }) },
 ) {}
 
+/**
+ * The build this owner's sandboxes install. A development owner's version is
+ * not on npm, so it sets `T3CODE_SANDBOX_SERVER_TARBALL` to a tarball packed
+ * by `apps/server/scripts/pack-sandbox-server.ts`.
+ */
+export const layerT3BuildFromConfig = Layer.effect(
+  SandboxT3Build,
+  Effect.gen(function* () {
+    const tarball = yield* Config.String("T3CODE_SANDBOX_SERVER_TARBALL").pipe(Config.option);
+    if (Option.isNone(tarball)) return { kind: "npm", version: packageJson.version } as const;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const bytes = yield* fileSystem.readFile(tarball.value);
+    return { kind: "tarball", version: packageJson.version, bytes } as const;
+  }),
+);
+
 export class SandboxService extends Context.Service<
   SandboxService,
   {
@@ -138,8 +167,22 @@ export class SandboxService extends Context.Service<
       SandboxNotFoundError | SandboxDestroyedError | SandboxPersistenceError
     >;
     readonly list: () => Effect.Effect<ReadonlyArray<SandboxView>, SandboxPersistenceError>;
-    /** Every sandbox as it is now, then each view as it changes. */
-    readonly subscribe: () => Stream.Stream<SandboxView, SandboxPersistenceError>;
+    /** Every sandbox as it is now, then the whole list again after each change. */
+    readonly subscribe: () => Stream.Stream<ReadonlyArray<SandboxView>, SandboxPersistenceError>;
+    /** A one-time grant a client exchanges for its own session on a ready sandbox, within `scopes`. */
+    readonly connect: (input: {
+      readonly id: SandboxId;
+      readonly scopes: ReadonlyArray<AuthGrantScope>;
+    }) => Effect.Effect<
+      SandboxConnectResult,
+      | SandboxNotFoundError
+      | SandboxNotReadyError
+      | SandboxPersistenceError
+      | SandboxAccounts.SandboxAccountNotFoundError
+      | SandboxGuest.SandboxGuestError
+      | SandboxProviderError
+      | ServerSecretStore.SecretStoreError
+    >;
   }
 >()("t3/sandbox/SandboxService") {}
 
@@ -759,14 +802,44 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         // Subscribed before the snapshot, so a change between the two is buffered, not dropped.
         const subscription = yield* PubSub.subscribe(changesPubSub);
+        const snapshot = yield* list();
+        const views = new Map(snapshot.map((view) => [view.id, view]));
         return Stream.concat(
-          Stream.fromIterableEffect(list()),
-          Stream.fromSubscription(subscription),
+          Stream.make(snapshot),
+          Stream.fromSubscription(subscription).pipe(
+            Stream.map((view) => {
+              views.set(view.id, view);
+              return [...views.values()];
+            }),
+          ),
         );
       }),
     );
 
-  return SandboxService.of({ launch, update, list, subscribe });
+  const connect: SandboxService["Service"]["connect"] = ({ id, scopes }) =>
+    Effect.gen(function* () {
+      const found = yield* readRecord(id);
+      if (Option.isNone(found)) return yield* new SandboxNotFoundError({ sandboxId: id });
+      const record = found.value;
+      const { machineId, httpBaseUrl, environmentId } = record;
+      if (
+        record.status._tag !== "ready" ||
+        machineId === null ||
+        httpBaseUrl === null ||
+        environmentId === null
+      ) {
+        return yield* new SandboxNotReadyError({ sandboxId: id });
+      }
+      const account = yield* accounts.get(record.accountId);
+      const token = yield* getAdminToken(record, account, machineId);
+      const credential = yield* guest.issuePairingCredential(
+        { baseUrl: httpBaseUrl, token },
+        { label: "T3 client", scopes },
+      );
+      return { environmentId, httpBaseUrl, pairingCredential: Redacted.value(credential) };
+    });
+
+  return SandboxService.of({ launch, update, list, subscribe, connect });
 });
 
 export const layer = Layer.effect(SandboxService, make);

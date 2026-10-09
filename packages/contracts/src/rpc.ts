@@ -21,6 +21,17 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  SandboxAccountConfig,
+  SandboxAccountRemoveInput,
+  SandboxAccountSaveInput,
+  SandboxConnectInput,
+  SandboxConnectResult,
+  SandboxError,
+  SandboxLaunchInput,
+  SandboxUpdateInput,
+  SandboxView,
+} from "./sandbox.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -506,6 +517,14 @@ export const WS_METHODS = {
   secretsAnswerRequest: "secrets.answerRequest",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  // Sandboxes this environment owns
+  sandboxesSubscribe: "sandboxes.subscribe",
+  sandboxesLaunch: "sandboxes.launch",
+  sandboxesUpdate: "sandboxes.update",
+  sandboxesConnect: "sandboxes.connect",
+  sandboxesSaveAccount: "sandboxes.saveAccount",
+  sandboxesRemoveAccount: "sandboxes.removeAccount",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -1754,6 +1773,46 @@ const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
   },
 );
 
+/** Every sandbox this environment owns, then the whole list again after each change. */
+const WsSandboxesSubscribeRpc = Rpc.make(WS_METHODS.sandboxesSubscribe, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(SandboxView),
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+/** Idempotent on `id`. */
+const WsSandboxesLaunchRpc = Rpc.make(WS_METHODS.sandboxesLaunch, {
+  payload: SandboxLaunchInput,
+  success: SandboxView,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesUpdateRpc = Rpc.make(WS_METHODS.sandboxesUpdate, {
+  payload: SandboxUpdateInput,
+  success: SandboxView,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesConnectRpc = Rpc.make(WS_METHODS.sandboxesConnect, {
+  payload: SandboxConnectInput,
+  success: SandboxConnectResult,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Refused, naming the missing actions, when the API key cannot run sandboxes. */
+const WsSandboxesSaveAccountRpc = Rpc.make(WS_METHODS.sandboxesSaveAccount, {
+  payload: SandboxAccountSaveInput,
+  success: SandboxAccountConfig,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Refused while the account still owns a sandbox that is not destroyed. */
+const WsSandboxesRemoveAccountRpc = Rpc.make(WS_METHODS.sandboxesRemoveAccount, {
+  payload: SandboxAccountRemoveInput,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
 const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   payload: SecretRequestAnswerInput,
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
@@ -1866,6 +1925,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsSandboxesSubscribeRpc,
+  WsSandboxesLaunchRpc,
+  WsSandboxesUpdateRpc,
+  WsSandboxesConnectRpc,
+  WsSandboxesSaveAccountRpc,
+  WsSandboxesRemoveAccountRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

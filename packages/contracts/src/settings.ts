@@ -17,6 +17,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { SandboxAccountConfig, SandboxAccountId } from "./sandbox.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1246,6 +1247,15 @@ export const ServerSettings = Schema.Struct({
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /**
+   * Accounts this environment creates sandbox machines under. Written only
+   * through `sandboxes.saveAccount`, which checks the key, and
+   * `sandboxes.removeAccount`, which refuses while the account owns a live
+   * sandbox; the settings patch cannot change them.
+   */
+  sandboxAccounts: Schema.Record(SandboxAccountId, SandboxAccountConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   /** Allows this server to read the Cursor CLI's macOS Keychain login for account usage. */

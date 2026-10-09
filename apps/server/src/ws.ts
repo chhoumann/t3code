@@ -27,6 +27,7 @@ import {
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthGrantScope,
   AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
@@ -124,6 +125,9 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
+import { toSandboxError } from "./sandbox/sandboxErrors.ts";
+import * as SandboxService from "./sandbox/SandboxService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -1225,6 +1229,8 @@ const layerWsRpc = (
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const sandboxes = yield* SandboxService.SandboxService;
+      const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -2040,6 +2046,23 @@ const layerWsRpc = (
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
             ),
           ),
+        [WS_METHODS.sandboxesSubscribe]: (_input) =>
+          sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesLaunch]: (input) =>
+          sandboxes.launch(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesUpdate]: (input) =>
+          sandboxes.update(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesConnect]: (input) =>
+          sandboxes
+            .connect({
+              id: input.id,
+              scopes: currentSession.scopes.filter(Schema.is(AuthGrantScope)),
+            })
+            .pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesSaveAccount]: (input) =>
+          sandboxAccounts.save(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesRemoveAccount]: (input) =>
+          sandboxAccounts.remove(input.id).pipe(Effect.mapError(toSandboxError)),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>

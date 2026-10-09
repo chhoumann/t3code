@@ -11,6 +11,7 @@
  * @module SandboxGuest
  */
 import {
+  type AuthGrantScope,
   CommandId,
   EnvironmentHttpApi,
   type EnvironmentId,
@@ -243,7 +244,11 @@ export class SandboxGuest extends Context.Service<
     /** A one-time grant a client exchanges for its own session on the guest. */
     readonly issuePairingCredential: (
       target: SandboxGuestTarget,
-      label: string,
+      grant: {
+        readonly label: string;
+        /** Omitted grants the guest's default pairing scopes. */
+        readonly scopes?: ReadonlyArray<AuthGrantScope>;
+      },
     ) => Effect.Effect<Redacted.Redacted<string>, SandboxGuestError>;
   }
 >()("t3/sandbox/SandboxGuest") {}
@@ -441,11 +446,17 @@ const make = Effect.gen(function* () {
 
   const issuePairingCredential: SandboxGuest["Service"]["issuePairingCredential"] = (
     target,
-    label,
+    grant,
   ) =>
     httpApi(target.baseUrl).pipe(
       Effect.flatMap((client) =>
-        client.auth.pairingCredential({ headers: bearer(target), payload: { label } }),
+        client.auth.pairingCredential({
+          headers: bearer(target),
+          payload: {
+            label: grant.label,
+            ...(grant.scopes === undefined ? {} : { scopes: grant.scopes }),
+          },
+        }),
       ),
       Effect.timeout(GUEST_CALL_TIMEOUT),
       Effect.map((result) => Redacted.make(result.credential)),

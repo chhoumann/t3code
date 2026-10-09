@@ -8,6 +8,7 @@
  *
  * @module SandboxProvider
  */
+import type { SandboxMachineSize } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Redacted from "effect/Redacted";
@@ -27,9 +28,6 @@ export interface ProviderMachine {
   readonly setup: ProviderMachineSetup;
 }
 
-export const ProviderMachineSize = Schema.Literals(["small", "default", "large", "xlarge"]);
-export type ProviderMachineSize = typeof ProviderMachineSize.Type;
-
 export interface SandboxProviderAccount {
   readonly apiKey: Redacted.Redacted<string>;
 }
@@ -37,7 +35,7 @@ export interface SandboxProviderAccount {
 export interface CreateMachineInput {
   /** Stable across retries of one logical create; the provider dedupes on it. */
   readonly idempotencyKey: string;
-  readonly size: ProviderMachineSize;
+  readonly size: SandboxMachineSize;
   /** Null disables the provider's auto-stop. */
   readonly ttlSeconds: number | null;
   readonly env: Readonly<Record<string, string>>;
@@ -56,6 +54,7 @@ export interface ExecResult {
 }
 
 export const SandboxProviderOperation = Schema.Literals([
+  "check-access",
   "create",
   "inspect",
   "exec",
@@ -94,18 +93,28 @@ export class SandboxProviderError extends Schema.TaggedError<SandboxProviderErro
     /** The provider's own error code, such as `limit_reached`. */
     code: Schema.optional(Schema.String),
     status: Schema.optional(Schema.Int),
+    /** The provider's own explanation, such as which plan limit refused the request. */
+    providerMessage: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     const code = this.code === undefined ? "" : ` (${this.code})`;
-    return `Sandbox ${this.operation} failed: ${KIND_SUMMARY[this.kind]}${code}.`;
+    const reason = this.providerMessage === undefined ? "" : ` ${this.providerMessage}`;
+    return `Sandbox ${this.operation} failed: ${KIND_SUMMARY[this.kind]}${code}.${reason}`;
   }
 }
 
 export class SandboxProvider extends Context.Service<
   SandboxProvider,
   {
+    /**
+     * The provider actions sandboxes need that the account's key may not
+     * take, in the provider's own names. Changes nothing on the account.
+     */
+    readonly checkAccess: (
+      account: SandboxProviderAccount,
+    ) => Effect.Effect<ReadonlyArray<string>, SandboxProviderError>;
     readonly create: (
       account: SandboxProviderAccount,
       input: CreateMachineInput,

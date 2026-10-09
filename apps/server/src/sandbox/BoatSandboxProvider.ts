@@ -64,6 +64,7 @@ const BoatHostResult = Schema.Struct({ url: Schema.String });
 
 const BoatErrorBody = Schema.Struct({
   code: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
   retryable: Schema.optional(Schema.Boolean),
   error: Schema.optional(
     Schema.Struct({
@@ -124,6 +125,70 @@ const shouldRetry = (error: SandboxProviderError) =>
 
 const RETRY_SCHEDULE = Schedule.exponential(Duration.millis(500), 2);
 const RETRY_TIMES = 5;
+/** Long enough for any plan-limit sentence, short enough to show as a status. */
+const PROVIDER_MESSAGE_MAX = 300;
+
+/** Boat machine ids start with `bx_`, so no machine ever has this one. */
+const PROBE_MACHINE = "t3-preflight-probe";
+const probePath = `/sandboxes/${PROBE_MACHINE}`;
+
+/**
+ * One request per Boat action sandboxes take. Boat refuses a scoped key's
+ * missing action with 403 before looking any further, so every allowed probe
+ * ends at the missing probe machine or, for create, at a setup script Boat
+ * rejects before creating anything.
+ */
+const ACCESS_PROBES: ReadonlyArray<{
+  readonly action: string;
+  readonly request: HttpClientRequest.HttpClientRequest;
+}> = [
+  {
+    action: "sandbox.create",
+    request: HttpClientRequest.post("/sandboxes").pipe(
+      HttpClientRequest.setHeader("Idempotency-Key", PROBE_MACHINE),
+      HttpClientRequest.bodyJsonUnsafe({ setupScript: 0, noEnv: true, type: "small" }),
+    ),
+  },
+  { action: "sandbox.read", request: HttpClientRequest.get(probePath) },
+  {
+    action: "sandbox.stop",
+    request: HttpClientRequest.post(`${probePath}/stop`).pipe(HttpClientRequest.bodyJsonUnsafe({})),
+  },
+  {
+    action: "sandbox.resume",
+    request: HttpClientRequest.post(`${probePath}/resume`).pipe(
+      HttpClientRequest.bodyJsonUnsafe({}),
+    ),
+  },
+  {
+    action: "sandbox.delete",
+    request: HttpClientRequest.make("DELETE")(probePath).pipe(
+      HttpClientRequest.setHeader("X-Ascii-Confirm-Delete", PROBE_MACHINE),
+    ),
+  },
+  {
+    action: "exec",
+    request: HttpClientRequest.post(`${probePath}/commands`).pipe(
+      HttpClientRequest.bodyJsonUnsafe({ command: "true", timeoutSeconds: 1 }),
+    ),
+  },
+  {
+    action: "file.write",
+    request: HttpClientRequest.put(`${probePath}/files`).pipe(
+      HttpClientRequest.bodyJsonUnsafe({
+        path: "/home/user/probe",
+        content: "",
+        encoding: "base64",
+      }),
+    ),
+  },
+  {
+    action: "host",
+    request: HttpClientRequest.post(`${probePath}/host`).pipe(
+      HttpClientRequest.bodyJsonUnsafe({ port: 3773, public: true }),
+    ),
+  },
+];
 
 const toMachine = (sandbox: BoatSandbox): ProviderMachine => ({
   id: ProviderMachineId.make(sandbox.id),
@@ -134,6 +199,15 @@ const toMachine = (sandbox: BoatSandbox): ProviderMachine => ({
 const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
 
+  const execute = (account: SandboxProviderAccount, request: HttpClientRequest.HttpClientRequest) =>
+    httpClient.execute(
+      request.pipe(
+        HttpClientRequest.prependUrl(BOAT_API_BASE_URL),
+        HttpClientRequest.bearerToken(Redacted.value(account.apiKey)),
+        HttpClientRequest.acceptJson,
+      ),
+    );
+
   const send = <A, I>(
     operation: SandboxProviderOperation,
     account: SandboxProviderAccount,
@@ -141,60 +215,90 @@ const make = Effect.gen(function* () {
     success: Schema.Codec<A, I>,
     options: { readonly notFound?: A } = {},
   ): Effect.Effect<A, SandboxProviderError> =>
-    httpClient
-      .execute(
-        request.pipe(
-          HttpClientRequest.prependUrl(BOAT_API_BASE_URL),
-          HttpClientRequest.bearerToken(Redacted.value(account.apiKey)),
-          HttpClientRequest.acceptJson,
-        ),
-      )
-      .pipe(
-        Effect.mapError(
-          (cause) => new SandboxProviderError({ operation, kind: "transient", cause }),
-        ),
-        Effect.flatMap((response) => {
-          if (response.status >= 200 && response.status < 300) {
-            return HttpClientResponse.schemaBodyJson(success)(response).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new SandboxProviderError({
-                    operation,
-                    kind: "invalid",
-                    status: response.status,
-                    cause,
-                  }),
-              ),
-            );
-          }
-          if (response.status === 404 && "notFound" in options) {
-            return Effect.succeed(options.notFound as A);
-          }
-          return HttpClientResponse.schemaBodyJson(BoatErrorBody)(response).pipe(
-            Effect.orElseSucceed(() => ({
-              code: undefined,
-              retryable: undefined,
-              error: undefined,
-            })),
-            Effect.flatMap((body) =>
-              Effect.fail(
+    execute(account, request).pipe(
+      Effect.mapError((cause) => new SandboxProviderError({ operation, kind: "transient", cause })),
+      Effect.flatMap((response) => {
+        if (response.status >= 200 && response.status < 300) {
+          return HttpClientResponse.schemaBodyJson(success)(response).pipe(
+            Effect.mapError(
+              (cause) =>
                 new SandboxProviderError({
                   operation,
-                  kind: classifyBoatError({
-                    status: response.status,
-                    code: body.code,
-                    retryable: body.retryable === true || body.error?.details?.retryable === true,
-                  }),
+                  kind: "invalid",
                   status: response.status,
-                  ...(body.code === undefined ? {} : { code: body.code }),
+                  cause,
                 }),
-              ),
             ),
           );
-        }),
-        Effect.retry({ while: shouldRetry, schedule: RETRY_SCHEDULE, times: RETRY_TIMES }),
-        Effect.withSpan(`sandbox.boat.${operation}`),
-      );
+        }
+        if (response.status === 404 && "notFound" in options) {
+          return Effect.succeed(options.notFound as A);
+        }
+        return HttpClientResponse.schemaBodyJson(BoatErrorBody)(response).pipe(
+          Effect.orElseSucceed(() => ({
+            code: undefined,
+            message: undefined,
+            retryable: undefined,
+            error: undefined,
+          })),
+          Effect.flatMap((body) =>
+            Effect.fail(
+              new SandboxProviderError({
+                operation,
+                kind: classifyBoatError({
+                  status: response.status,
+                  code: body.code,
+                  retryable: body.retryable === true || body.error?.details?.retryable === true,
+                }),
+                status: response.status,
+                ...(body.code === undefined ? {} : { code: body.code }),
+                ...(body.message === undefined || body.message === body.code
+                  ? {}
+                  : { providerMessage: body.message.slice(0, PROVIDER_MESSAGE_MAX) }),
+              }),
+            ),
+          ),
+        );
+      }),
+      Effect.retry({ while: shouldRetry, schedule: RETRY_SCHEDULE, times: RETRY_TIMES }),
+      Effect.withSpan(`sandbox.boat.${operation}`),
+    );
+
+  const checkAccess: SandboxProvider["Service"]["checkAccess"] = (account) =>
+    Effect.forEach(
+      ACCESS_PROBES,
+      ({ action, request }) =>
+        execute(account, request).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SandboxProviderError({ operation: "check-access", kind: "transient", cause }),
+          ),
+          Effect.flatMap((response) =>
+            response.status === 401
+              ? Effect.fail(
+                  new SandboxProviderError({
+                    operation: "check-access",
+                    kind: "unauthorized",
+                    status: response.status,
+                  }),
+                )
+              : response.status >= 500
+                ? Effect.fail(
+                    new SandboxProviderError({
+                      operation: "check-access",
+                      kind: "transient",
+                      status: response.status,
+                    }),
+                  )
+                : Effect.succeed(response.status === 403 ? [action] : []),
+          ),
+        ),
+      { concurrency: "unbounded" },
+    ).pipe(
+      Effect.map((missing) => missing.flat()),
+      Effect.retry({ while: shouldRetry, schedule: RETRY_SCHEDULE, times: RETRY_TIMES }),
+      Effect.withSpan("sandbox.boat.check-access"),
+    );
 
   const sandboxPath = (id: ProviderMachineId, suffix = "") =>
     `/sandboxes/${encodeURIComponent(id)}${suffix}`;
@@ -288,7 +392,17 @@ const make = Effect.gen(function* () {
       { notFound: undefined },
     ).pipe(Effect.asVoid);
 
-  return SandboxProvider.of({ create, inspect, exec, writeFile, host, stop, resume, destroy });
+  return SandboxProvider.of({
+    checkAccess,
+    create,
+    inspect,
+    exec,
+    writeFile,
+    host,
+    stop,
+    resume,
+    destroy,
+  });
 });
 
 export const layer = Layer.effect(SandboxProvider, make);

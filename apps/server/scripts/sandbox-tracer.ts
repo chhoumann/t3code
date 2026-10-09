@@ -208,6 +208,8 @@ const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv |
               size: "small" as const,
               stopAfterHours: 1,
             })),
+      save: () => Effect.die("The tracer's account is fixed."),
+      remove: () => Effect.die("The tracer's account is fixed."),
     }),
   );
 
@@ -249,11 +251,14 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
     const awaitStatus = (tag: SandboxStatus["_tag"], options = { failFast: true }) =>
       Effect.gen(function* () {
         const seen = yield* sandboxes.subscribe().pipe(
-          Stream.filter(
-            (view: SandboxView) =>
-              view.id === id &&
-              (view.status._tag === tag || (options.failFast && view.status._tag === "failed")),
+          Stream.map((views: ReadonlyArray<SandboxView>) =>
+            views.find(
+              (view) =>
+                view.id === id &&
+                (view.status._tag === tag || (options.failFast && view.status._tag === "failed")),
+            ),
           ),
+          Stream.filter((view) => view !== undefined),
           Stream.runHead,
           Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
         );
@@ -269,7 +274,8 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       });
 
     yield* sandboxes.subscribe().pipe(
-      Stream.filter((view: SandboxView) => view.id === id),
+      Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
+      Stream.filter((view) => view !== undefined),
       Stream.changesWith((a, b) => JSON.stringify(a.status) === JSON.stringify(b.status)),
       Stream.runForEach((view) =>
         Clock.currentTimeMillis.pipe(
@@ -448,7 +454,10 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
     yield* step(
       "pairing grant exchanges for a session",
       Effect.gen(function* () {
-        const credential = yield* guest.issuePairingCredential({ baseUrl, token }, "tracer");
+        const credential = yield* guest.issuePairingCredential(
+          { baseUrl, token },
+          { label: "tracer" },
+        );
         const client = yield* api(baseUrl);
         const issued = yield* client.auth.token({
           headers: {},

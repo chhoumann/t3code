@@ -45,6 +45,7 @@ const makeWorld = () => {
     resumes: 0,
     credentialRefreshes: 0,
     launchedThreads: [] as Array<string>,
+    pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
     /** The next create registers its machine, then hangs as if its response were lost. */
     hangNextCreate: null as Deferred.Deferred<void> | null,
@@ -52,6 +53,7 @@ const makeWorld = () => {
   };
 
   const provider = SandboxProvider.of({
+    checkAccess: () => Effect.succeed([]),
     create: (_account, input) =>
       Effect.gen(function* () {
         world.createKeys.push(input.idempotencyKey);
@@ -108,7 +110,11 @@ const makeWorld = () => {
         world.launchedThreads.push(input.seed.threadId);
         return { resumed };
       }),
-    issuePairingCredential: () => Effect.succeed(Redacted.make("pairing")),
+    issuePairingCredential: (target, grant) =>
+      Effect.sync(() => {
+        world.pairingGrants.push({ baseUrl: target.baseUrl, scopes: grant.scopes });
+        return Redacted.make("pairing");
+      }),
   });
 
   const secretStore = ServerSecretStore.ServerSecretStore.of({
@@ -169,7 +175,10 @@ const awaitStatus = (id: string, tag: SandboxStatus["_tag"]) =>
   SandboxService.SandboxService.pipe(
     Effect.flatMap((service) =>
       service.subscribe().pipe(
-        Stream.filter((view: SandboxView) => view.id === id && view.status._tag === tag),
+        Stream.map((views: ReadonlyArray<SandboxView>) =>
+          views.find((view) => view.id === id && view.status._tag === tag),
+        ),
+        Stream.filter((view) => view !== undefined),
         Stream.runHead,
       ),
     ),
@@ -336,6 +345,42 @@ describe("SandboxService", () => {
           assert.strictEqual(world.createKeys.length, 2);
           assert.notStrictEqual(world.createKeys[1], world.createKeys[0]);
           assert.strictEqual(world.machines.size, 1);
+        }).pipe(Effect.provide(started.context));
+        yield* Scope.close(started.scope, Exit.void);
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "pairs a client with a ready sandbox within the caller's scopes, and only when ready",
+    () =>
+      Effect.gen(function* () {
+        const { world, start } = makeWorld();
+        const started = yield* start;
+        yield* Effect.gen(function* () {
+          const sandboxes = yield* service;
+          const id = SandboxId.make("sbx-connect");
+          yield* sandboxes.launch(launchInput(id));
+          yield* awaitStatus(id, "ready");
+          const [machineId] = [...world.machines.keys()];
+          const baseUrl = `https://${machineId}.sandbox.test`;
+
+          const connected = yield* sandboxes.connect({ id, scopes: ["orchestration:read"] });
+          assert.deepStrictEqual(connected, {
+            environmentId: GUEST_ENV,
+            httpBaseUrl: baseUrl,
+            pairingCredential: "pairing",
+          });
+          assert.deepStrictEqual(world.pairingGrants, [
+            { baseUrl, scopes: ["orchestration:read"] },
+          ]);
+
+          yield* sandboxes.update({ id, desired: "stopped" });
+          yield* awaitStatus(id, "stopped");
+          const refused = yield* sandboxes
+            .connect({ id, scopes: ["orchestration:read"] })
+            .pipe(Effect.flip);
+          assert.strictEqual(refused._tag, "SandboxNotReadyError");
+          assert.strictEqual(world.pairingGrants.length, 1);
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

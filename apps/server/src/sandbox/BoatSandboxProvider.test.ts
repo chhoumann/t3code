@@ -151,4 +151,106 @@ describe("BoatSandboxProvider", () => {
       expect(seen[0]?.body).toEqual({ port: 3773, public: true });
     }),
   );
+
+  it.effect("names the actions a scoped key lacks, without touching any real machine", () =>
+    Effect.gen(function* () {
+      const seen: Array<Seen> = [];
+      const refused = new Set([
+        "POST /api/v1/sandboxes/t3-preflight-probe/resume",
+        "POST /api/v1/sandboxes/t3-preflight-probe/host",
+      ]);
+      const layer = BoatSandboxProvider.layer.pipe(
+        Layer.provide(
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.sync(() => {
+                const body =
+                  request.body._tag === "Uint8Array"
+                    ? JSON.parse(new TextDecoder().decode(request.body.body))
+                    : undefined;
+                seen.push({
+                  method: request.method,
+                  url: request.url,
+                  headers: request.headers,
+                  body,
+                });
+                const route = `${request.method} ${new URL(request.url).pathname}`;
+                return HttpClientResponse.fromWeb(
+                  request,
+                  refused.has(route)
+                    ? boatError(403, "forbidden")
+                    : route === "POST /api/v1/sandboxes"
+                      ? boatError(400, "invalid_setup_script")
+                      : boatError(404, "not_found"),
+                );
+              }),
+            ),
+          ),
+        ),
+      );
+      const missing = yield* Effect.flatMap(Effect.service(SandboxProvider), (provider) =>
+        provider.checkAccess(account),
+      ).pipe(Effect.provide(layer));
+
+      expect(missing).toEqual(["sandbox.resume", "host"]);
+      expect(seen).toHaveLength(8);
+      for (const request of seen) {
+        expect(new URL(request.url).pathname).toMatch(
+          /^\/api\/v1\/sandboxes(\/t3-preflight-probe(\/[a-z]+)?)?$/,
+        );
+      }
+      const create = seen.find((request) => new URL(request.url).pathname === "/api/v1/sandboxes");
+      expect(typeof (create?.body as { setupScript?: unknown } | undefined)?.setupScript).not.toBe(
+        "string",
+      );
+    }),
+  );
+
+  it.effect("fails the access check for a key Boat does not recognize", () =>
+    Effect.gen(function* () {
+      const { exit } = yield* run(
+        Array.from({ length: 8 }, () => () => boatError(401, "unauthorized")),
+        (provider) => provider.checkAccess(account).pipe(Effect.flip),
+      );
+      expect(exit._tag === "Success" && exit.value).toMatchObject({
+        kind: "unauthorized",
+        operation: "check-access",
+      });
+    }),
+  );
+
+  it.effect("carries Boat's explanation of a plan limit into the error message", () =>
+    Effect.gen(function* () {
+      const { exit } = yield* run(
+        [
+          () =>
+            new Response(
+              JSON.stringify({
+                ok: false,
+                status: 403,
+                code: "trial_machine_class_not_allowed",
+                message: "Trial accounts can only create small and default sandboxes.",
+              }),
+              { status: 403 },
+            ),
+        ],
+        (provider) =>
+          provider
+            .create(account, {
+              idempotencyKey: "sandbox-1",
+              size: "large",
+              ttlSeconds: 3600,
+              env: {},
+              template: null,
+              providerEnvironment: null,
+              setupScript: "true",
+            })
+            .pipe(Effect.flip),
+      );
+      expect(exit._tag === "Success" && exit.value.message).toBe(
+        "Sandbox create failed: an account limit was reached (trial_machine_class_not_allowed). Trial accounts can only create small and default sandboxes.",
+      );
+    }),
+  );
 });

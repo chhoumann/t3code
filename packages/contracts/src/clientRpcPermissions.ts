@@ -2,6 +2,8 @@ import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput } from "./git.ts";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
@@ -39,6 +41,14 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.scheduledTasksDelete]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
+
+  [WS_METHODS.sandboxesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesLaunch]: AuthOrchestrationOperateScope,
+  [WS_METHODS.sandboxesUpdate]: AuthOrchestrationOperateScope,
+  // Read is enough to ask: the grant it mints carries only the caller's own scopes.
+  [WS_METHODS.sandboxesConnect]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesSaveAccount]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesRemoveAccount]: AuthSettingsWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

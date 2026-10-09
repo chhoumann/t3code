@@ -19,6 +19,7 @@ import {
   type EnvironmentId,
   type SandboxAccountId,
   type SandboxDesired,
+  SandboxMachineSize,
   type SandboxFailedStep,
   type SandboxId,
   type SandboxStatus,
@@ -26,11 +27,7 @@ import {
 import * as Schema from "effect/Schema";
 
 import { SandboxT3Source } from "./sandboxBootScript.ts";
-import {
-  ProviderMachineSize,
-  type ProviderMachine,
-  type ProviderMachineId,
-} from "./SandboxProvider.ts";
+import type { ProviderMachine, ProviderMachineId } from "./SandboxProvider.ts";
 
 /** Boat replays a create for the same key for 24 hours; stop trusting it an hour early. */
 export const CREATE_KEY_WINDOW_MS = 23 * 60 * 60 * 1000;
@@ -51,7 +48,7 @@ export const SandboxSpec = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   machine: Schema.Struct({
-    size: ProviderMachineSize,
+    size: SandboxMachineSize,
     ttlSeconds: Schema.NullOr(Schema.Number),
     template: Schema.NullOr(Schema.String),
     providerEnvironment: Schema.NullOr(Schema.String),

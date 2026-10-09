@@ -2201,6 +2201,7 @@ it.layer(
         getSettings: Effect.fail(settingsError),
         updateSettings: () => Effect.fail(settingsError),
         updateProviderInstance: () => Effect.fail(settingsError),
+        updateSandboxAccounts: () => Effect.fail(settingsError),
         withSettingsSnapshot: () => Effect.fail(settingsError),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.succeed(Stream.empty),

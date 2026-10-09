@@ -175,6 +175,11 @@ import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as BoatSandboxProvider from "./sandbox/BoatSandboxProvider.ts";
+import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
+import * as SandboxGuest from "./sandbox/SandboxGuest.ts";
+import * as SandboxService from "./sandbox/SandboxService.ts";
 
 // MCP handoff thread IDs include escaped provenance and can exceed find-my-way's
 // 100-character default for one path segment.
@@ -528,6 +533,16 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
+// Sandbox machines this environment owns. Building the service plans every
+// unsettled sandbox again, so a restart picks up each one where it stopped.
+const layerSandboxes = SandboxService.layer.pipe(
+  Layer.provide(SandboxService.layerT3BuildFromConfig),
+  Layer.provideMerge(SandboxAccounts.layer),
+  Layer.provide(SandboxGuest.layer),
+  Layer.provide(BoatSandboxProvider.layer),
+  Layer.provide(NodeSocket.layerWebSocketConstructor),
+);
+
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
@@ -564,6 +579,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ReplayMarkers.layer,
 ).pipe(
   // Core Services
+  Layer.provideMerge(layerSandboxes),
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
