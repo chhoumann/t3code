@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
   SandboxAccountId,
+  SandboxError,
   type SandboxRepository,
   type SandboxStatus,
   type SandboxView,
@@ -10,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -148,4 +150,17 @@ export function sandboxRepositoryFor(input: {
     _tag: "Ready",
     repository: { remoteUrl: input.remoteUrl, commit: status.headCommit },
   };
+}
+
+const isSandboxError = Schema.is(SandboxError);
+
+/** A sandbox command's failure in words, naming the actions an API key lacks. */
+export function sandboxFailureMessage(error: unknown): string {
+  if (
+    isSandboxError(error) &&
+    error.missingActions !== undefined &&
+    error.missingActions.length > 0
+  )
+    return `This API key cannot use ${error.missingActions.join(", ")}. Allow those actions for the key, then save again.`;
+  return error instanceof Error && error.message.length > 0 ? error.message : "An error occurred.";
 }

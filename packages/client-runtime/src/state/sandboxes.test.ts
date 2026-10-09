@@ -3,12 +3,14 @@ import {
   EnvironmentId,
   SandboxAccountId,
   type SandboxAccountConfig,
+  SandboxError,
   type SandboxStatus,
   type VcsStatusResult,
 } from "@t3tools/contracts";
 
 import {
   sandboxAccountChoices,
+  sandboxFailureMessage,
   sandboxLaunchStageIndex,
   sandboxRepositoryFor,
 } from "./sandboxes.ts";
@@ -108,5 +110,23 @@ describe("sandboxAccountChoices", () => {
     expect(sandboxAccountChoices(OWNER, config(undefined))).toEqual([]);
     expect(sandboxAccountChoices(OWNER, config(false))).toEqual([]);
     expect(sandboxAccountChoices(OWNER, null)).toEqual([]);
+  });
+});
+
+describe("sandboxFailureMessage", () => {
+  it("names the actions a key lacks", () => {
+    const error = new SandboxError({
+      code: "key-missing-actions",
+      message: "missing",
+      missingActions: ["sandbox.resume", "host"],
+    });
+    expect(sandboxFailureMessage(error)).toBe(
+      "This API key cannot use sandbox.resume, host. Allow those actions for the key, then save again.",
+    );
+  });
+
+  it("passes any other failure's own message through", () => {
+    const error = new SandboxError({ code: "account-in-use", message: "Work owns 2 sandboxes." });
+    expect(sandboxFailureMessage(error)).toBe("Work owns 2 sandboxes.");
   });
 });
