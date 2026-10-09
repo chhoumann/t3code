@@ -50,6 +50,9 @@ export type T3McpToolSummaryAction =
   | "project-clone"
   | "environment-read"
   | "environment-update"
+  | "sandbox-launch"
+  | "sandbox-update"
+  | "sandbox-list"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -298,6 +301,9 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "environment-update",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
+  sandbox_launch: tool(["Launch", "Launching", "Launched", "a sandbox"], "sandbox-launch"),
+  sandbox_update: tool(["Update", "Updating", "Updated", "a sandbox"], "sandbox-update"),
+  sandbox_list: tool(["List", "Listing", "Listed", "sandboxes"], "sandbox-list"),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
   t3_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),
   t3_project_create: tool(["Register", "Registering", "Registered", "a project"], "project-create"),

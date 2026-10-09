@@ -26,6 +26,8 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { SandboxToolkit } from "./toolkits/sandbox/tools.ts";
+import * as SandboxHandlers from "./toolkits/sandbox/handlers.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
@@ -818,6 +820,8 @@ const layerEnvironmentRegistration = toolkitRegistration(
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
+const layerSandboxRegistration = toolkitRegistration(SandboxToolkit, SandboxHandlers.layer);
+
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
   AttachmentHandlers.layer,
@@ -857,6 +861,7 @@ export const layer = Layer.mergeAll(
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentRegistration,
+  layerSandboxRegistration,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

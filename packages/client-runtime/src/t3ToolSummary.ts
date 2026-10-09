@@ -329,6 +329,23 @@ export function summarizeT3ToolCalls(
     case "environment-update":
       label = phrase("Updated", "update", `environment preferences ${times}`);
       break;
+    case "sandbox-launch":
+      label = phrase(
+        "Launched",
+        "launch",
+        quantity(countEntities(entityIds("id")), "sandbox", "sandboxes"),
+      );
+      break;
+    case "sandbox-update":
+      label = phrase(
+        "Updated",
+        "update",
+        quantity(countEntities(entityIds("id")), "sandbox", "sandboxes"),
+      );
+      break;
+    case "sandbox-list":
+      label = phrase("Listed", "list", `sandboxes ${times}`);
+      break;
     case "attachment-prepare":
       label = phrase(
         "Prepared",
