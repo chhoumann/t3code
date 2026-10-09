@@ -267,7 +267,7 @@ const RunContextSelector = memo(function RunContextSelector({
           {activeSandbox?.label ?? autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}
         </TooltipPopup>
       </Tooltip>
-      {workspaceIcon}
+      {activeSandbox ? null : workspaceIcon}
     </span>
   ) : (
     workspaceIcon
@@ -317,7 +317,7 @@ const RunContextSelector = memo(function RunContextSelector({
         data-composer-context-control
         data-composer-shortcut={[
           showEnvironmentPicker && !envLocked ? "composer.host" : "",
-          !envModeLocked ? "composer.workspace" : "",
+          !envModeLocked && !activeSandbox ? "composer.workspace" : "",
         ].join(" ")}
       >
         {triggerContent}
@@ -394,44 +394,50 @@ const RunContextSelector = memo(function RunContextSelector({
                 ))}
               </MenuRadioGroup>
             </MenuGroup>
-            <MenuSeparator />
+            {activeSandbox ? null : <MenuSeparator />}
           </>
         ) : null}
-        <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
-          <MenuRadioGroup
-            value={effectiveEnvMode}
-            onValueChange={(value) => {
-              if (value === "previous-worktree") {
-                onUsePreviousWorktree();
-                return;
-              }
-              onEnvModeChange(value as EnvMode);
-            }}
-          >
-            <MenuRadioItem disabled={envModeLocked || forceNewWorktree} value="local" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                {activeWorktreePath ? (
-                  <FolderGitIcon className="size-3" />
-                ) : (
-                  <FolderIcon className="size-3" />
-                )}
-                <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
-              </span>
-            </MenuRadioItem>
-            <MenuRadioItem disabled={envModeLocked} value="worktree" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
-              </span>
-            </MenuRadioItem>
-            {previousWorktreeLabel ? (
-              <MenuRadioItem disabled={envModeLocked} value="previous-worktree" closeOnClick>
-                <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
+        {activeSandbox ? null : (
+          <MenuGroup>
+            <MenuGroupLabel>Workspace</MenuGroupLabel>
+            <MenuRadioGroup
+              value={effectiveEnvMode}
+              onValueChange={(value) => {
+                if (value === "previous-worktree") {
+                  onUsePreviousWorktree();
+                  return;
+                }
+                onEnvModeChange(value as EnvMode);
+              }}
+            >
+              <MenuRadioItem
+                disabled={envModeLocked || forceNewWorktree}
+                value="local"
+                closeOnClick
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {activeWorktreePath ? (
+                    <FolderGitIcon className="size-3" />
+                  ) : (
+                    <FolderIcon className="size-3" />
+                  )}
+                  <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
+                </span>
               </MenuRadioItem>
-            ) : null}
-          </MenuRadioGroup>
-        </MenuGroup>
+              <MenuRadioItem disabled={envModeLocked} value="worktree" closeOnClick>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FolderGit2Icon className="size-3" />
+                  <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
+                </span>
+              </MenuRadioItem>
+              {previousWorktreeLabel ? (
+                <MenuRadioItem disabled={envModeLocked} value="previous-worktree" closeOnClick>
+                  <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
+                </MenuRadioItem>
+              ) : null}
+            </MenuRadioGroup>
+          </MenuGroup>
+        )}
       </MenuPopup>
     </Menu>
   );
@@ -681,11 +687,18 @@ export const BranchToolbar = memo(function BranchToolbar({
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
 
+  // A sandbox clones its own checkout, so the local workspace and branch do not apply.
+  const sandboxSelected = activeSandboxValue !== null;
+
   // "Previous worktree" hops a draft into the most recently active worktree
   // of this project — the "keep going where I just was" follow-up flow. Only
   // drafts can hop; started server threads have their workspace pinned.
   const canUsePreviousWorktree =
-    draftThread !== null && serverThread === null && !envModeLocked && !forceNewWorktree;
+    draftThread !== null &&
+    serverThread === null &&
+    !envModeLocked &&
+    !forceNewWorktree &&
+    !sandboxSelected;
   const projectRefsForWorktreeLookup = useMemo(
     () => (canUsePreviousWorktree && activeProjectRef ? [activeProjectRef] : []),
     [canUsePreviousWorktree, activeProjectRef],
@@ -779,7 +792,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
           />
         ) : null}
-        {panelSection !== "workspace" ? (
+        {panelSection !== "workspace" && !sandboxSelected ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -858,7 +871,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 activeSandboxValue={activeSandboxValue}
                 onSandboxChoose={onSandboxChoose}
               />
-              {showGitControls ? (
+              {showGitControls && !sandboxSelected ? (
                 <Separator
                   orientation="vertical"
                   className="mx-0.5 h-3.5!"
@@ -867,7 +880,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls ? (
+          {showGitControls && !sandboxSelected ? (
             <BranchToolbarEnvModeSelector
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}
@@ -894,7 +907,7 @@ export const BranchToolbar = memo(function BranchToolbar({
         />
       ) : null}
 
-      {showGitControls ? (
+      {showGitControls && !sandboxSelected ? (
         <BranchToolbarBranchSelector
           forceNewWorktree={forceNewWorktree}
           ref={branchSelectorRef}

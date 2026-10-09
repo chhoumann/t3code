@@ -76,6 +76,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
   );
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,
+    activeSandboxValue: props.activeSandboxValue,
     environmentId: props.environmentId,
     threadId: props.threadId,
     ...(props.draftId ? { draftId: props.draftId } : {}),
@@ -122,7 +123,6 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   autoEnvironmentLabel={props.autoEnvironmentLabel}
                   onAutoEnvironment={props.onAutoEnvironment}
                   sandboxChoices={props.sandboxChoices}
-                  activeSandboxValue={props.activeSandboxValue}
                   onSandboxChoose={props.onSandboxChoose}
                   {...branchToolbarProps}
                 />
