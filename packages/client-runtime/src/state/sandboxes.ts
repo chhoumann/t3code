@@ -1,0 +1,151 @@
+import {
+  type EnvironmentId,
+  type ExecutionEnvironmentCapabilities,
+  SandboxAccountId,
+  type SandboxRepository,
+  type SandboxStatus,
+  type SandboxView,
+  type ServerSettings,
+  type VcsStatusResult,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { AsyncResult, Atom } from "effect/reactivity";
+
+import type { EnvironmentRegistry } from "../connection/registry.ts";
+import {
+  SandboxRegistrations,
+  type SandboxIndexEntry,
+  sandboxIndex,
+} from "../sandbox/sandboxRegistrations.ts";
+import { createSandboxEnvironmentAtoms } from "./sandboxCommands.ts";
+
+export type { SandboxIndexEntry };
+
+type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
+
+const EMPTY_OWNERS: SandboxOwners = new Map();
+const EMPTY_SANDBOXES: ReadonlyArray<SandboxView> = [];
+
+/**
+ * The sandboxes this client follows: each owner's list, including sandboxes
+ * that have no environment yet, and the index of sandbox environments.
+ */
+export function createSandboxAtoms<R, E>(
+  runtime: Atom.AtomRuntime<SandboxRegistrations | EnvironmentRegistry | R, E>,
+) {
+  const ownersResultAtom = runtime.atom(
+    Stream.unwrap(
+      SandboxRegistrations.pipe(
+        Effect.map((sandboxes) => SubscriptionRef.changes(sandboxes.owners)),
+      ),
+    ),
+    { initialValue: EMPTY_OWNERS },
+  );
+  const ownersAtom = Atom.make((get) =>
+    Option.getOrElse(AsyncResult.value(get(ownersResultAtom)), () => EMPTY_OWNERS),
+  ).pipe(Atom.withLabel("sandboxes:owners"));
+  const indexAtom = Atom.make((get) => sandboxIndex(get(ownersAtom))).pipe(
+    Atom.withLabel("sandboxes:index"),
+  );
+  const ownerSandboxesAtom = Atom.family((owner: EnvironmentId) =>
+    Atom.make((get) => get(ownersAtom).get(owner) ?? EMPTY_SANDBOXES).pipe(
+      Atom.withLabel(`sandboxes:owner:${owner}`),
+    ),
+  );
+  return { ownersAtom, indexAtom, ownerSandboxesAtom, ...createSandboxEnvironmentAtoms(runtime) };
+}
+
+export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
+  creating: "Starting machine",
+  booting: "Installing T3",
+  launching: "Starting thread",
+  ready: "Running",
+  stopping: "Stopping",
+  stopped: "Stopped",
+  resuming: "Resuming",
+  destroying: "Deleting",
+  destroyed: "Deleted",
+  failed: "Failed",
+};
+
+/** The stages a new sandbox shows before its thread opens, in order. */
+export const SANDBOX_LAUNCH_STAGES = ["creating", "booting", "launching"] as const;
+
+/** Where a new sandbox is in `SANDBOX_LAUNCH_STAGES`; null once it is past them or off that path. */
+export function sandboxLaunchStageIndex(status: SandboxStatus): number | null {
+  const index = SANDBOX_LAUNCH_STAGES.findIndex((stage) => stage === status._tag);
+  return index === -1 ? null : index;
+}
+
+export interface SandboxAccountChoice {
+  readonly ownerEnvironmentId: EnvironmentId;
+  readonly accountId: SandboxAccountId;
+  readonly label: string;
+}
+
+/** The accounts an environment can launch sandboxes under, by label. */
+export function sandboxAccountChoices(
+  ownerEnvironmentId: EnvironmentId,
+  config: {
+    readonly environment: {
+      readonly capabilities: Pick<ExecutionEnvironmentCapabilities, "sandboxes">;
+    };
+    readonly settings: Pick<ServerSettings, "sandboxAccounts">;
+  } | null,
+): ReadonlyArray<SandboxAccountChoice> {
+  if (config?.environment.capabilities.sandboxes !== true) return [];
+  return Object.entries(config.settings.sandboxAccounts)
+    .map(([accountId, account]) => ({
+      ownerEnvironmentId,
+      accountId: SandboxAccountId.make(accountId),
+      label: account.label,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+export function sandboxLaunchLabel(accountLabel: string): string {
+  return `New sandbox · ${accountLabel}`;
+}
+
+export type SandboxRepositoryProblem =
+  | "not-a-repository"
+  | "no-remote"
+  | "no-commit"
+  | "uncommitted-changes"
+  | "not-pushed";
+
+export const SANDBOX_REPOSITORY_PROBLEM_MESSAGE: Record<SandboxRepositoryProblem, string> = {
+  "not-a-repository": "A sandbox clones the project, so it needs a Git repository.",
+  "no-remote": "A sandbox clones the project from its remote. Add one to start a sandbox.",
+  "no-commit": "A sandbox starts from a commit. Make one to start a sandbox.",
+  "uncommitted-changes":
+    "A sandbox starts from the pushed commit, so uncommitted changes would not travel. Commit and push them first.",
+  "not-pushed":
+    "A sandbox starts from the pushed commit, so local commits would not travel. Push them first.",
+};
+
+/**
+ * What a sandbox clones: the project's remote at the current commit, which
+ * must already be on that remote. Local changes never reach the sandbox.
+ */
+export function sandboxRepositoryFor(input: {
+  readonly remoteUrl: string | null;
+  readonly status: VcsStatusResult | null;
+}):
+  | { readonly _tag: "Ready"; readonly repository: SandboxRepository }
+  | { readonly _tag: "Refused"; readonly problem: SandboxRepositoryProblem } {
+  const refuse = (problem: SandboxRepositoryProblem) => ({ _tag: "Refused" as const, problem });
+  const { status } = input;
+  if (status === null || !status.isRepo) return refuse("not-a-repository");
+  if (input.remoteUrl === null || !status.hasPrimaryRemote) return refuse("no-remote");
+  if (status.headCommit === undefined) return refuse("no-commit");
+  if (status.hasWorkingTreeChanges) return refuse("uncommitted-changes");
+  if (!status.hasUpstream || status.aheadCount > 0) return refuse("not-pushed");
+  return {
+    _tag: "Ready",
+    repository: { remoteUrl: input.remoteUrl, commit: status.headCommit },
+  };
+}

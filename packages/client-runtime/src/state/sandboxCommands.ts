@@ -30,6 +30,14 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandbox:update",
       tag: WS_METHODS.sandboxesUpdate,
     }),
+    saveAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandbox:save-account",
+      tag: WS_METHODS.sandboxesSaveAccount,
+    }),
+    removeAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandbox:remove-account",
+      tag: WS_METHODS.sandboxesRemoveAccount,
+    }),
   };
 }
 
