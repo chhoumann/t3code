@@ -188,26 +188,40 @@ export function renderSandboxBootScript(input: {
   ].join("\n");
 }
 
+/** Left by a refresh that changed a file, until the restart it calls for has run. */
+const SETUP_RESTART_PENDING = `${SANDBOX_INPUTS_DIR}/restart-setup.pending`;
+const T3_RESTART_PENDING = `${SANDBOX_INPUTS_DIR}/restart-t3.pending`;
+
 /**
  * Swaps the staged env files and setup script in after a boot the owner did
  * not script, re-runs the setup unit when any of them changed, and restarts T3
- * when its own env changed. Prints `env_changed=0|1 setup_changed=0|1`.
+ * when its own env changed. A change marks its restart pending before the
+ * swap, so a refresh cut short restarts on the next one even though the files
+ * then match. Prints `setup_restarted=0|1 t3_restarted=0|1`.
  */
 export function renderRefreshCredentialsCommand(): string {
-  const swap = (staged: string, target: string, flag: string) => [
+  const swap = (staged: string, target: string, pending: ReadonlyArray<string>) => [
     `if cmp -s ${shellQuote(staged)} ${shellQuote(target)}; then rm -f ${shellQuote(staged)};`,
-    `else chmod 600 ${shellQuote(staged)} && mv -f ${shellQuote(staged)} ${shellQuote(target)} && ${flag}=1; fi`,
+    `else touch ${pending.map(shellQuote).join(" ")} && chmod 600 ${shellQuote(staged)} && mv -f ${shellQuote(staged)} ${shellQuote(target)}; fi`,
   ];
   return [
     "set -euo pipefail",
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
-    "env_changed=0",
-    "setup_changed=0",
-    ...swap(SANDBOX_STAGED_ENV_FILE, SANDBOX_ENV_FILE, "env_changed"),
-    ...swap(SANDBOX_STAGED_SETUP_ENV_FILE, SANDBOX_SETUP_ENV_FILE, "setup_changed"),
-    ...swap(SANDBOX_STAGED_MACHINE_SETUP_SCRIPT, SANDBOX_MACHINE_SETUP_SCRIPT, "setup_changed"),
-    `if [ "$env_changed$setup_changed" != 00 ]; then sudo systemctl restart ${MACHINE_SETUP_UNIT} || echo "machine setup failed" >&2; fi`,
-    'if [ "$env_changed" = 1 ]; then systemctl --user restart t3code.service; fi',
-    'echo "env_changed=$env_changed setup_changed=$setup_changed"',
+    ...swap(SANDBOX_STAGED_ENV_FILE, SANDBOX_ENV_FILE, [SETUP_RESTART_PENDING, T3_RESTART_PENDING]),
+    ...swap(SANDBOX_STAGED_SETUP_ENV_FILE, SANDBOX_SETUP_ENV_FILE, [SETUP_RESTART_PENDING]),
+    ...swap(SANDBOX_STAGED_MACHINE_SETUP_SCRIPT, SANDBOX_MACHINE_SETUP_SCRIPT, [
+      SETUP_RESTART_PENDING,
+    ]),
+    "setup_restarted=0",
+    "t3_restarted=0",
+    `if [ -e ${shellQuote(SETUP_RESTART_PENDING)} ]; then`,
+    `  sudo systemctl restart ${MACHINE_SETUP_UNIT} || echo "machine setup failed" >&2`,
+    `  rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
+    "fi",
+    `if [ -e ${shellQuote(T3_RESTART_PENDING)} ]; then`,
+    "  systemctl --user restart t3code.service",
+    `  rm -f ${shellQuote(T3_RESTART_PENDING)} && t3_restarted=1`,
+    "fi",
+    'echo "setup_restarted=$setup_restarted t3_restarted=$t3_restarted"',
   ].join("\n");
 }

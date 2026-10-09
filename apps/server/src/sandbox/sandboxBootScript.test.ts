@@ -149,4 +149,46 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
   });
+
+  it("restarts T3 on the next refresh when a refresh died after swapping its env in", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-refresh-"));
+    const at = (path: string) => path.replace("/home/user", home);
+    const inputs = NodePath.dirname(at(SANDBOX_SETUP_ENV_FILE));
+    NodeFS.mkdirSync(inputs, { recursive: true });
+    const script = renderRefreshCredentialsCommand().replaceAll("/home/user", home);
+    NodeFS.writeFileSync(at(SANDBOX_ENV_FILE), "OLD=1\n");
+    const stage = (env: string) => {
+      NodeFS.writeFileSync(NodePath.join(inputs, "sandbox.env.next"), env);
+      NodeFS.writeFileSync(NodePath.join(inputs, "setup.env.next"), "");
+      NodeFS.writeFileSync(NodePath.join(inputs, "machine-setup.sh.next"), "");
+    };
+    const log = NodePath.join(home, "systemctl.log");
+    const refresh = (failUserRestart: boolean) =>
+      NodeChildProcess.spawnSync(
+        "bash",
+        [
+          "-c",
+          [
+            'sudo() { "$@"; }',
+            `systemctl() { echo "$*" >> ${JSON.stringify(log)}; ${
+              failUserRestart ? '[ "$1" != --user ]' : "true"
+            }; }`,
+            script,
+          ].join("\n"),
+        ],
+        { encoding: "utf8" },
+      );
+
+    stage("NEW=1\n");
+    expect(refresh(true).status).not.toBe(0);
+    NodeFS.writeFileSync(log, "");
+    stage("NEW=1\n");
+    const second = refresh(false);
+    const restarts = NodeFS.readFileSync(log, "utf8");
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(second.status).toBe(0);
+    expect(second.stdout.trim()).toBe("setup_restarted=0 t3_restarted=1");
+    expect(restarts).toBe("--user restart t3code.service\n");
+  });
 });
