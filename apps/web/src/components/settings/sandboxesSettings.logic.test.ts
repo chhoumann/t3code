@@ -86,4 +86,19 @@ describe("sandboxAccountSaveInput", () => {
       }),
     ).toEqual({ _tag: "Invalid", message });
   });
+
+  it.each(["MY-TOKEN", "1TOKEN", "MY TOKEN", ""])(
+    "refuses env variable name %j in plain words",
+    (name) => {
+      const result = sandboxAccountSaveInput(ID, {
+        ...sandboxAccountDraft(null, makeKey),
+        label: "Work",
+        env: [{ key: "row", name, value: "x", savedName: null, setupOnly: false }],
+      });
+      expect(result._tag).toBe("Invalid");
+      expect(result._tag === "Invalid" && result.message).toContain(
+        "is not a valid env variable name",
+      );
+    },
+  );
 });

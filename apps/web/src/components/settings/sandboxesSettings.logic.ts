@@ -1,9 +1,11 @@
-import type {
-  SandboxAccountConfig,
-  SandboxAccountId,
-  SandboxAccountSaveInput,
-  SandboxMachineSize,
+import {
+  type SandboxAccountConfig,
+  type SandboxAccountId,
+  type SandboxAccountSaveInput,
+  SandboxEnvName,
+  type SandboxMachineSize,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
 export const SANDBOX_SIZE_LABELS: Record<SandboxMachineSize, string> = {
   small: "Small",
@@ -60,6 +62,7 @@ export function sandboxAccountDraft(
 }
 
 const nullIfBlank = (value: string) => (value.trim().length === 0 ? null : value.trim());
+const isEnvName = Schema.is(SandboxEnvName);
 
 /**
  * The save request for a draft, or what is wrong with it. A saved env value
@@ -77,6 +80,13 @@ export function sandboxAccountSaveInput(
   const stopAfterHours = hours.length === 0 ? null : Number(hours);
   if (stopAfterHours !== null && !(Number.isFinite(stopAfterHours) && stopAfterHours > 0)) {
     return { _tag: "Invalid", message: "Stop after must be a number of hours above zero." };
+  }
+  const badName = draft.env.find((entry) => !isEnvName(entry.name.trim()));
+  if (badName !== undefined) {
+    return {
+      _tag: "Invalid",
+      message: `${badName.name.trim() || "An env variable"} is not a valid env variable name. Use letters, digits, and underscores, not starting with a digit.`,
+    };
   }
   const apiKey = draft.apiKey.trim();
   return {
