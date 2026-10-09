@@ -167,37 +167,40 @@ const agentProxyEnv = Effect.gen(function* () {
   ] satisfies AccountEnv;
 });
 
-const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv | null) =>
-  Layer.succeed(
+const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv | null) => {
+  const get = (accountId: SandboxAccountId) =>
+    accountId !== ACCOUNT_ID
+      ? Effect.fail(new SandboxAccounts.SandboxAccountNotFoundError({ accountId }))
+      : Effect.sync(() => ({
+          id: ACCOUNT_ID,
+          provider: "boat" as const,
+          apiKey,
+          env: [
+            ...(proxyEnv ?? [
+              { name: "ANTHROPIC_API_KEY", value: Redacted.make(""), setupOnly: false },
+            ]),
+            {
+              name: "T3_TRACER_ROUND",
+              value: Redacted.make(String(envRound)),
+              setupOnly: false,
+            },
+          ],
+          machineSetupScript: proxyEnv === null ? MACHINE_SETUP_SCRIPT : TAILSCALE_SETUP_SCRIPT,
+          template: null,
+          providerEnvironment: null,
+          size: "small" as const,
+          stopAfterHours: 1,
+        }));
+  return Layer.succeed(
     SandboxAccounts.SandboxAccounts,
     SandboxAccounts.SandboxAccounts.of({
-      get: (accountId) =>
-        accountId !== ACCOUNT_ID
-          ? Effect.fail(new SandboxAccounts.SandboxAccountNotFoundError({ accountId }))
-          : Effect.sync(() => ({
-              id: ACCOUNT_ID,
-              provider: "boat" as const,
-              apiKey,
-              env: [
-                ...(proxyEnv ?? [
-                  { name: "ANTHROPIC_API_KEY", value: Redacted.make(""), setupOnly: false },
-                ]),
-                {
-                  name: "T3_TRACER_ROUND",
-                  value: Redacted.make(String(envRound)),
-                  setupOnly: false,
-                },
-              ],
-              machineSetupScript: proxyEnv === null ? MACHINE_SETUP_SCRIPT : TAILSCALE_SETUP_SCRIPT,
-              template: null,
-              providerEnvironment: null,
-              size: "small" as const,
-              stopAfterHours: 1,
-            })),
+      get,
+      withAccount: (accountId, use) => get(accountId).pipe(Effect.flatMap(use)),
       save: () => Effect.die("The tracer's account is fixed."),
       remove: () => Effect.die("The tracer's account is fixed."),
     }),
   );
+};
 
 const secrets = new Map<string, Uint8Array>();
 const secretStoreLayer = Layer.succeed(

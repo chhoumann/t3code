@@ -749,57 +749,63 @@ const make = Effect.gen(function* () {
         yield* kick(input.id);
         return toView(existing.value);
       }
-      const account = yield* accounts.get(input.accountId);
-      const now = yield* Clock.currentTimeMillis;
-      const record: SandboxRecord = {
-        id: input.id,
-        accountId: input.accountId,
-        provider: account.provider,
-        spec: {
-          title: input.title,
-          message: input.message,
-          repository: input.repository,
-          driver: input.driver,
-          model: input.model,
-          runtimeMode: input.runtimeMode,
-          interactionMode: input.interactionMode,
-          machine: {
-            size: account.size,
-            ttlSeconds:
-              account.stopAfterHours === null ? null : Math.round(account.stopAfterHours * 3600),
-            template: account.template,
-            providerEnvironment: account.providerEnvironment,
-            setupScript: renderSandboxBootScript({
+      // Recorded under the account, so removing the account either sees this sandbox or runs first.
+      yield* accounts.withAccount(input.accountId, (account) =>
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          const record: SandboxRecord = {
+            id: input.id,
+            accountId: input.accountId,
+            provider: account.provider,
+            spec: {
+              title: input.title,
+              message: input.message,
+              repository: input.repository,
+              driver: input.driver,
+              model: input.model,
+              runtimeMode: input.runtimeMode,
+              interactionMode: input.interactionMode,
+              machine: {
+                size: account.size,
+                ttlSeconds:
+                  account.stopAfterHours === null
+                    ? null
+                    : Math.round(account.stopAfterHours * 3600),
+                template: account.template,
+                providerEnvironment: account.providerEnvironment,
+                setupScript: renderSandboxBootScript({
+                  t3: { kind: build.kind, version: build.version },
+                  label: input.title,
+                }),
+              },
               t3: { kind: build.kind, version: build.version },
-              label: input.title,
-            }),
-          },
-          t3: { kind: build.kind, version: build.version },
-        },
-        seed: {
-          projectId: ProjectId.make(yield* uuid),
-          threadId: ThreadId.make(yield* uuid),
-          commandId: CommandId.make(yield* uuid),
-          messageId: MessageId.make(yield* uuid),
-        },
-        desired: "running",
-        desiredRevision: 1,
-        status: { _tag: "creating" },
-        settledRevision: 0,
-        inflight: null,
-        createKey: `t3-sandbox-${input.id}-${yield* uuid}`,
-        createFirstAttemptAt: null,
-        machineId: null,
-        httpBaseUrl: null,
-        environmentId: null,
-        runningSince: null,
-        inputsWrittenAt: null,
-        credentialsStale: false,
-        seedLaunchedAt: null,
-        createdAt: now,
-      };
-      yield* sql`INSERT INTO sandboxes ${sql.insert({ ...commandColumnsOf(record), ...reconcilerColumnsOf(record), updated_at: now })} ON CONFLICT (sandbox_id) DO NOTHING`.pipe(
-        persistence,
+            },
+            seed: {
+              projectId: ProjectId.make(yield* uuid),
+              threadId: ThreadId.make(yield* uuid),
+              commandId: CommandId.make(yield* uuid),
+              messageId: MessageId.make(yield* uuid),
+            },
+            desired: "running",
+            desiredRevision: 1,
+            status: { _tag: "creating" },
+            settledRevision: 0,
+            inflight: null,
+            createKey: `t3-sandbox-${input.id}-${yield* uuid}`,
+            createFirstAttemptAt: null,
+            machineId: null,
+            httpBaseUrl: null,
+            environmentId: null,
+            runningSince: null,
+            inputsWrittenAt: null,
+            credentialsStale: false,
+            seedLaunchedAt: null,
+            createdAt: now,
+          };
+          yield* sql`INSERT INTO sandboxes ${sql.insert({ ...commandColumnsOf(record), ...reconcilerColumnsOf(record), updated_at: now })} ON CONFLICT (sandbox_id) DO NOTHING`.pipe(
+            persistence,
+          );
+        }),
       );
       const stored = yield* readRecord(input.id);
       if (Option.isNone(stored))

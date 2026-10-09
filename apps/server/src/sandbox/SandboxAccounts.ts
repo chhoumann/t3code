@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -116,6 +117,14 @@ export class SandboxAccounts extends Context.Service<
     readonly get: (
       accountId: SandboxAccountId,
     ) => Effect.Effect<SandboxAccount, SandboxAccountNotFoundError>;
+    /**
+     * Runs `use` with the account while no removal can run, so a sandbox
+     * recorded by `use` is counted by any removal that follows.
+     */
+    readonly withAccount: <A, E, R>(
+      accountId: SandboxAccountId,
+      use: (account: SandboxAccount) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | SandboxAccountNotFoundError, R>;
     /** Checks the key can run sandboxes before anything is stored. */
     readonly save: (
       input: SandboxAccountSaveInput,
@@ -146,6 +155,7 @@ const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const sql = yield* SqlClient.SqlClient;
   const provider = yield* SandboxProvider;
+  const removalLock = yield* Semaphore.make(1);
 
   const readSecret = (name: string) =>
     secrets.get(name).pipe(Effect.map(Option.map((bytes) => textDecoder.decode(bytes))));
@@ -230,6 +240,7 @@ const make = Effect.gen(function* () {
         machineSetupScript: input.machineSetupScript,
         env: env.map(({ name, setupOnly }) => ({ name, setupOnly })),
       };
+      let dropped: ReadonlyArray<string> = [];
       yield* settings
         .updateSandboxAccounts((accounts) =>
           Effect.gen(function* () {
@@ -237,15 +248,17 @@ const make = Effect.gen(function* () {
             for (const entry of env) {
               yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
             }
-            for (const { name } of accounts[id]?.env ?? []) {
-              if (!env.some((entry) => entry.name === name)) {
-                yield* secrets.remove(envSecretName(id, name));
-              }
-            }
+            dropped = (accounts[id]?.env ?? [])
+              .map(({ name }) => name)
+              .filter((name) => !env.some((entry) => entry.name === name));
             return { ...accounts, [id]: config };
           }),
         )
         .pipe(store);
+      // Only once the settings no longer name them, or a failed write leaves names without values.
+      for (const name of dropped) {
+        yield* secrets.remove(envSecretName(id, name)).pipe(store);
+      }
       return config;
     });
 
@@ -253,54 +266,65 @@ const make = Effect.gen(function* () {
     const store = Effect.mapError(
       (cause: unknown) => new SandboxAccountStoreError({ accountId, cause }),
     );
-    return settings
-      .updateSandboxAccounts((accounts) =>
-        Effect.gen(function* () {
-          const config = accounts[accountId];
-          if (config === undefined) return accounts;
-          // A sandbox still being destroyed needs its account's key to finish.
-          const [row] = yield* sql<{ readonly live: number }>`
-            SELECT COUNT(*) AS live FROM sandboxes
-            WHERE account_id = ${accountId} AND json_extract(status_json, '$._tag') <> 'destroyed'`.pipe(
-            store,
-          );
-          const live = row?.live ?? 0;
-          if (live > 0) return yield* new SandboxAccountInUseError({ accountId, sandboxes: live });
-          yield* secrets.remove(apiKeySecretName(accountId)).pipe(store);
-          for (const { name } of config.env) {
-            yield* secrets.remove(envSecretName(accountId, name)).pipe(store);
-          }
-          const { [accountId]: _removed, ...rest } = accounts;
-          return rest;
-        }),
-      )
-      .pipe(
-        Effect.asVoid,
-        Effect.catchTags({
-          ServerSettingsError: (cause) =>
-            Effect.fail(new SandboxAccountStoreError({ accountId, cause })),
-        }),
-      );
+    return Effect.gen(function* () {
+      let removed: SandboxAccountConfig | undefined;
+      yield* settings
+        .updateSandboxAccounts((accounts) =>
+          Effect.gen(function* () {
+            const config = accounts[accountId];
+            if (config === undefined) return accounts;
+            // A sandbox still being destroyed needs its account's key to finish.
+            const [row] = yield* sql<{ readonly live: number }>`
+              SELECT COUNT(*) AS live FROM sandboxes
+              WHERE account_id = ${accountId} AND json_extract(status_json, '$._tag') <> 'destroyed'`.pipe(
+              store,
+            );
+            const live = row?.live ?? 0;
+            if (live > 0)
+              return yield* new SandboxAccountInUseError({ accountId, sandboxes: live });
+            removed = config;
+            const { [accountId]: _removed, ...rest } = accounts;
+            return rest;
+          }),
+        )
+        .pipe(
+          Effect.catchTags({
+            ServerSettingsError: (cause) =>
+              Effect.fail(new SandboxAccountStoreError({ accountId, cause })),
+          }),
+        );
+      if (removed === undefined) return;
+      yield* secrets.remove(apiKeySecretName(accountId)).pipe(store);
+      for (const { name } of removed.env) {
+        yield* secrets.remove(envSecretName(accountId, name)).pipe(store);
+      }
+    }).pipe(removalLock.withPermits(1));
   };
 
-  return SandboxAccounts.of({ get, save, remove });
+  const withAccount: SandboxAccounts["Service"]["withAccount"] = (accountId, use) =>
+    get(accountId).pipe(Effect.flatMap(use), removalLock.withPermits(1));
+
+  return SandboxAccounts.of({ get, withAccount, save, remove });
 });
 
 /** Accounts kept in the server settings, with their secrets in the secret store. */
 export const layer = Layer.effect(SandboxAccounts, make);
 
 /** Accounts fixed at construction, for tests that never edit them. */
-export const layerStatic = (accounts: ReadonlyArray<SandboxAccount>) =>
-  Layer.succeed(
+export const layerStatic = (accounts: ReadonlyArray<SandboxAccount>) => {
+  const get = (accountId: SandboxAccountId) => {
+    const account = accounts.find((candidate) => candidate.id === accountId);
+    return account === undefined
+      ? Effect.fail(new SandboxAccountNotFoundError({ accountId }))
+      : Effect.succeed(account);
+  };
+  return Layer.succeed(
     SandboxAccounts,
     SandboxAccounts.of({
-      get: (accountId) => {
-        const account = accounts.find((candidate) => candidate.id === accountId);
-        return account === undefined
-          ? Effect.fail(new SandboxAccountNotFoundError({ accountId }))
-          : Effect.succeed(account);
-      },
+      get,
+      withAccount: (accountId, use) => get(accountId).pipe(Effect.flatMap(use)),
       save: () => Effect.die("layerStatic accounts cannot be edited."),
       remove: () => Effect.die("layerStatic accounts cannot be edited."),
     }),
   );
+};

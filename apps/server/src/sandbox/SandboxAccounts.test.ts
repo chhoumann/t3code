@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
-import { SandboxAccountId } from "@t3tools/contracts";
+import { SandboxAccountId, ServerSettingsError } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -19,6 +21,8 @@ const makeWorld = () => {
     secrets: new Map<string, Uint8Array>(),
     missingActions: [] as ReadonlyArray<string>,
     checkedKeys: [] as Array<string>,
+    /** Fails the next settings write after its update has run, as a failed file write would. */
+    failSettingsWrite: false,
   };
   const unused = () => Effect.die("unused");
   const provider = SandboxProvider.of({
@@ -43,8 +47,32 @@ const makeWorld = () => {
     getOrCreateRandom: unused,
     remove: (name) => Effect.sync(() => void world.secrets.delete(name)),
   });
+  const settingsLayer = Layer.effect(
+    ServerSettings.ServerSettingsService,
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      return ServerSettings.ServerSettingsService.of({
+        ...settings,
+        updateSandboxAccounts: (update) =>
+          settings.updateSandboxAccounts((accounts) =>
+            update(accounts).pipe(
+              Effect.tap(() => {
+                if (!world.failSettingsWrite) return Effect.void;
+                world.failSettingsWrite = false;
+                return Effect.fail(
+                  new ServerSettingsError({
+                    settingsPath: "settings.json",
+                    operation: "write-file",
+                  }),
+                );
+              }),
+            ),
+          ),
+      });
+    }),
+  ).pipe(Layer.provide(ServerSettings.layerTest()));
   const layer = SandboxAccounts.layer.pipe(
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(settingsLayer),
     Layer.provide(Layer.succeed(SandboxProvider, provider)),
     Layer.provide(Layer.succeed(ServerSecretStore.ServerSecretStore, secretStore)),
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -204,6 +232,79 @@ describe("SandboxAccounts", () => {
       assert.strictEqual(gone._tag, "SandboxAccountNotFoundError");
       assert.strictEqual(world.secrets.size, 0);
       yield* accounts.remove(ID);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps a dropped env value until the settings that drop it are written", () => {
+    const { world, layer } = makeWorld();
+    return Effect.gen(function* () {
+      const accounts = yield* SandboxAccounts.SandboxAccounts;
+      yield* accounts.save({
+        ...input,
+        apiKey: "key",
+        env: [
+          { name: "TOKEN", value: "token" },
+          { name: "DROPPED", value: "dropped-value" },
+        ],
+      });
+      world.failSettingsWrite = true;
+      const failed = yield* accounts.save({ ...input, env: [{ name: "TOKEN" }] }).pipe(Effect.flip);
+      assert.strictEqual(failed._tag, "SandboxAccountStoreError");
+
+      const account = yield* accounts.get(ID);
+      assert.deepStrictEqual(
+        account.env.map((entry) => [entry.name, Redacted.value(entry.value)]),
+        [
+          ["TOKEN", "token"],
+          ["DROPPED", "dropped-value"],
+        ],
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("removes an account only before or after a sandbox is recorded under it", () => {
+    const { layer } = makeWorld();
+    return Effect.gen(function* () {
+      const accounts = yield* SandboxAccounts.SandboxAccounts;
+      const sql = yield* SqlClient.SqlClient;
+      yield* accounts.save({ ...input, apiKey: "key", env: [] });
+      const reading = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const launching = yield* Effect.forkChild(
+        accounts.withAccount(ID, () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(reading, undefined);
+            yield* Deferred.await(release);
+            yield* sql`
+              INSERT INTO sandboxes ${sql.insert({
+                sandbox_id: "sbx-1",
+                account_id: ID,
+                provider: "boat",
+                spec_json: "{}",
+                seed_json: "{}",
+                desired: "running",
+                desired_revision: 1,
+                status_json: JSON.stringify({ _tag: "creating" }),
+                settled_revision: 0,
+                create_key: "key",
+                credentials_stale: 0,
+                created_at: 0,
+                updated_at: 0,
+              })}`;
+          }),
+        ),
+      );
+      yield* Deferred.await(reading);
+      const removing = yield* Effect.forkChild(accounts.remove(ID).pipe(Effect.flip));
+      for (let turn = 0; turn < 100 && removing.pollUnsafe() === undefined; turn++) {
+        yield* Effect.yieldNow;
+      }
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(launching);
+
+      const refused = yield* Fiber.join(removing);
+      assert.deepInclude(refused, { _tag: "SandboxAccountInUseError", sandboxes: 1 });
+      assert.isOk((yield* accounts.get(ID)).apiKey);
     }).pipe(Effect.provide(layer));
   });
 });
