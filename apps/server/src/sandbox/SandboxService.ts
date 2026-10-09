@@ -339,11 +339,12 @@ const isProviderError = Schema.is(SandboxProviderError);
 const isDefinitiveRefusal = (error: StepError) =>
   isProviderError(error) && error.kind !== "transient" && error.kind !== "not-found";
 
+/** Only a create the provider refused as malformed is refused again however often it is asked. */
 const failedStatus = (step: SandboxFailedStep, error: StepError): SandboxStatus => ({
   _tag: "failed",
   step,
   message: error.message,
-  retryable: !(isProviderError(error) && error.kind === "invalid"),
+  retryable: !(step === "create" && isProviderError(error) && error.kind === "invalid"),
 });
 
 const statusKey = Schema.encodeSync(Schema.fromJsonString(SandboxStatus));
@@ -671,6 +672,8 @@ const make = Effect.gen(function* () {
           yield* writeFacts(current.value, {
             status: failedStatus(FAILED_STEP[next.action._tag], error),
             settledRevision: record.desiredRevision,
+            // A refused call had no effect, so asking again need not wait for it to show.
+            ...(isDefinitiveRefusal(error) ? { inflight: null } : {}),
           });
         }
         return "park" as const;

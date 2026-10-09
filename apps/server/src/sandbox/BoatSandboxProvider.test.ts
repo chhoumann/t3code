@@ -148,6 +148,17 @@ describe("BoatSandboxProvider", () => {
     }),
   );
 
+  it.effect("retries a conflict, such as a resume while a stop is still landing", () =>
+    Effect.gen(function* () {
+      const { exit, seen } = yield* run(
+        [() => boatError(409, "sandbox_busy"), () => new Response(JSON.stringify({ ok: true }))],
+        (provider) => provider.resume(account, machineId),
+      );
+      expect(exit._tag).toBe("Success");
+      expect(seen).toHaveLength(2);
+    }),
+  );
+
   it.effect("reports plan limits as limits without retrying", () =>
     Effect.gen(function* () {
       const { exit, seen } = yield* run([() => boatError(429, "limit_reached")], (provider) =>

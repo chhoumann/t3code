@@ -556,6 +556,29 @@ describe("SandboxService", () => {
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
+  it.effect("lets a refused delete be asked again", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-refused-delete");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        world.failNextDestroy = "invalid";
+
+        yield* sandboxes.update({ id, desired: "destroyed" });
+        const failed = yield* awaitStatus(id, "failed");
+        assert.deepInclude(failed.status, { step: "destroy", retryable: true });
+
+        yield* sandboxes.update({ id, desired: "destroyed" });
+        yield* awaitGone(id);
+        assert.strictEqual(world.machines.size, 0);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
   it.effect("mints a new owner session when the sandbox no longer accepts the stored one", () =>
     Effect.gen(function* () {
       const { world, start } = makeWorld();

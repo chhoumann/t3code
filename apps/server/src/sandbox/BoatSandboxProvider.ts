@@ -95,7 +95,10 @@ function classifyBoatError(input: {
 }): SandboxProviderErrorKind {
   const code = input.code ?? "";
   if (LIMIT_CODES.has(code) || input.status === 402) return "limit";
-  if (input.retryable || TRANSIENT_CODES.has(code) || input.status >= 500) return "transient";
+  // A conflict is the machine's state for now, such as a stop still landing; asking again later succeeds.
+  if (input.retryable || TRANSIENT_CODES.has(code) || input.status === 409 || input.status >= 500) {
+    return "transient";
+  }
   if (input.status === 401) return "unauthorized";
   if (input.status === 403) return "missing-scope";
   if (input.status === 404) return "not-found";
