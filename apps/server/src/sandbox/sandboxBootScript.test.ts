@@ -197,4 +197,21 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(second.stdout.trim()).toBe("setup_restarted=0 t3_restarted=1");
     expect(restarts).toBe("--user restart t3code.service\n");
   });
+
+  it("runs a failed machine setup again on the next refresh", () => {
+    const { home, stage, log, refresh } = refreshFixture();
+    stage("OLD=1\n", "TOKEN=new\n");
+    const first = refresh('[ "$2" = t3-sandbox-machine-setup.service ]');
+    expect(first.status).toBe(0);
+    expect(first.stdout.trim()).toBe("setup_restarted=0 t3_restarted=0");
+
+    NodeFS.writeFileSync(log, "");
+    stage("OLD=1\n", "TOKEN=new\n");
+    const second = refresh();
+    const restarts = NodeFS.readFileSync(log, "utf8");
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(second.stdout.trim()).toBe("setup_restarted=1 t3_restarted=0");
+    expect(restarts).toBe("restart t3-sandbox-machine-setup.service\n");
+  });
 });

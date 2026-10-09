@@ -227,9 +227,11 @@ export function renderRefreshCredentialsCommand(): string {
     ]),
     "setup_restarted=0",
     "t3_restarted=0",
+    // A failed setup still lets T3 restart; its marker stays, so the next refresh runs it again.
     `if [ -e ${shellQuote(SETUP_RESTART_PENDING)} ]; then`,
-    `  sudo systemctl restart ${MACHINE_SETUP_UNIT} || echo "machine setup failed" >&2`,
-    `  rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
+    `  if sudo systemctl restart ${MACHINE_SETUP_UNIT}; then`,
+    `    rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
+    '  else echo "machine setup failed" >&2; fi',
     "fi",
     `if [ -e ${shellQuote(T3_RESTART_PENDING)} ]; then`,
     "  systemctl --user restart t3code.service",
