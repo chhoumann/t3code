@@ -4,6 +4,7 @@ import {
   SANDBOX_STATUS_LABEL,
   sandboxLandingThreadId,
   sandboxLaunchStageIndex,
+  sandboxLaunchStatusLabel,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -140,11 +141,7 @@ function SandboxProgress(props: {
   }
 
   if (stage === null) {
-    return (
-      <p className="text-muted-foreground text-sm">
-        {view.status._tag === "ready" ? "Opening thread" : SANDBOX_STATUS_LABEL[view.status._tag]}
-      </p>
-    );
+    return <p className="text-muted-foreground text-sm">{sandboxLaunchStatusLabel(view.status)}</p>;
   }
 
   return (

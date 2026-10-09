@@ -4,7 +4,9 @@ import {
   SandboxAccountId,
   type SandboxAccountConfig,
   SandboxError,
+  SandboxId,
   type SandboxStatus,
+  type SandboxView,
   ThreadId,
   type VcsStatusResult,
 } from "@t3tools/contracts";
@@ -12,10 +14,12 @@ import * as DateTime from "effect/DateTime";
 
 import {
   isSandboxStopped,
+  pendingSandboxThreads,
   sandboxAccountChoices,
   sandboxFailureMessage,
   sandboxLandingThreadId,
   sandboxLaunchStageIndex,
+  sandboxProjectGrouping,
   sandboxRepositoryFor,
 } from "./sandboxes.ts";
 
@@ -201,5 +205,149 @@ describe("sandboxLandingThreadId", () => {
 
   it("has nothing to open before the sandbox lists an active thread", () => {
     expect(sandboxLandingThreadId([], SEED)).toBeNull();
+  });
+});
+
+describe("pendingSandboxThreads", () => {
+  const SANDBOX_ENVIRONMENT = EnvironmentId.make("environment-sandbox");
+  const sandbox = (
+    id: string,
+    createdAt: string,
+    overrides: Partial<Pick<SandboxView, "desired" | "status" | "environmentId">> = {},
+  ): SandboxView => ({
+    id: SandboxId.make(id),
+    accountId: SandboxAccountId.make("work"),
+    title: id,
+    message: "Fix the flaky test",
+    repository: { remoteUrl: REMOTE, commit: HEAD },
+    threadId: ThreadId.make(`seed-${id}`),
+    desired: "running",
+    status: { _tag: "creating" },
+    environmentId: null,
+    httpBaseUrl: null,
+    createdAt,
+    ...overrides,
+  });
+  const seed = (view: SandboxView, overrides: { archived?: boolean } = {}) => ({
+    id: view.threadId,
+    updatedAt: DateTime.makeUnsafe(view.createdAt),
+    archivedAt: overrides.archived ? DateTime.makeUnsafe(view.createdAt) : null,
+    deletedAt: null,
+    lineage: { parentThreadId: null },
+  });
+  const ids = (pending: ReturnType<typeof pendingSandboxThreads>) =>
+    pending.map(({ ownerEnvironmentId, view }) => `${ownerEnvironmentId}/${view.id}`);
+
+  it("lists a sandbox from launch until its environment lists its thread", () => {
+    const launching = sandbox("launching", "2026-10-09T12:00:00Z", {
+      status: { _tag: "launching" },
+    });
+    const readyNotSynced = sandbox("ready", "2026-10-09T12:00:00Z", {
+      status: { _tag: "ready" },
+      environmentId: SANDBOX_ENVIRONMENT,
+    });
+    const owners = new Map([[OWNER, [launching, readyNotSynced]]]);
+    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
+      "environment-owner/launching",
+      "environment-owner/ready",
+    ]);
+    expect(
+      ids(
+        pendingSandboxThreads(owners, (environmentId) =>
+          environmentId === SANDBOX_ENVIRONMENT ? [seed(readyNotSynced)] : [],
+        ),
+      ),
+    ).toEqual(["environment-owner/launching"]);
+  });
+
+  it("gives way to whichever thread the sandbox opens on, not only its first", () => {
+    const ready = sandbox("ready", "2026-10-09T12:00:00Z", {
+      status: { _tag: "ready" },
+      environmentId: SANDBOX_ENVIRONMENT,
+    });
+    const owners = new Map([[OWNER, [ready]]]);
+    const other = { ...seed(ready), id: ThreadId.make("thread-other") };
+    expect(pendingSandboxThreads(owners, () => [seed(ready, { archived: true }), other])).toEqual(
+      [],
+    );
+    expect(ids(pendingSandboxThreads(owners, () => [seed(ready, { archived: true })]))).toEqual([
+      "environment-owner/ready",
+    ]);
+  });
+
+  it("keeps a failed sandbox until it is retried or deleted", () => {
+    const failed = (desired: SandboxView["desired"]) =>
+      sandbox(`failed-${desired}`, "2026-10-09T12:00:00Z", {
+        desired,
+        status: { _tag: "failed", step: "boot", message: "boom", retryable: true },
+      });
+    const owners = new Map([[OWNER, [failed("running"), failed("destroyed"), failed("stopped")]]]);
+    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
+      "environment-owner/failed-destroyed",
+      "environment-owner/failed-running",
+    ]);
+  });
+
+  it("leaves out sandboxes that are stopping, stopped, or deleted", () => {
+    const owners = new Map([
+      [
+        OWNER,
+        [
+          sandbox("stopping", "2026-10-09T12:00:00Z", {
+            desired: "stopped",
+            status: { _tag: "stopping" },
+          }),
+          sandbox("archived", "2026-10-09T12:00:00Z", {
+            desired: "stopped",
+            status: { _tag: "ready" },
+          }),
+          sandbox("stopped", "2026-10-09T12:00:00Z", {
+            desired: "stopped",
+            status: { _tag: "stopped", reason: "requested" },
+          }),
+          sandbox("destroying", "2026-10-09T12:00:00Z", {
+            desired: "destroyed",
+            status: { _tag: "destroying" },
+          }),
+          sandbox("destroyed", "2026-10-09T12:00:00Z", {
+            desired: "destroyed",
+            status: { _tag: "destroyed" },
+          }),
+          sandbox("resuming", "2026-10-09T12:00:00Z", { status: { _tag: "resuming" } }),
+        ],
+      ],
+    ]);
+    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual(["environment-owner/resuming"]);
+  });
+
+  it("orders every owner's sandboxes newest first", () => {
+    const otherOwner = EnvironmentId.make("environment-other-owner");
+    const owners = new Map([
+      [
+        OWNER,
+        [
+          sandbox("oldest", "2026-10-09T10:00:00Z"),
+          sandbox("newest", "2026-10-09T13:00:00Z", { status: { _tag: "booting" } }),
+        ],
+      ],
+      [otherOwner, [sandbox("middle", "2026-10-09T12:00:00Z")]],
+    ]);
+    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
+      "environment-owner/newest",
+      "environment-other-owner/middle",
+      "environment-owner/oldest",
+    ]);
+  });
+});
+
+describe("sandboxProjectGrouping", () => {
+  it("groups under the cloned remote however it is spelled", () => {
+    expect(sandboxProjectGrouping({ remoteUrl: REMOTE, commit: HEAD })).toEqual({
+      key: "github.com/octocat/hello-world",
+      label: "octocat/hello-world",
+    });
+    expect(
+      sandboxProjectGrouping({ remoteUrl: "git@github.com:Octocat/Hello-World.git", commit: null }),
+    ).toEqual(sandboxProjectGrouping({ remoteUrl: REMOTE, commit: HEAD }));
   });
 });

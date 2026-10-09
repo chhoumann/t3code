@@ -11,6 +11,7 @@ import {
   type ThreadId,
   type VcsStatusResult,
 } from "@t3tools/contracts";
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -93,6 +94,11 @@ export function sandboxLaunchStageIndex(status: SandboxStatus): number | null {
   return index === -1 ? null : index;
 }
 
+/** What a sandbox on its way to its thread is doing. Ready means the thread is about to open. */
+export function sandboxLaunchStatusLabel(status: SandboxStatus): string {
+  return status._tag === "ready" ? "Opening thread" : SANDBOX_STATUS_LABEL[status._tag];
+}
+
 type LandingCandidate = Pick<
   OrchestrationV2ThreadShell,
   "id" | "archivedAt" | "deletedAt" | "updatedAt"
@@ -117,6 +123,72 @@ export function sandboxLandingThreadId(
     }
   }
   return latest?.id ?? null;
+}
+
+/**
+ * A sandbox listed in place of its thread: meant to run, or failed on the
+ * way, while none of its environment's threads has reached this client.
+ * Every client of the owner derives it from the owner's list.
+ */
+export interface PendingSandboxThread {
+  readonly ownerEnvironmentId: EnvironmentId;
+  readonly view: SandboxView;
+}
+
+/**
+ * The sandboxes to list until their thread arrives, newest first. A sandbox
+ * stops being pending once its environment lists the thread its launch view
+ * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
+ * Stopped sandboxes stand in for their threads elsewhere, and deleted ones
+ * are gone, so neither is pending.
+ */
+const AWAITING_THREAD: ReadonlySet<SandboxStatus["_tag"]> = new Set([
+  ...SANDBOX_LAUNCH_STAGES,
+  "ready",
+  "resuming",
+]);
+
+export function pendingSandboxThreads(
+  owners: SandboxOwners,
+  threadsOf: (environmentId: EnvironmentId) => ReadonlyArray<LandingCandidate>,
+): ReadonlyArray<PendingSandboxThread> {
+  const pending: PendingSandboxThread[] = [];
+  for (const [ownerEnvironmentId, views] of owners) {
+    for (const view of views) {
+      const awaited =
+        view.status._tag === "failed"
+          ? view.desired !== "stopped"
+          : view.desired === "running" && AWAITING_THREAD.has(view.status._tag);
+      if (!awaited) continue;
+      if (
+        view.environmentId !== null &&
+        sandboxLandingThreadId(threadsOf(view.environmentId), view.threadId) !== null
+      ) {
+        continue;
+      }
+      pending.push({ ownerEnvironmentId, view });
+    }
+  }
+  return pending.sort(
+    (left, right) =>
+      right.view.createdAt.localeCompare(left.view.createdAt) ||
+      left.view.id.localeCompare(right.view.id),
+  );
+}
+
+/**
+ * The project group a sandbox's thread joins: the sandbox clones its remote,
+ * so its project's repository identity is that remote's. The key matches a
+ * repository-grouped project's key; the label is what a group of only the
+ * sandbox's project shows.
+ */
+export function sandboxProjectGrouping(repository: SandboxRepository): {
+  readonly key: string;
+  readonly label: string;
+} {
+  const key = normalizeGitRemoteUrl(repository.remoteUrl);
+  const path = key.split("/").slice(1).join("/");
+  return { key, label: path.length > 0 ? path : key };
 }
 
 export interface SandboxAccountChoice {
