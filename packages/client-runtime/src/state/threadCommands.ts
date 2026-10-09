@@ -12,7 +12,9 @@ import {
 import {
   type SandboxOwnerChange,
   createSandboxEnvironmentAtoms,
-  routeSandboxThreadLifecycle,
+  onceConnected,
+  routeSandboxArchive,
+  routeSandboxUnarchive,
   runAtomCommand,
 } from "./sandboxCommands.ts";
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
@@ -89,6 +91,7 @@ import {
   startThreadTurn,
   stopThreadSession,
   unarchiveThread,
+  unarchiveThreadIfArchived,
   unlinkThreadPullRequest,
   unpinThread,
   unsettleThread,
@@ -176,10 +179,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     archive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:archive",
-      execute: (input: ArchiveThreadInput, registry, environmentId) =>
-        routeSandboxThreadLifecycle({
-          action: "archive",
-          environmentId,
+      execute: (input: ArchiveThreadInput, registry) =>
+        routeSandboxArchive({
           run: archiveThread(input),
           toOwner: (change) => updateSandbox(registry, change),
         }),
@@ -189,10 +190,11 @@ export function createThreadEnvironmentAtoms<R, E>(
     unarchive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unarchive",
       execute: (input: UnarchiveThreadInput, registry, environmentId) =>
-        routeSandboxThreadLifecycle({
-          action: "unarchive",
+        routeSandboxUnarchive({
           environmentId,
           run: unarchiveThread(input),
+          // A sandbox that stopped at its TTL kept its threads active.
+          whenBack: onceConnected(environmentId, unarchiveThreadIfArchived(input)),
           toOwner: (change) => updateSandbox(registry, change),
         }),
       scheduler,

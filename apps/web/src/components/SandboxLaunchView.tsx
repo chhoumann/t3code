@@ -5,15 +5,13 @@ import {
   SANDBOX_STATUS_LABEL,
   sandboxLaunchStageIndex,
 } from "@t3tools/client-runtime/state/sandboxes";
-import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, CircleIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo } from "react";
 
 import { isElectron } from "../env";
 import { useSandboxActions } from "../hooks/useSandboxActions";
-import { useThreadActions } from "../hooks/useThreadActions";
 import { useThreadShell } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { sandboxes } from "../state/sandboxes";
@@ -31,14 +29,12 @@ import { cn } from "~/lib/utils";
 export function SandboxLaunchView(props: {
   readonly ownerEnvironmentId: EnvironmentId;
   readonly sandboxId: SandboxId;
-  /** Set when resuming from Archived: the thread comes back with the sandbox. */
-  readonly unarchive: boolean;
 }) {
   const owners = useAtomValue(sandboxes.ownersAtom);
   const view =
     owners.get(props.ownerEnvironmentId)?.find((sandbox) => sandbox.id === props.sandboxId) ?? null;
   const listed = owners.has(props.ownerEnvironmentId);
-  useHandOffToThread(view, props.unarchive);
+  useHandOffToThread(view);
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
@@ -77,9 +73,8 @@ export function SandboxLaunchView(props: {
  * Replaces this route with the sandbox's thread once its environment knows
  * the thread, so the thread view never opens on an empty state.
  */
-function useHandOffToThread(view: SandboxView | null, unarchive: boolean) {
+function useHandOffToThread(view: SandboxView | null) {
   const navigate = useNavigate();
-  const { unarchiveThread } = useThreadActions();
   const environmentId = view?.environmentId ?? null;
   const threadId = view?.threadId ?? null;
   const environment = useEnvironment(environmentId);
@@ -90,26 +85,15 @@ function useHandOffToThread(view: SandboxView | null, unarchive: boolean) {
   );
   const thread = useThreadShell(threadRef);
   const ready = view?.status._tag === "ready" && environment?.connection.phase === "connected";
-  const unarchiveStartedRef = useRef(false);
 
   useEffect(() => {
-    if (!ready || threadRef === null) return;
-    if (thread !== null) {
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
-        replace: true,
-      });
-      return;
-    }
-    if (!unarchive || unarchiveStartedRef.current) return;
-    unarchiveStartedRef.current = true;
-    void unarchiveThread(threadRef).then((result) => {
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        unarchiveStartedRef.current = false;
-      }
+    if (!ready || threadRef === null || thread === null) return;
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+      replace: true,
     });
-  }, [navigate, ready, thread, threadRef, unarchive, unarchiveThread]);
+  }, [navigate, ready, thread, threadRef]);
 }
 
 function SandboxProgress(props: {
