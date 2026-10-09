@@ -46,6 +46,7 @@ import {
   encodeManagedSandboxMarker,
 } from "./ManagedSandbox.ts";
 import {
+  CLOSE_EXEC_LOCK,
   SANDBOX_ENV_FILE,
   SANDBOX_EXEC_LOCK_LINES,
   SANDBOX_INPUTS_READY_FILE,
@@ -191,10 +192,10 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
     `set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a`,
     `if [ ! -d ${path}/.git ]; then`,
     `  rm -rf ${partial}`,
-    `  git clone --quiet -- ${shellQuote(checkout.remoteUrl)} ${partial}`,
+    `  git clone --quiet -- ${shellQuote(checkout.remoteUrl)} ${partial} ${CLOSE_EXEC_LOCK}`,
     `  git -C ${partial} checkout --quiet -b ${shellQuote(checkout.branch)}${
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
-    }`,
+    } ${CLOSE_EXEC_LOCK}`,
     `  mv ${partial} ${path}`,
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,

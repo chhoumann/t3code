@@ -67,11 +67,16 @@ export type SandboxT3Source = typeof SandboxT3Source.Type;
 /** Single-quotes a value for bash. */
 export const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-/** Takes the exec lock for the rest of the command. */
+/**
+ * Takes the exec lock for the rest of the command. A command that may leave
+ * a process behind (git's credential cache daemon, say) runs with
+ * `CLOSE_EXEC_LOCK`, or that process holds the lock after the command ends.
+ */
 export const SANDBOX_EXEC_LOCK_LINES: ReadonlyArray<string> = [
   `exec 9>>${shellQuote(SANDBOX_EXEC_LOCK)}`,
   "flock 9",
 ];
+export const CLOSE_EXEC_LOCK = "9>&-";
 
 /**
  * One `NAME="value"` line per variable. Double quotes with `\ " $ \`` escaped
@@ -233,12 +238,12 @@ export function renderRefreshCredentialsCommand(): string {
     // A failed setup still lets T3 restart, then fails the refresh. Its marker stays, so the
     // refresh a Retry runs re-runs it.
     `if [ -e ${shellQuote(SETUP_RESTART_PENDING)} ]; then`,
-    `  if sudo systemctl restart ${MACHINE_SETUP_UNIT}; then`,
+    `  if sudo systemctl restart ${MACHINE_SETUP_UNIT} ${CLOSE_EXEC_LOCK}; then`,
     `    rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
     "  else setup_failed=1; fi",
     "fi",
     `if [ -e ${shellQuote(T3_RESTART_PENDING)} ]; then`,
-    "  systemctl --user restart t3code.service",
+    `  systemctl --user restart t3code.service ${CLOSE_EXEC_LOCK}`,
     `  rm -f ${shellQuote(T3_RESTART_PENDING)} && t3_restarted=1`,
     "fi",
     'echo "setup_restarted=$setup_restarted t3_restarted=$t3_restarted"',

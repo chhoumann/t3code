@@ -165,8 +165,11 @@ describe("renderRefreshCredentialsCommand", () => {
       NodeFS.writeFileSync(NodePath.join(inputs, "machine-setup.sh.next"), "");
     };
     const log = NodePath.join(home, "systemctl.log");
-    /** `failing` is a bash test on the systemctl arguments that makes the call fail. */
-    const refresh = (failing = "false") =>
+    /**
+     * `failing` is a bash test on the systemctl arguments that makes the call
+     * fail. `leaveBehind` makes each call leave a process running after it.
+     */
+    const refresh = (failing = "false", leaveBehind = false) =>
       NodeChildProcess.spawnSync(
         "bash",
         [
@@ -174,11 +177,13 @@ describe("renderRefreshCredentialsCommand", () => {
           [
             FLOCK_SHIM,
             'sudo() { "$@"; }',
-            `systemctl() { echo "$*" >> ${JSON.stringify(log)}; ! ${failing}; }`,
+            `systemctl() { echo "$*" >> ${JSON.stringify(log)}; ${
+              leaveBehind ? "sleep 10 >/dev/null 2>&1 &" : ""
+            } ! ${failing}; }`,
             script,
           ].join("\n"),
         ],
-        { encoding: "utf8" },
+        { encoding: "utf8", timeout: 5_000 },
       );
     return { home, stage, log, refresh };
   };
@@ -215,6 +220,17 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(replay.stdout.trim()).toBe("setup_restarted=0 t3_restarted=0");
     expect(restarts).toBe("");
     expect(env).toBe("NEW=1\n");
+  });
+
+  it("lets the next refresh run while a process a restart left behind is still running", () => {
+    const { home, stage, refresh } = refreshFixture();
+    stage("NEW=1\n", "TOKEN=new\n");
+    expect(refresh("false", true).status).toBe(0);
+    const next = refresh();
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(next.signal).toBeNull();
+    expect(next.status).toBe(0);
   });
 
   it("fails a refresh whose machine setup failed, after restarting T3, and runs the setup on the next", () => {
