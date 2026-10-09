@@ -339,6 +339,23 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("reports the checked-out commit once there is one", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const cwd = yield* makeTmpDir();
+    yield* driver.initRepo({ cwd });
+    assert.isUndefined((yield* driver.statusDetailsLocal(cwd)).headCommit);
+
+    yield* git(cwd, ["config", "user.email", "test@test.com"]);
+    yield* git(cwd, ["config", "user.name", "Test"]);
+    yield* writeTextFile(cwd, "README.md", "# test\n");
+    yield* git(cwd, ["add", "."]);
+    yield* git(cwd, ["commit", "-m", "initial commit"]);
+    const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+    assert.equal((yield* driver.statusDetailsLocal(cwd)).headCommit, head);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("invalidates origin remote cache when a driver mutation adds origin", () =>
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;

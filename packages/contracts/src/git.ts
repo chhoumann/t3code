@@ -230,6 +230,8 @@ const VcsStatusLocalShape = {
   hasPrimaryRemote: Schema.Boolean,
   isDefaultRef: Schema.Boolean,
   refName: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  /** The checked-out commit. Absent before the first commit and on older servers. */
+  headCommit: Schema.optional(TrimmedNonEmptyStringSchema),
   hasWorkingTreeChanges: Schema.Boolean,
   workingTree: Schema.Struct({
     files: Schema.Array(

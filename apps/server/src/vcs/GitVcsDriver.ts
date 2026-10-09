@@ -73,6 +73,8 @@ export interface GitStatusDetails {
   hasOriginRemote: boolean;
   isDefaultBranch: boolean;
   branch: string | null;
+  /** Absent before the first commit. */
+  headCommit?: string;
   upstreamRef: string | null;
   hasWorkingTreeChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
