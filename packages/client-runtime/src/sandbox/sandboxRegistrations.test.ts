@@ -5,6 +5,7 @@ import {
   SandboxId,
   type SandboxStatus,
   type SandboxView,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -33,7 +34,10 @@ const view = (status: SandboxStatus, environmentId: EnvironmentId | null = SANDB
     id: SANDBOX_ID,
     accountId: SandboxAccountId.make("work"),
     title: "Fix the bug",
+    message: "Fix the bug in hello.txt",
     repository: { remoteUrl: "https://github.com/octocat/Hello-World.git", commit: null },
+    threadId: ThreadId.make("thread-seed"),
+    desired: "running",
     status,
     environmentId,
     httpBaseUrl: environmentId === null ? null : "https://sbx-1.boat.test",

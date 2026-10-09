@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
@@ -200,7 +200,12 @@ export const SandboxView = Schema.Struct({
   id: SandboxId,
   accountId: SandboxAccountId,
   title: Schema.String,
+  /** The first message, which the seed thread starts with. */
+  message: Schema.String,
   repository: SandboxRepository,
+  /** The thread the sandbox starts with, in its own environment. */
+  threadId: ThreadId,
+  desired: SandboxDesired,
   status: SandboxStatus,
   /** Known once the sandbox's T3 server has answered for the first time. */
   environmentId: Schema.NullOr(EnvironmentId),
