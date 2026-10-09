@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "../connection/catalog.ts";
@@ -225,5 +226,81 @@ describe("SandboxRegistrations", () => {
         expect((yield* SubscriptionRef.get(entries)).get(USER_ENV)?.enabled).toBe(true);
       }).pipe(Effect.provide(registry), Effect.scoped);
     }),
+  );
+
+  /** A reconciler over one owner whose sandbox list and pairing the test scripts. */
+  const harness = <E>(access: Parameters<typeof makeReconciler<E>>[0]) =>
+    Effect.gen(function* () {
+      const entries = yield* SubscriptionRef.make<
+        ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+      >(new Map([[OWNER, entry(OWNER)]]));
+      const registry = Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
+        entries,
+        networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
+        setEnabled: () => Effect.void,
+        removeContributed: () => Effect.void,
+      });
+      const service = yield* makeReconciler(access).pipe(Effect.provide(registry));
+      yield* service.start;
+      return entries;
+    });
+
+  /** Moves the test clock on until `done` holds, for retries that wait between tries. */
+  const advanceUntil = (done: () => boolean) =>
+    TestClock.adjust("1 second").pipe(Effect.repeat({ until: done }));
+
+  it.effect("follows an owner again after its sandbox list fails", () =>
+    Effect.gen(function* () {
+      const lists = yield* Queue.unbounded<ReadonlyArray<SandboxView>>();
+      let subscriptions = 0;
+      const paired: Array<string> = [];
+      yield* harness({
+        sandboxes: () =>
+          Stream.suspend(() =>
+            subscriptions++ === 0 ? Stream.fail("connection dropped") : Stream.fromQueue(lists),
+          ),
+        pair: (_owner, sandboxId) => Effect.sync(() => void paired.push(sandboxId)),
+      });
+      yield* Queue.offer(lists, [view(ready)]);
+      yield* advanceUntil(() => paired.length > 0);
+      expect(subscriptions).toBe(2);
+      expect(paired).toEqual([SANDBOX_ID]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps pairing a ready sandbox until it works, without a new list", () =>
+    Effect.gen(function* () {
+      const lists = yield* Queue.unbounded<ReadonlyArray<SandboxView>>();
+      let attempts = 0;
+      yield* harness({
+        sandboxes: () => Stream.fromQueue(lists),
+        pair: () =>
+          Effect.suspend(() =>
+            ++attempts <= 6 ? Effect.fail("guest not answering") : Effect.void,
+          ),
+      });
+      yield* Queue.offer(lists, [view(ready)]);
+      yield* advanceUntil(() => attempts === 7);
+      yield* TestClock.adjust("10 minutes");
+      expect(attempts).toBe(7);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("stops pairing a sandbox the owner no longer lists as ready", () =>
+    Effect.gen(function* () {
+      const lists = yield* Queue.unbounded<ReadonlyArray<SandboxView>>();
+      let attempts = 0;
+      yield* harness({
+        sandboxes: () => Stream.fromQueue(lists),
+        pair: () => Effect.suspend(() => Effect.fail(`guest not answering ${++attempts}`)),
+      });
+      yield* Queue.offer(lists, [view(ready)]);
+      yield* advanceUntil(() => attempts >= 2);
+      yield* Queue.offer(lists, [view(stopped)]);
+      yield* TestClock.adjust("1 second");
+      const settled = attempts;
+      yield* TestClock.adjust("10 minutes");
+      expect(attempts).toBe(settled);
+    }).pipe(Effect.scoped),
   );
 });

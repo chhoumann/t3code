@@ -8,7 +8,8 @@
  * the user paired by hand survives.
  *
  * An owner that cannot be reached has said nothing: its sandboxes keep their
- * registrations until it lists them again.
+ * registrations until it lists them again. A failed subscription or change is
+ * retried with backoff for as long as the owner's latest list asks for it.
  *
  * @module SandboxRegistrations
  */
@@ -24,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -141,12 +143,12 @@ export class SandboxRegistrations extends Context.Service<
 /** What the reconcile needs from an owner, over the network. */
 export interface SandboxOwnerAccess<E> {
   /** The owner's sandbox list, then the whole list again after each change. */
-  readonly sandboxes: (owner: EnvironmentId) => Stream.Stream<ReadonlyArray<SandboxView>>;
+  readonly sandboxes: (owner: EnvironmentId) => Stream.Stream<ReadonlyArray<SandboxView>, E>;
   /** Pairs this client with a ready sandbox, as a route the owner contributes. */
   readonly pair: (owner: EnvironmentId, sandboxId: SandboxId) => Effect.Effect<unknown, E>;
 }
 
-const PAIR_RETRY = { schedule: Schedule.exponential("1 second"), times: 4 } as const;
+const RETRY = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")]);
 
 /** Once started, follows every registered environment's sandboxes for as long as the scope lives. */
 export const makeReconciler = <E>(access: SandboxOwnerAccess<E>) =>
@@ -165,7 +167,7 @@ export const makeReconciler = <E>(access: SandboxOwnerAccess<E>) =>
     ) {
       switch (action._tag) {
         case "Pair":
-          yield* access.pair(owner, action.sandboxId).pipe(Effect.retry(PAIR_RETRY));
+          yield* access.pair(owner, action.sandboxId);
           return;
         case "SetEnabled":
           return yield* registry.setEnabled(action.environmentId, action.enabled);
@@ -186,25 +188,37 @@ export const makeReconciler = <E>(access: SandboxOwnerAccess<E>) =>
           { contributed: contributedBy(entry, owner), enabled: entry.enabled },
         ]),
       );
-      for (const action of planSandboxRegistrations({ views, registered })) {
-        yield* apply(owner, action).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not apply a sandbox registration change.", {
-              owner,
-              action: action._tag,
-              environmentId: action.environmentId,
-              error,
-            }),
+      // Every change is tried; the first failure fails the reconcile so it is retried.
+      const results = yield* Effect.forEach(
+        planSandboxRegistrations({ views, registered }),
+        (action) =>
+          apply(owner, action).pipe(
+            Effect.tapError((error) =>
+              Effect.logWarning("Could not apply a sandbox registration change.", {
+                owner,
+                action: action._tag,
+                environmentId: action.environmentId,
+                error,
+              }),
+            ),
+            Effect.result,
           ),
-        );
-      }
+      );
+      const failure = results.find(Result.isFailure);
+      if (failure !== undefined) return yield* Effect.fail(failure.failure);
     });
 
     const follow = (owner: EnvironmentId) =>
       access.sandboxes(owner).pipe(
-        // A list that arrives while the previous one is applied replaces any still waiting.
-        Stream.buffer({ capacity: 1, strategy: "sliding" }),
-        Stream.runForEach((views) => reconcile(owner, views)),
+        Stream.tapError((error) =>
+          Effect.logWarning("Could not follow an owner's sandboxes.", { owner, error }),
+        ),
+        Stream.retry(RETRY),
+        // A newer list replaces a reconcile still retrying an older one.
+        Stream.switchMap((views) =>
+          Stream.fromEffect(reconcile(owner, views).pipe(Effect.retry(RETRY))),
+        ),
+        Stream.runDrain,
       );
 
     const start = SubscriptionRef.changes(registry.entries).pipe(
@@ -255,12 +269,6 @@ const ownerSandboxes = Stream.unwrap(
           }),
         ),
       ),
-    ),
-  ),
-).pipe(
-  Stream.catch((error) =>
-    Stream.fromEffect(Effect.logWarning("Could not follow an owner's sandboxes.", { error })).pipe(
-      Stream.drain,
     ),
   ),
 );
