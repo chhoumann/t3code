@@ -16,7 +16,7 @@ import { useThreadShell } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { sandboxes } from "../state/sandboxes";
 import { Button } from "./ui/button";
-import { Empty, EmptyHeader, EmptyTitle } from "./ui/empty";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { cn } from "~/lib/utils";
@@ -34,6 +34,9 @@ export function SandboxLaunchView(props: {
   const view =
     owners.get(props.ownerEnvironmentId)?.find((sandbox) => sandbox.id === props.sandboxId) ?? null;
   const listed = owners.has(props.ownerEnvironmentId);
+  const ownerPhase = useEnvironment(props.ownerEnvironmentId)?.connection.phase;
+  // Until the owner lists its sandboxes there is nothing to show, unless it cannot.
+  const ownerUnreachable = ownerPhase !== "connecting" && ownerPhase !== "connected";
   useHandOffToThread(view);
 
   return (
@@ -49,6 +52,13 @@ export function SandboxLaunchView(props: {
             <Empty className="flex-1">
               <EmptyHeader>
                 <EmptyTitle>This sandbox no longer exists</EmptyTitle>
+              </EmptyHeader>
+            </Empty>
+          ) : ownerUnreachable ? (
+            <Empty className="flex-1">
+              <EmptyHeader>
+                <EmptyTitle>This sandbox's environment is offline</EmptyTitle>
+                <EmptyDescription>Reconnect it to follow the sandbox.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : null
