@@ -212,10 +212,22 @@ const cases: ReadonlyArray<Case> = [
     failed("boot", false),
   ],
   [
-    "a machine still starting past the first boot deadline fails",
+    "a machine still starting past the first boot deadline fails retryably",
     { ...created, runningSince: NOW - FIRST_BOOT_DEADLINE_MS },
     observed({ machine: machine("starting") }),
-    failed("boot", false),
+    failed("boot", true),
+  ],
+  [
+    "a retried first boot boots the same machine once it finished provisioning",
+    {
+      ...created,
+      runningSince: NOW - 2 * FIRST_BOOT_DEADLINE_MS,
+      status: { _tag: "failed", step: "boot", message: "x", retryable: true },
+      settledRevision: 1,
+      desiredRevision: 2,
+    },
+    running,
+    { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
   ],
   [
     "T3 answering records the environment",
@@ -747,6 +759,7 @@ describe("planNext over time", () => {
     expect(settleAgainstStuckMachine(created, "starting")).toMatchObject({
       _tag: "failed",
       step: "boot",
+      retryable: true,
     });
   });
 });

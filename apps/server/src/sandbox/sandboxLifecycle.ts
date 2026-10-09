@@ -207,8 +207,9 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
       return plan(stopping, { _tag: "Track", op: "stop" });
     case "starting":
       if (firstBootDone) return plan(resuming, { _tag: "Track", op: "resume" });
+      // Retry looks at the same machine again, which may have finished provisioning since.
       return firstBootDeadlinePassed(record, observation)
-        ? plan(failed("boot", "The machine did not start in time.", false), act("Settle"))
+        ? plan(failed("boot", "The machine did not start in time.", true), act("Settle"))
         : plan(record.inputsWrittenAt === null ? creating : booting, act("Wait"));
     case "stopped":
       return planStopped(record, observation);
