@@ -36,7 +36,8 @@ export function SandboxLaunchView(props: {
   const listed = owners.has(props.ownerEnvironmentId);
   const ownerPhase = useEnvironment(props.ownerEnvironmentId)?.connection.phase;
   // Until the owner lists its sandboxes there is nothing to show, unless it cannot.
-  const ownerUnreachable = ownerPhase !== "connecting" && ownerPhase !== "connected";
+  const ownerUnreachable =
+    ownerPhase !== "connecting" && ownerPhase !== "reconnecting" && ownerPhase !== "connected";
   useHandOffToThread(view);
 
   return (
