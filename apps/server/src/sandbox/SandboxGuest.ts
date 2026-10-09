@@ -173,6 +173,30 @@ function projectScriptsFromT3File(contents: string): ReadonlyArray<ProjectScript
   }));
 }
 
+/** An RPC client on the guest's socket, authenticated as `target`, open for the scope. */
+export const connectGuestRpc = (target: SandboxGuestTarget) =>
+  Effect.gen(function* () {
+    const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.baseUrl });
+    const { ticket } = yield* client.auth.webSocketTicket({
+      headers: { authorization: `Bearer ${Redacted.value(target.token)}` },
+    });
+    const socketUrl = new URL("/ws", target.baseUrl);
+    socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+    socketUrl.searchParams.set(
+      ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+      String(ORCHESTRATION_PROTOCOL_VERSION),
+    );
+    socketUrl.searchParams.set("wsTicket", ticket);
+    // Built into the caller's scope: the socket must outlive the client's construction.
+    const protocol = yield* Layer.build(
+      RpcClient.layerProtocolSocket().pipe(
+        Layer.provide(Socket.layerWebSocket(socketUrl.toString())),
+        Layer.provide(RpcSerialization.layerJson),
+      ),
+    );
+    return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
+  });
+
 export class SandboxGuest extends Context.Service<
   SandboxGuest,
   {
@@ -372,23 +396,7 @@ const make = Effect.gen(function* () {
 
   const launchThread = (target: SandboxGuestTarget, seed: SandboxSeedThread) =>
     Effect.gen(function* () {
-      const client = yield* httpApi(target.baseUrl);
-      const { ticket } = yield* client.auth.webSocketTicket({ headers: bearer(target) });
-      const socketUrl = new URL("/ws", target.baseUrl);
-      socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
-      socketUrl.searchParams.set(
-        ORCHESTRATION_PROTOCOL_QUERY_PARAM,
-        String(ORCHESTRATION_PROTOCOL_VERSION),
-      );
-      socketUrl.searchParams.set("wsTicket", ticket);
-      // Built into this call's scope: the socket must outlive the client's construction.
-      const protocol = yield* Layer.build(
-        RpcClient.layerProtocolSocket().pipe(
-          Layer.provide(Socket.layerWebSocket(socketUrl.toString())),
-          Layer.provide(RpcSerialization.layerJson),
-        ),
-      );
-      const rpc = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
+      const rpc = yield* connectGuestRpc(target);
       return yield* rpc["orchestration.launchThread"]({
         commandId: seed.commandId,
         threadId: seed.threadId,
@@ -402,6 +410,7 @@ const make = Effect.gen(function* () {
       });
     }).pipe(
       Effect.scoped,
+      Effect.provideService(HttpClient.HttpClient, httpClient),
       Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
       Effect.timeout(GUEST_CALL_TIMEOUT),
       Effect.mapError((cause) => new SandboxGuestError({ operation: "launch-thread", cause })),

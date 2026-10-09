@@ -19,12 +19,16 @@ import * as NodeUtil from "node:util";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CommandId,
   EnvironmentHttpApi,
+  MessageId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   ProviderDriverKind,
   SandboxAccountId,
   SandboxId,
+  ThreadId,
+  type OrchestrationV2RunStatus,
   type SandboxStatus,
   type SandboxView,
 } from "@t3tools/contracts";
@@ -58,6 +62,12 @@ import * as SandboxService from "../src/sandbox/SandboxService.ts";
 const { values: flags } = NodeUtil.parseArgs({
   options: {
     "skip-build": { type: "boolean", default: false },
+    /**
+     * Gives the account this shell's Anthropic proxy credentials and a Tailscale
+     * auth key, joins the tailnet on every boot, and checks that the seed turn
+     * and a follow-up after a resume both get real replies.
+     */
+    "agent-proxy": { type: "boolean", default: false },
     repo: { type: "string", default: "https://github.com/octocat/Hello-World" },
   },
 });
@@ -73,6 +83,27 @@ const MACHINE_SETUP_SCRIPT = [
   `echo "$(cat /proc/sys/kernel/random/boot_id) round=$T3_TRACER_ROUND" >> ${SETUP_RUNS_LOG}`,
   "",
 ].join("\n");
+/**
+ * Boat drops the Tailscale package and its state on resume, so every boot
+ * reinstalls it when missing and logs in again with the reusable ephemeral key.
+ * `--reset` lets a re-run on the same boot change nothing but the login.
+ */
+const TAILSCALE_SETUP_SCRIPT = [
+  MACHINE_SETUP_SCRIPT.trimEnd(),
+  "command -v tailscale >/dev/null 2>&1 || curl -fsSL https://tailscale.com/install.sh | sudo sh",
+  "sudo systemctl enable --now tailscaled",
+  'sudo tailscale up --reset --auth-key="$TAILSCALE_AUTH_KEY" --accept-dns=true --hostname="t3-sandbox-$(hostname | tr -cd \'a-z0-9-\' | cut -c1-20)"',
+  "",
+].join("\n");
+const AGENT_REPLY_TIMEOUT = "6 minutes";
+const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus> = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+const LOGIN_FAILURE = /not logged in|\/login|invalid api key|authentication_error/i;
 const STEP_TIMEOUT = "10 minutes";
 const decodeSeed = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ threadId: Schema.String })),
@@ -139,7 +170,24 @@ const packServer = Effect.gen(function* () {
 /** The account env's round; bumped before a resume to prove the env file is rewritten. */
 let envRound = 1;
 
-const accountsLayer = (apiKey: Redacted.Redacted<string>) =>
+type AccountEnv = ReadonlyArray<{
+  readonly name: string;
+  readonly value: Redacted.Redacted<string>;
+}>;
+
+/** The proxy credentials and tailnet key from this shell, read without printing them. */
+const agentProxyEnv = Effect.gen(function* () {
+  const optional = (name: string) =>
+    Config.Redacted(name).pipe(Config.withDefault(Redacted.make("")));
+  return [
+    { name: "ANTHROPIC_BASE_URL", value: yield* Config.Redacted("ANTHROPIC_BASE_URL") },
+    { name: "ANTHROPIC_AUTH_TOKEN", value: yield* Config.Redacted("ANTHROPIC_AUTH_TOKEN") },
+    { name: "ANTHROPIC_API_KEY", value: yield* optional("ANTHROPIC_API_KEY") },
+    { name: "TAILSCALE_AUTH_KEY", value: yield* Config.Redacted("TAILSCALE_AUTH_KEY") },
+  ] satisfies AccountEnv;
+});
+
+const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv | null) =>
   Layer.succeed(
     SandboxAccounts.SandboxAccounts,
     SandboxAccounts.SandboxAccounts.of({
@@ -151,10 +199,10 @@ const accountsLayer = (apiKey: Redacted.Redacted<string>) =>
               provider: "boat" as const,
               apiKey,
               env: [
-                { name: "ANTHROPIC_API_KEY", value: Redacted.make("") },
+                ...(proxyEnv ?? [{ name: "ANTHROPIC_API_KEY", value: Redacted.make("") }]),
                 { name: "T3_TRACER_ROUND", value: Redacted.make(String(envRound)) },
               ],
-              machineSetupScript: MACHINE_SETUP_SCRIPT,
+              machineSetupScript: proxyEnv === null ? MACHINE_SETUP_SCRIPT : TAILSCALE_SETUP_SCRIPT,
               template: null,
               providerEnvironment: null,
               size: "small" as const,
@@ -319,6 +367,84 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       );
     yield* readBack("read back: 1 project, the seed thread once");
 
+    const threadId = ThreadId.make(seed.threadId);
+    /** One line naming where the route from the machine to the proxy breaks; no secrets. */
+    const diagnoseProxy = (label: string) =>
+      exec(
+        [
+          `set -a && . ${SANDBOX_ENV_FILE} && set +a`,
+          `host=$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^https?://([^/:]+).*#\\1#')`,
+          `backend=$(tailscale status --json 2>/dev/null | grep -o '"BackendState": *"[A-Za-z]*"' | head -n 1 | grep -o '[A-Za-z]*"$' | tr -d '"')`,
+          `dns=$(getent hosts "$host" >/dev/null && echo ok || echo fail)`,
+          `tcp=$(timeout 5 bash -c "</dev/tcp/$host/443" 2>/dev/null && echo ok || echo fail)`,
+          `http=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" -H "authorization: Bearer $ANTHROPIC_AUTH_TOKEN" -H 'anthropic-version: 2023-06-01' "$ANTHROPIC_BASE_URL/v1/models" 2>/dev/null || true)`,
+          `echo "tailnet=\${backend:-none} dns=$dns tcp443=$tcp http=\${http:-000}"`,
+        ].join("\n"),
+      ).pipe(Effect.tap((line) => say(`${label}: ${line}`)));
+
+    /** Waits for the thread's `runCount`th run to end, then returns its status and reply. */
+    const awaitReply = (runCount: number) =>
+      Effect.gen(function* () {
+        const client = yield* api(baseUrl);
+        const detail = yield* client.orchestration.threadSnapshot({
+          params: { threadId },
+          headers: {
+            authorization: `Bearer ${Redacted.value(token)}`,
+            [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          },
+        });
+        const run = detail.projection.runs.toSorted((a, b) => a.ordinal - b.ordinal)[runCount - 1];
+        if (run === undefined || !TERMINAL_RUN_STATUSES.has(run.status)) {
+          return yield* new TracerError({ reason: `run ${runCount} has not ended` });
+        }
+        const reply = detail.projection.messages
+          .filter((message) => message.role === "assistant" && message.runId === run.id)
+          .map((message) => message.text)
+          .join("\n")
+          .trim();
+        return { status: run.status, reply };
+      }).pipe(
+        Effect.retry({
+          while: (error) => error._tag === "TracerError",
+          schedule: Schedule.spaced("3 seconds"),
+        }),
+        Effect.timeoutOrElse({
+          duration: AGENT_REPLY_TIMEOUT,
+          orElse: () => Effect.fail(new TracerError({ reason: `run ${runCount} did not end` })),
+        }),
+      );
+
+    const checkReply = (label: string, outcome: { status: string; reply: string }) =>
+      Effect.gen(function* () {
+        yield* say(`${label}: run ${outcome.status}, reply ${outcome.reply.length} chars`);
+        yield* say(`  reply: ${JSON.stringify(outcome.reply.slice(0, 160))}`);
+        yield* check(outcome.status === "completed", `${label}: the run completed`);
+        yield* check(outcome.reply.length > 0, `${label}: the agent replied`);
+        yield* check(!LOGIN_FAILURE.test(outcome.reply), `${label}: the agent was logged in`);
+      });
+
+    if (flags["agent-proxy"]) {
+      yield* diagnoseProxy("proxy route after launch");
+      yield* checkReply("seed turn", yield* step("seed turn -> reply", awaitReply(1)));
+    }
+    let followUps = 0;
+    const sendFollowUp = (text: string) =>
+      Effect.gen(function* () {
+        const rpc = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
+        yield* rpc["orchestration.dispatchCommand"]({
+          type: "message.dispatch",
+          commandId: CommandId.make(NodeCrypto.randomUUID()),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          messageId: MessageId.make(NodeCrypto.randomUUID()),
+          text,
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        followUps += 1;
+      }).pipe(Effect.scoped);
+
     yield* step(
       "pairing grant exchanges for a session",
       Effect.gen(function* () {
@@ -377,6 +503,14 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       yield* check(boots === round + 1, `the machine setup ran on boot ${round + 1}`);
       yield* check(envFileRound === "1", `sandbox.env carries round ${envRound}`);
       yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
+      if (flags["agent-proxy"]) {
+        yield* diagnoseProxy(`round ${round}: proxy route after resume`);
+        yield* sendFollowUp("What does hello.txt contain? Answer with its contents only.");
+        yield* checkReply(
+          `round ${round}: follow-up`,
+          yield* step(`round ${round}: follow-up -> reply`, awaitReply(1 + followUps)),
+        );
+      }
     }
 
     yield* sandboxes.update({ id, desired: "destroyed" });
@@ -387,6 +521,7 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
 const program = Effect.gen(function* () {
   const runStartedAt = yield* Clock.currentTimeMillis;
   const apiKey = yield* Config.Redacted("BOAT_DEV_API_KEY");
+  const proxyEnv = flags["agent-proxy"] ? yield* agentProxyEnv : null;
   const tarball = yield* step("pack server", packServer);
   yield* say(`tarball ${(tarball.length / 1024 / 1024).toFixed(1)} MiB`);
   const databaseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-tracer-"));
@@ -404,7 +539,7 @@ const program = Effect.gen(function* () {
         ),
         Layer.provideMerge(SandboxGuest.layer),
         Layer.provideMerge(BoatSandboxProvider.layer),
-        Layer.provideMerge(accountsLayer(apiKey)),
+        Layer.provideMerge(accountsLayer(apiKey, proxyEnv)),
         Layer.provideMerge(secretStoreLayer),
         Layer.provideMerge(
           SqlitePersistence.layerFromPath(NodePath.join(databaseDir, "state.sqlite")),
