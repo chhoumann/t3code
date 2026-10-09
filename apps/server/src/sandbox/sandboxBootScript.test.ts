@@ -217,15 +217,16 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(env).toBe("NEW=1\n");
   });
 
-  it("runs a failed machine setup again on the next refresh", () => {
+  it("fails a refresh whose machine setup failed, after restarting T3, and runs the setup on the next", () => {
     const { home, stage, log, refresh } = refreshFixture();
-    stage("OLD=1\n", "TOKEN=new\n");
+    stage("NEW=1\n", "TOKEN=new\n");
     const first = refresh('[ "$2" = t3-sandbox-machine-setup.service ]');
-    expect(first.status).toBe(0);
-    expect(first.stdout.trim()).toBe("setup_restarted=0 t3_restarted=0");
+    expect(first.status).not.toBe(0);
+    expect(first.stdout.trim()).toBe("setup_restarted=0 t3_restarted=1");
+    expect(first.stderr).toContain("machine setup failed");
 
     NodeFS.writeFileSync(log, "");
-    stage("OLD=1\n", "TOKEN=new\n");
+    stage("NEW=1\n", "TOKEN=new\n");
     const second = refresh();
     const restarts = NodeFS.readFileSync(log, "utf8");
     NodeFS.rmSync(home, { recursive: true });
