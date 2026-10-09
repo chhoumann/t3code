@@ -54,7 +54,9 @@ describe("renderSandboxBootScript", () => {
     );
     const setup = lineIndex(script, /bash '.*machine-setup\.sh'/);
     const install = lineIndex(script, /service install/);
-    expect(script.split("\n")[setup]).toContain(`. '${SANDBOX_ENV_FILE}'`);
+    expect(script.split("\n")[setup]).toMatch(
+      new RegExp(`^\\(set \\+x && set -a && \\. '${SANDBOX_ENV_FILE}'`),
+    );
     expect(waitForInputs).toBeGreaterThanOrEqual(0);
     expect(waitForInputs).toBeLessThan(setup);
     expect(setup).toBeLessThan(install);

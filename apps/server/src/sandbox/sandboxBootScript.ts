@@ -14,6 +14,8 @@ export const SANDBOX_ENV_FILE = `${SANDBOX_T3_HOME}/sandbox.env`;
 export const SANDBOX_INPUTS_DIR = `${SANDBOX_T3_HOME}/sandbox`;
 /** Written by the owner last, once every input is in place. */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
+/** Everything the boot script prints, kept for diagnosing a failed boot. */
+export const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
 /** Stable path to the installed `t3`, for exec calls such as minting sessions. */
 export const SANDBOX_T3_BIN = `${SANDBOX_T3_HOME}/bin/t3`;
 
@@ -25,9 +27,10 @@ export type SandboxT3Source =
   /** A published release, installed by `t3 service install` itself. */
   | { readonly kind: "npm"; readonly version: string }
   /**
-   * An unreleased build: an npm-packed bundle the owner uploaded. It is
-   * placed in the pinned-runtime slot for its version, where `t3 service
-   * install` finds it already present instead of downloading a release.
+   * An unreleased build the owner uploaded: the server bundle beside its
+   * Linux runtime node_modules, laid out like a release archive but run by
+   * the machine's Node. It is placed in the pinned-runtime slot for its
+   * version, where `t3 service install` finds it instead of downloading.
    */
   | { readonly kind: "tarball"; readonly version: string; readonly path: string };
 
@@ -37,14 +40,15 @@ export interface SandboxBootSpec {
   readonly machineSetupScript: string | null;
 }
 
-const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+/** Single-quotes a value for bash. */
+export const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 function renderInstall(source: SandboxT3Source): ReadonlyArray<string> {
-  const runtime = `"$T3CODE_HOME/runtime/versions/"${quote(source.version)}`;
+  const runtime = `"$T3CODE_HOME/runtime/versions/"${shellQuote(source.version)}`;
   if (source.kind === "npm") {
     return [
-      `npx --yes ${quote(`t3@${source.version}`)} service install`,
-      `ln -sfn ${runtime}/t3 ${quote(SANDBOX_T3_BIN)}`,
+      `npx --yes ${shellQuote(`t3@${source.version}`)} service install`,
+      `ln -sfn ${runtime}/t3 ${shellQuote(SANDBOX_T3_BIN)}`,
     ];
   }
   return [
@@ -52,17 +56,16 @@ function renderInstall(source: SandboxT3Source): ReadonlyArray<string> {
     `if [ ! -f "$RUNTIME/.install-complete" ]; then`,
     `  STAGING="$T3CODE_HOME/runtime/versions/.staging-sandbox"`,
     `  rm -rf "$STAGING" && mkdir -p "$STAGING"`,
-    `  tar -xzf ${quote(source.path)} -C "$STAGING" --strip-components=1`,
-    `  (cd "$STAGING" && npm install --omit=dev --no-audit --no-fund --no-package-lock)`,
+    `  tar -xzf ${shellQuote(source.path)} -C "$STAGING" --strip-components=1`,
     `  NODE_BIN="$(command -v node)"`,
     `  printf '#!/bin/sh\\nexec %s "$(dirname "$(readlink -f "$0")")/dist/bin.mjs" "$@"\\n' "$NODE_BIN" > "$STAGING/t3"`,
     `  chmod 755 "$STAGING/t3"`,
-    `  printf '%s\\n' ${quote(source.version)} > "$STAGING/.install-complete"`,
+    `  printf '%s\\n' ${shellQuote(source.version)} > "$STAGING/.install-complete"`,
     `  rm -rf "$RUNTIME" && mv "$STAGING" "$RUNTIME"`,
     `fi`,
-    `rm -f ${quote(source.path)}`,
+    `rm -f ${shellQuote(source.path)}`,
     `"$RUNTIME/t3" service install`,
-    `ln -sfn "$RUNTIME/t3" ${quote(SANDBOX_T3_BIN)}`,
+    `ln -sfn "$RUNTIME/t3" ${shellQuote(SANDBOX_T3_BIN)}`,
   ];
 }
 
@@ -71,19 +74,21 @@ export function renderSandboxBootScript(spec: SandboxBootSpec): string {
     spec.machineSetupScript === null
       ? []
       : [
-          `printf '%s' ${quote(Base64.encode(spec.machineSetupScript))} | base64 -d > ${quote(`${SANDBOX_INPUTS_DIR}/machine-setup.sh`)}`,
-          `(set -a && . ${quote(SANDBOX_ENV_FILE)} && set +a && bash ${quote(`${SANDBOX_INPUTS_DIR}/machine-setup.sh`)})`,
+          `printf '%s' ${shellQuote(Base64.encode(spec.machineSetupScript))} | base64 -d > ${shellQuote(`${SANDBOX_INPUTS_DIR}/machine-setup.sh`)}`,
+          `(set +x && set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a && bash ${shellQuote(`${SANDBOX_INPUTS_DIR}/machine-setup.sh`)})`,
         ];
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
     "umask 077",
-    `export T3CODE_HOME=${quote(SANDBOX_T3_HOME)}`,
-    `mkdir -p ${quote(SANDBOX_INPUTS_DIR)} "$T3CODE_HOME/bin" ${quote(SERVICE_DROP_IN_DIR)}`,
+    `export T3CODE_HOME=${shellQuote(SANDBOX_T3_HOME)}`,
+    `mkdir -p ${shellQuote(SANDBOX_INPUTS_DIR)} "$T3CODE_HOME/bin" ${shellQuote(SERVICE_DROP_IN_DIR)}`,
+    `exec > >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)}) 2> >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)} >&2)`,
+    "set -x",
     "",
-    `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do [ -f ${quote(SANDBOX_INPUTS_READY_FILE)} ] && break; sleep 1; done`,
-    `[ -f ${quote(SANDBOX_INPUTS_READY_FILE)} ] || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
-    `touch ${quote(SANDBOX_ENV_FILE)} && chmod 600 ${quote(SANDBOX_ENV_FILE)}`,
+    `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do [ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] && break; sleep 1; done`,
+    `[ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
+    `touch ${shellQuote(SANDBOX_ENV_FILE)} && chmod 600 ${shellQuote(SANDBOX_ENV_FILE)}`,
     ...machineSetup,
     "",
     // Dev servers and T3's own file watching exhaust the stock inotify limits,
@@ -96,7 +101,7 @@ export function renderSandboxBootScript(spec: SandboxBootSpec): string {
     "sudo systemctl set-property user.slice MemorySwapMax=infinity",
     "sudo loginctl enable-linger user",
     "",
-    `cat > ${quote(`${SERVICE_DROP_IN_DIR}/sandbox.conf`)} <<'EOF'`,
+    `cat > ${shellQuote(`${SERVICE_DROP_IN_DIR}/sandbox.conf`)} <<'EOF'`,
     "[Service]",
     "Environment=T3CODE_HOST=0.0.0.0",
     `Environment=T3CODE_PORT=${SANDBOX_T3_PORT}`,

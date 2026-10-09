@@ -101,7 +101,7 @@ const TRANSIENT_CODES = new Set([
 ]);
 
 /** Pure mapping from a Boat error response to the provider-neutral error kind. */
-export function classifyBoatError(input: {
+function classifyBoatError(input: {
   readonly status: number;
   readonly code: string | undefined;
   readonly retryable: boolean;

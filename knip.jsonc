@@ -31,6 +31,7 @@
         "scripts/measure-pr-preview.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
         "scripts/update-test-shard-weights.ts",
+        "scripts/sandbox-tracer.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
       ],
