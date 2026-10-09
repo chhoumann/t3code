@@ -27,7 +27,8 @@ export interface ProviderMachine {
   readonly setup: ProviderMachineSetup;
 }
 
-export type ProviderMachineSize = "small" | "default" | "large" | "xlarge";
+export const ProviderMachineSize = Schema.Literals(["small", "default", "large", "xlarge"]);
+export type ProviderMachineSize = typeof ProviderMachineSize.Type;
 
 export interface SandboxProviderAccount {
   readonly apiKey: Redacted.Redacted<string>;

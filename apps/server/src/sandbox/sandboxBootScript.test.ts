@@ -1,24 +1,26 @@
-// @effect-diagnostics nodeBuiltinImport:off - the rendered script is checked by a real bash.
+// @effect-diagnostics nodeBuiltinImport:off - the rendered scripts are checked by a real bash.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 
 import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
+  SANDBOX_MACHINE_SETUP_SCRIPT,
+  renderRefreshCredentialsCommand,
   renderSandboxBootScript,
-  type SandboxBootSpec,
+  renderSandboxEnvFile,
+  type SandboxT3Source,
 } from "./sandboxBootScript.ts";
 
-const tarball: SandboxBootSpec = {
-  source: { kind: "tarball", version: "0.0.45", path: "/home/user/.t3/sandbox/t3.tgz" },
-  machineSetupScript: null,
-};
-const npm: SandboxBootSpec = {
-  source: { kind: "npm", version: "0.0.45" },
-  machineSetupScript: null,
-};
-const hostileSetup = `#!/usr/bin/env bash\necho 'it'"'"'s' "$HOME"\ncat <<'EOF'\nEOF\n$(touch /pwned)\n`;
+const tarball: SandboxT3Source = { kind: "tarball", version: "0.0.45" };
+const npm: SandboxT3Source = { kind: "npm", version: "0.0.45" };
+
+const bashSyntaxErrors = (script: string) =>
+  NodeChildProcess.spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
 
 const lineIndex = (script: string, pattern: RegExp) =>
   script.split("\n").findIndex((line) => pattern.test(line));
@@ -27,47 +29,34 @@ describe("renderSandboxBootScript", () => {
   it.each([
     ["tarball", tarball],
     ["npm", npm],
-    ["tarball with machine setup", { ...tarball, machineSetupScript: hostileSetup }],
-  ])("renders valid bash for %s", (_, spec) => {
-    const result = NodeChildProcess.spawnSync("bash", ["-n"], {
-      input: renderSandboxBootScript(spec),
-      encoding: "utf8",
-    });
+  ])("renders valid bash for %s", (_, source) => {
+    const result = bashSyntaxErrors(renderSandboxBootScript(source));
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
   });
 
-  it("carries the machine setup script byte for byte", () => {
-    const script = renderSandboxBootScript({ ...tarball, machineSetupScript: hostileSetup });
-    const writeLine = script.split("\n")[lineIndex(script, /\| base64 -d >/)] ?? "";
-    const decoded = NodeChildProcess.spawnSync("bash", ["-c", writeLine.replace(/ > .*$/, "")], {
-      encoding: "utf8",
-    });
-    expect(decoded.stdout).toBe(hostileSetup);
-  });
-
-  it("runs the machine setup with the account env, after the inputs arrive and before T3 installs", () => {
-    const script = renderSandboxBootScript({ ...tarball, machineSetupScript: "true" });
+  it("installs the machine setup as a boot unit with the account env, after the inputs and before T3", () => {
+    const script = renderSandboxBootScript(tarball);
+    const lines = script.split("\n");
     const waitForInputs = lineIndex(
       script,
       new RegExp(`\\[ -f '${SANDBOX_INPUTS_READY_FILE}' \\]`),
     );
-    const setup = lineIndex(script, /bash '.*machine-setup\.sh'/);
+    const unitStart = lineIndex(script, /systemctl start t3-sandbox-machine-setup\.service/);
     const install = lineIndex(script, /service install/);
-    expect(script.split("\n")[setup]).toMatch(
-      new RegExp(`^\\(set \\+x && set -a && \\. '${SANDBOX_ENV_FILE}'`),
-    );
     expect(waitForInputs).toBeGreaterThanOrEqual(0);
-    expect(waitForInputs).toBeLessThan(setup);
-    expect(setup).toBeLessThan(install);
+    expect(waitForInputs).toBeLessThan(unitStart);
+    expect(unitStart).toBeLessThan(install);
+    expect(lines).toContain(`EnvironmentFile=${SANDBOX_ENV_FILE}`);
+    expect(lines).toContain(`ExecStart=/bin/bash ${SANDBOX_MACHINE_SETUP_SCRIPT}`);
+    expect(lines).toContain("Before=user@$(id -u).service");
+    expect(lines).toContain("sudo systemctl enable t3-sandbox-machine-setup.service");
   });
 
   it("writes the service drop-in before the service starts", () => {
     const script = renderSandboxBootScript(tarball);
-    const dropIn = script.slice(
-      script.indexOf("[Service]"),
-      script.indexOf("EOF", script.indexOf("[Service]")),
-    );
+    const userDropIn = script.lastIndexOf("[Service]");
+    const dropIn = script.slice(userDropIn, script.indexOf("EOF", userDropIn));
     expect(dropIn.split("\n").filter(Boolean)).toEqual([
       "[Service]",
       "Environment=T3CODE_HOST=0.0.0.0",
@@ -75,7 +64,7 @@ describe("renderSandboxBootScript", () => {
       `EnvironmentFile=${SANDBOX_ENV_FILE}`,
       "UnsetEnvironment=ASCII_TOKEN",
     ]);
-    expect(script.indexOf("[Service]")).toBeLessThan(script.indexOf("service install"));
+    expect(userDropIn).toBeLessThan(script.indexOf("service install"));
   });
 
   it("installs an uploaded build without fetching a release", () => {
@@ -90,10 +79,47 @@ describe("renderSandboxBootScript", () => {
   });
 
   it("keeps everything out of paths Boat does not persist", () => {
-    for (const spec of [tarball, npm]) {
-      const script = renderSandboxBootScript(spec);
+    for (const script of [
+      renderSandboxBootScript(tarball),
+      renderSandboxBootScript(npm),
+      renderRefreshCredentialsCommand(),
+    ]) {
       expect(script).not.toMatch(/\/tmp\b/);
       expect(script).not.toContain(".cache");
     }
+  });
+});
+
+describe("renderSandboxEnvFile", () => {
+  it("reads back byte for byte through bash, empty and hostile values included", () => {
+    const env = [
+      { name: "ANTHROPIC_API_KEY", value: "" },
+      { name: "HOSTILE", value: `it's "$HOME" \`touch /pwned\` $(id) \\ \\"\nsecond line\\` },
+      { name: "URL", value: "https://proxy.example.ts.net/v1?a=1&b=2" },
+    ];
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-env-"));
+    const file = NodePath.join(directory, "sandbox.env");
+    NodeFS.writeFileSync(file, renderSandboxEnvFile(env));
+    const result = NodeChildProcess.spawnSync(
+      "bash",
+      [
+        "-c",
+        `set -a && . "$1" && printf '%s\\0' "$ANTHROPIC_API_KEY" "$HOSTILE" "$URL"`,
+        "-",
+        file,
+      ],
+      { encoding: "utf8" },
+    );
+    NodeFS.rmSync(directory, { recursive: true });
+    expect(result.stderr).toBe("");
+    expect(result.stdout.split("\0").slice(0, -1)).toEqual(env.map((entry) => entry.value));
+  });
+});
+
+describe("renderRefreshCredentialsCommand", () => {
+  it("renders valid bash", () => {
+    const result = bashSyntaxErrors(renderRefreshCredentialsCommand());
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
   });
 });

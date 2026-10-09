@@ -48,6 +48,7 @@ import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_DIR,
   SANDBOX_INPUTS_READY_FILE,
+  SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_T3_PORT,
   renderSandboxBootScript,
 } from "../src/sandbox/sandboxBootScript.ts";
@@ -162,8 +163,8 @@ const program = Effect.gen(function* () {
         template: null,
         providerEnvironment: null,
         setupScript: renderSandboxBootScript({
-          source: { kind: "tarball", version: serverPackageJson.version, path: TARBALL_PATH },
-          machineSetupScript: null,
+          kind: "tarball",
+          version: serverPackageJson.version,
         }),
       }),
       (created) =>
@@ -208,6 +209,10 @@ const program = Effect.gen(function* () {
       yield* provider.writeFile(account, id, {
         path: SANDBOX_ENV_FILE,
         content: new TextEncoder().encode("# The tracer passes no account env.\n"),
+      });
+      yield* provider.writeFile(account, id, {
+        path: SANDBOX_MACHINE_SETUP_SCRIPT,
+        content: new Uint8Array(),
       });
       const parts = Math.ceil(packed.bytes.length / UPLOAD_CHUNK_BYTES);
       yield* Effect.forEach(

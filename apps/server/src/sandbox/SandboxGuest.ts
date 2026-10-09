@@ -13,6 +13,7 @@
 import {
   CommandId,
   EnvironmentHttpApi,
+  type EnvironmentId,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   WsRpcGroup,
@@ -39,8 +40,14 @@ import { Socket } from "effect/socket";
 
 import {
   SANDBOX_ENV_FILE,
+  SANDBOX_INPUTS_READY_FILE,
+  SANDBOX_MACHINE_SETUP_SCRIPT,
+  SANDBOX_STAGED_ENV_FILE,
+  SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
   SANDBOX_T3_BIN,
   SANDBOX_T3_HOME,
+  SANDBOX_T3_TARBALL,
+  renderRefreshCredentialsCommand,
   shellQuote,
 } from "./sandboxBootScript.ts";
 import {
@@ -78,7 +85,15 @@ export interface SandboxSeedThread {
   readonly interactionMode: ProviderInteractionMode;
 }
 
+/** What the owner writes into a machine for its account; contents are secret. */
+export interface SandboxMachineCredentials {
+  readonly envFile: string;
+  readonly machineSetupScript: string;
+}
+
 export const SandboxGuestOperation = Schema.Literals([
+  "write-inputs",
+  "refresh-credentials",
   "mint-session",
   "clone",
   "create-project",
@@ -88,6 +103,8 @@ export const SandboxGuestOperation = Schema.Literals([
 export type SandboxGuestOperation = typeof SandboxGuestOperation.Type;
 
 const OPERATION_SUMMARY: Record<SandboxGuestOperation, string> = {
+  "write-inputs": "write the boot inputs to the sandbox",
+  "refresh-credentials": "refresh the sandbox credentials",
   "mint-session": "mint the owner session on the sandbox",
   clone: "clone the repository in the sandbox",
   "create-project": "create the sandbox project",
@@ -112,6 +129,9 @@ const decodeIssuedSession = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ token: Schema.String })),
 );
 const GUEST_CALL_TIMEOUT = Duration.seconds(60);
+// Boat's edge can hold a request to a port with no listener yet for minutes.
+const READINESS_TIMEOUT = Duration.seconds(5);
+const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const CLONE_TIMEOUT_SECONDS = 600;
 const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
 
@@ -156,6 +176,23 @@ function projectScriptsFromT3File(contents: string): ReadonlyArray<ProjectScript
 export class SandboxGuest extends Context.Service<
   SandboxGuest,
   {
+    /**
+     * Uploads what the creation script waits for, the ready marker last. A
+     * no-op once the marker exists, so a retry never re-uploads the build.
+     */
+    readonly writeBootInputs: (
+      account: SandboxProviderAccount,
+      machineId: ProviderMachineId,
+      inputs: SandboxMachineCredentials & { readonly tarball: Uint8Array | null },
+    ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
+    /** Rewrites the account credentials after a boot, restarting what they changed. */
+    readonly refreshCredentials: (
+      account: SandboxProviderAccount,
+      machineId: ProviderMachineId,
+      credentials: SandboxMachineCredentials,
+    ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
+    /** The guest's environment id, or null when its T3 server does not answer within seconds. */
+    readonly readEnvironmentId: (baseUrl: string) => Effect.Effect<EnvironmentId | null>;
     /** Mints an admin session inside the machine; the token never appears in logs. */
     readonly mintAdminSession: (
       account: SandboxProviderAccount,
@@ -195,8 +232,8 @@ const make = Effect.gen(function* () {
   const bearer = (target: SandboxGuestTarget) => ({
     authorization: `Bearer ${Redacted.value(target.token)}`,
   });
-  const httpApi = (target: SandboxGuestTarget) =>
-    HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.baseUrl }).pipe(
+  const httpApi = (baseUrl: string) =>
+    HttpApiClient.make(EnvironmentHttpApi, { baseUrl }).pipe(
       Effect.provideService(HttpClient.HttpClient, httpClient),
     );
 
@@ -216,6 +253,91 @@ const make = Effect.gen(function* () {
             : Effect.fail(new SandboxGuestError({ operation, exitCode: result.exitCode })),
         ),
       );
+
+  const encode = (text: string) => new TextEncoder().encode(text);
+
+  const writeBootInputs: SandboxGuest["Service"]["writeBootInputs"] = (
+    account,
+    machineId,
+    inputs,
+  ) =>
+    Effect.gen(function* () {
+      const marker = yield* provider.exec(account, machineId, {
+        command: `test -e ${shellQuote(SANDBOX_INPUTS_READY_FILE)} && echo present || true`,
+        timeoutSeconds: 10,
+      });
+      if (marker.stdout.trim() === "present") return;
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_ENV_FILE,
+        content: encode(inputs.envFile),
+      });
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_MACHINE_SETUP_SCRIPT,
+        content: encode(inputs.machineSetupScript),
+      });
+      const tarball = inputs.tarball;
+      if (tarball !== null) {
+        const parts = Math.ceil(tarball.length / UPLOAD_CHUNK_BYTES);
+        yield* Effect.forEach(
+          Array.from({ length: parts }, (_, index) => index),
+          (index) =>
+            provider.writeFile(account, machineId, {
+              path: `${SANDBOX_T3_TARBALL}.part-${String(index).padStart(3, "0")}`,
+              content: tarball.subarray(
+                index * UPLOAD_CHUNK_BYTES,
+                (index + 1) * UPLOAD_CHUNK_BYTES,
+              ),
+            }),
+          { concurrency: 3 },
+        );
+        yield* execOrFail(
+          "write-inputs",
+          account,
+          machineId,
+          `cat ${shellQuote(SANDBOX_T3_TARBALL)}.part-* > ${shellQuote(SANDBOX_T3_TARBALL)} && rm -f ${shellQuote(SANDBOX_T3_TARBALL)}.part-*`,
+          60,
+        );
+      }
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_INPUTS_READY_FILE,
+        content: new Uint8Array(),
+      });
+    });
+
+  const refreshCredentials: SandboxGuest["Service"]["refreshCredentials"] = (
+    account,
+    machineId,
+    credentials,
+  ) =>
+    Effect.gen(function* () {
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_STAGED_ENV_FILE,
+        content: encode(credentials.envFile),
+      });
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
+        content: encode(credentials.machineSetupScript),
+      });
+      const outcome = yield* execOrFail(
+        "refresh-credentials",
+        account,
+        machineId,
+        renderRefreshCredentialsCommand(),
+        // Re-running the machine setup can take as long as its unit allows.
+        660,
+      );
+      yield* Effect.logInfo("sandbox credentials refreshed").pipe(
+        Effect.annotateLogs({ machineId, outcome: outcome.trim().split("\n").at(-1) ?? "" }),
+      );
+    });
+
+  const readEnvironmentId: SandboxGuest["Service"]["readEnvironmentId"] = (baseUrl) =>
+    httpApi(baseUrl).pipe(
+      Effect.flatMap((client) => client.metadata.descriptor()),
+      Effect.timeout(READINESS_TIMEOUT),
+      Effect.map((descriptor): EnvironmentId | null => descriptor.environmentId),
+      Effect.orElseSucceed(() => null),
+    );
 
   const mintAdminSession: SandboxGuest["Service"]["mintAdminSession"] = (account, machineId) =>
     execOrFail(
@@ -250,7 +372,7 @@ const make = Effect.gen(function* () {
 
   const launchThread = (target: SandboxGuestTarget, seed: SandboxSeedThread) =>
     Effect.gen(function* () {
-      const client = yield* httpApi(target);
+      const client = yield* httpApi(target.baseUrl);
       const { ticket } = yield* client.auth.webSocketTicket({ headers: bearer(target) });
       const socketUrl = new URL("/ws", target.baseUrl);
       socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -287,7 +409,7 @@ const make = Effect.gen(function* () {
 
   const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (target, input) =>
     Effect.gen(function* () {
-      const client = yield* httpApi(target);
+      const client = yield* httpApi(target.baseUrl);
       yield* client.projects
         .mutate({
           headers: bearer(target),
@@ -312,7 +434,7 @@ const make = Effect.gen(function* () {
     target,
     label,
   ) =>
-    httpApi(target).pipe(
+    httpApi(target.baseUrl).pipe(
       Effect.flatMap((client) =>
         client.auth.pairingCredential({ headers: bearer(target), payload: { label } }),
       ),
@@ -322,6 +444,9 @@ const make = Effect.gen(function* () {
     );
 
   return SandboxGuest.of({
+    writeBootInputs,
+    refreshCredentials,
+    readEnvironmentId,
     mintAdminSession,
     cloneCheckout,
     launchSeedThread,
