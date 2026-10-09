@@ -198,6 +198,25 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(restarts).toBe("--user restart t3code.service\n");
   });
 
+  it("succeeds again when replayed after the run that consumed the staged files", () => {
+    const { home, stage, log, refresh } = refreshFixture();
+    stage("NEW=1\n", "TOKEN=new\n");
+    const first = refresh();
+    NodeFS.writeFileSync(log, "");
+    const replay = refresh();
+    const restarts = NodeFS.readFileSync(log, "utf8");
+    const env = NodeFS.readFileSync(NodePath.join(home, ".t3/sandbox.env"), "utf8");
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(first.status).toBe(0);
+    expect(first.stdout.trim()).toBe("setup_restarted=1 t3_restarted=1");
+    expect(replay.stderr).toBe("");
+    expect(replay.status).toBe(0);
+    expect(replay.stdout.trim()).toBe("setup_restarted=0 t3_restarted=0");
+    expect(restarts).toBe("");
+    expect(env).toBe("NEW=1\n");
+  });
+
   it("runs a failed machine setup again on the next refresh", () => {
     const { home, stage, log, refresh } = refreshFixture();
     stage("OLD=1\n", "TOKEN=new\n");

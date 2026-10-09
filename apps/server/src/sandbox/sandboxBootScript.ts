@@ -212,8 +212,10 @@ const T3_RESTART_PENDING = `${SANDBOX_INPUTS_DIR}/restart-t3.pending`;
  * then match. Prints `setup_restarted=0|1 t3_restarted=0|1`.
  */
 export function renderRefreshCredentialsCommand(): string {
+  // A staged file a replayed refresh finds gone was swapped in by the first run.
   const swap = (staged: string, target: string, pending: ReadonlyArray<string>) => [
-    `if cmp -s ${shellQuote(staged)} ${shellQuote(target)}; then rm -f ${shellQuote(staged)};`,
+    `if [ ! -e ${shellQuote(staged)} ]; then :;`,
+    `elif cmp -s ${shellQuote(staged)} ${shellQuote(target)}; then rm -f ${shellQuote(staged)};`,
     `else touch ${pending.map(shellQuote).join(" ")} && chmod 600 ${shellQuote(staged)} && mv -f ${shellQuote(staged)} ${shellQuote(target)}; fi`,
   ];
   return [
