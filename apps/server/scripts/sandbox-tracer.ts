@@ -21,6 +21,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EnvironmentHttpApi,
+  ProjectId,
+  defaultInstanceIdForDriver,
   EnvironmentId,
   MessageId,
   ORCHESTRATION_PROTOCOL_HEADER,
@@ -43,7 +45,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { FetchHttpClient, HttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { Socket } from "effect/socket";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -105,8 +107,13 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus> = new Set([
 const LOGIN_FAILURE = /not logged in|\/login|invalid api key|authentication_error/i;
 const STEP_TIMEOUT = "10 minutes";
 const decodeSeed = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Struct({ threadId: Schema.String })),
+  Schema.fromJsonString(Schema.Struct({ threadId: Schema.String, projectId: Schema.String })),
 );
+/** What Boat's account limits say about machines; needs the key's `account.read`. */
+const BoatLimits = Schema.Struct({
+  activeSandboxes: Schema.Number,
+  starts: Schema.Struct({ day: Schema.Struct({ used: Schema.Number }) }),
+});
 
 class TracerError extends Schema.TaggedError<TracerError>()("TracerError", {
   reason: Schema.String,
@@ -228,6 +235,32 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       );
     const id = SandboxId.make(`tracer-${NodeCrypto.randomUUID().slice(0, 8)}`);
     yield* say(`sandbox ${id}`);
+
+    const boatLimits = httpClient
+      .execute(
+        HttpClientRequest.get("https://boat.dev/api/v1/limits").pipe(
+          HttpClientRequest.bearerToken(Redacted.value(apiKey)),
+          HttpClientRequest.acceptJson,
+        ),
+      )
+      .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(BoatLimits)));
+    yield* step(
+      "the account preflight creates no machine",
+      Effect.gen(function* () {
+        const before = yield* boatLimits;
+        const missing = yield* provider.checkAccess(account);
+        const after = yield* boatLimits;
+        yield* say(
+          `preflight: missing actions [${missing.join(", ")}]; active ${before.activeSandboxes} -> ${after.activeSandboxes}; starts today ${before.starts.day.used} -> ${after.starts.day.used}`,
+        );
+        yield* check(missing.length === 0, "the key can take every action sandboxes need");
+        yield* check(
+          after.activeSandboxes === before.activeSandboxes &&
+            after.starts.day.used === before.starts.day.used,
+          "the preflight started no machine",
+        );
+      }),
+    );
 
     const storedColumn = (column: "machine_id" | "seed_json") =>
       sql<Record<string, string | null>>`
@@ -461,7 +494,7 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
         followUps += 1;
       }).pipe(Effect.scoped);
 
-    yield* step(
+    const clientToken = yield* step(
       "pairing grant exchanges for a session",
       Effect.gen(function* () {
         const credential = yield* guest.issuePairingCredential(
@@ -503,8 +536,52 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
             refused.ownerEnvironmentId === "sandbox-tracer-owner",
           "the sandbox refuses to archive its seed thread for anyone but its owner",
         );
+        return Redacted.make(issued.access_token);
       }),
     );
+
+    yield* step(
+      "a paired client cannot delete the last active thread either",
+      Effect.gen(function* () {
+        const asClient = yield* SandboxGuest.connectGuestRpc({ baseUrl, token: clientToken });
+        const second = ThreadId.make(NodeCrypto.randomUUID());
+        yield* asClient["orchestration.launchThread"]({
+          commandId: CommandId.make(NodeCrypto.randomUUID()),
+          threadId: second,
+          projectId: ProjectId.make(seed.projectId),
+          title: "Second thread",
+          modelSelection: {
+            instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent")),
+            model: "claude-sonnet-4-6",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          workspaceStrategy: { type: "root" },
+        });
+        const command = (
+          type: "thread.archive" | "thread.unarchive" | "thread.delete",
+          thread: ThreadId,
+        ) => ({
+          type,
+          commandId: CommandId.make(NodeCrypto.randomUUID()),
+          threadId: thread,
+        });
+        yield* asClient["orchestration.dispatchCommand"](command("thread.archive", threadId));
+        yield* say("a paired client archived the seed thread while a second thread is active");
+        const refused = yield* asClient["orchestration.dispatchCommand"](
+          command("thread.delete", second),
+        ).pipe(Effect.flip);
+        yield* say(`a paired client deleting the last active thread: ${refused._tag}`);
+        yield* check(
+          refused._tag === "SandboxManagedByOwnerError" && refused.operation === "delete-thread",
+          "the sandbox refuses to delete its last active thread for anyone but its owner",
+        );
+        const asOwner = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
+        yield* asOwner["orchestration.dispatchCommand"](command("thread.unarchive", threadId));
+        yield* asOwner["orchestration.dispatchCommand"](command("thread.delete", second));
+      }).pipe(Effect.scoped),
+    );
+    yield* readBack("read back: the seed thread alone again");
 
     yield* step(
       "a refused owner session is replaced on use",
