@@ -321,6 +321,7 @@ const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   Resume: "resume",
   Destroy: "destroy",
   ClearInflight: "observe",
+  Track: "observe",
   Wait: "observe",
   Watch: "observe",
   Settle: "observe",
@@ -517,7 +518,11 @@ const make = Effect.gen(function* () {
                   : Effect.void,
               ),
             );
-          return yield* writeFacts(started, { machineId: created.id, inflight: null });
+          return yield* writeFacts(started, {
+            machineId: created.id,
+            inflight: null,
+            createFirstAttemptAt: null,
+          });
         }
         case "WriteInputs": {
           const resolved = yield* account();
@@ -616,6 +621,8 @@ const make = Effect.gen(function* () {
         }
         case "ClearInflight":
           return yield* writeFacts(record, { status, inflight: null });
+        case "Track":
+          return yield* writeFacts(record, { status, inflight: { op: action.op, startedAt: now } });
         case "Wait":
           return yield* writeFacts(record, { status });
         case "Watch":

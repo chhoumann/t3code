@@ -78,7 +78,6 @@ const fresh: SandboxRecord = {
 
 const created: SandboxRecord = {
   ...fresh,
-  createFirstAttemptAt: NOW - 5 * MINUTE,
   runningSince: NOW - 5 * MINUTE,
   machineId: ProviderMachineId.make("bx_test"),
 };
@@ -208,8 +207,14 @@ const cases: ReadonlyArray<Case> = [
   ],
   [
     "T3 not answering past the first boot deadline fails",
-    { ...booting, createFirstAttemptAt: NOW - FIRST_BOOT_DEADLINE_MS },
+    { ...booting, runningSince: NOW - FIRST_BOOT_DEADLINE_MS },
     running,
+    failed("boot", false),
+  ],
+  [
+    "a machine still starting past the first boot deadline fails",
+    { ...created, runningSince: NOW - FIRST_BOOT_DEADLINE_MS },
+    observed({ machine: machine("starting") }),
     failed("boot", false),
   ],
   [
@@ -305,7 +310,7 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
   ],
   [
-    "asking again after a stop failed past its deadline plans from what is observed",
+    "asking again after a stop failed past its deadline issues the stop again",
     {
       ...stopRequested,
       status: { _tag: "failed", step: "stop", message: "x", retryable: true },
@@ -314,7 +319,20 @@ const cases: ReadonlyArray<Case> = [
       inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
     },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "a resume asked for after a stop failed past its deadline issues the stop again first",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desired: "running",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
   ],
   [
     "a stopped machine resolves the stop",
@@ -369,6 +387,24 @@ const cases: ReadonlyArray<Case> = [
     { ...resumed, inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS } },
     observed({ machine: machine("starting") }),
     failed("resume", true),
+  ],
+  [
+    "asking again after a resume failed past its deadline issues the resume again",
+    {
+      ...resumed,
+      status: { _tag: "failed", step: "resume", message: "x", retryable: true },
+      settledRevision: 3,
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
+  ],
+  [
+    "a machine starting with no resume in flight is tracked, so it gets a deadline",
+    { ...resumed, credentialsStale: false },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Track", op: "resume" } },
   ],
   [
     "a delete gives up on a resume past its deadline",
@@ -426,10 +462,16 @@ const cases: ReadonlyArray<Case> = [
 
   // Stops the provider made on its own.
   [
-    "a provider stop in progress while ready",
+    "a provider stop in progress while ready is tracked, so it gets a deadline",
     ready,
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Wait" } },
+    { status: { _tag: "stopping" }, action: { _tag: "Track", op: "stop" } },
+  ],
+  [
+    "a tracked provider stop that lands settles as the provider's stop",
+    { ...ready, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
   ],
   [
     "stopped past the TTL while ready is expired, not resumed",
@@ -603,5 +645,81 @@ const cases: ReadonlyArray<Case> = [
 describe("planNext", () => {
   it.each(cases)("%s", (_, record, observation, expected) => {
     expect(planNext(record, observation)).toEqual(expected);
+  });
+});
+
+/**
+ * Plans step after step against a machine that never leaves `state`, applying
+ * each action's facts the way the reconciler records them, and returns the
+ * status the sandbox settles on, or null if it would wait forever.
+ */
+const settleAgainstStuckMachine = (start: SandboxRecord, state: ProviderMachineState) => {
+  const inflightAfter = (action: SandboxPlan["action"], now: number, current: SandboxRecord) => {
+    switch (action._tag) {
+      case "Stop":
+        return { op: "stop" as const, startedAt: now };
+      case "Resume":
+        return { op: "resume" as const, startedAt: now };
+      case "Track":
+        return { op: action.op, startedAt: now };
+      case "ClearInflight":
+        return null;
+      case "Wait":
+        return current.inflight;
+      default:
+        throw new Error(`Unexpected ${action._tag} against a stuck machine.`);
+    }
+  };
+  let record = start;
+  for (let now = NOW; now < NOW + 4 * ANSWER_DEADLINE_MS; now += MINUTE) {
+    const { status, action } = planNext(record, observed({ now, machine: machine(state) }));
+    if (action._tag === "Settle") return status;
+    record = Object.assign({}, record, { status, inflight: inflightAfter(action, now, record) });
+  }
+  return null;
+};
+
+describe("planNext over time", () => {
+  it("fails again, instead of waiting forever, when a retried stop never lands", () => {
+    const retried: SandboxRecord = {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    };
+    expect(settleAgainstStuckMachine(retried, "stopping")).toMatchObject({
+      _tag: "failed",
+      step: "stop",
+      retryable: true,
+    });
+  });
+
+  it("fails again when a retried resume never lands", () => {
+    const retried: SandboxRecord = {
+      ...resumed,
+      status: { _tag: "failed", step: "resume", message: "x", retryable: true },
+      settledRevision: 3,
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    };
+    expect(settleAgainstStuckMachine(retried, "starting")).toMatchObject({
+      _tag: "failed",
+      step: "resume",
+    });
+  });
+
+  it("fails a stop the provider began on its own that never lands", () => {
+    expect(settleAgainstStuckMachine(ready, "stopping")).toMatchObject({
+      _tag: "failed",
+      step: "stop",
+    });
+  });
+
+  it("fails a first create stuck in provisioning", () => {
+    expect(settleAgainstStuckMachine(created, "starting")).toMatchObject({
+      _tag: "failed",
+      step: "boot",
+    });
   });
 });

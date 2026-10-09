@@ -33,7 +33,7 @@ import type { ProviderMachine, ProviderMachineId } from "./SandboxProvider.ts";
 export const CREATE_KEY_WINDOW_MS = 23 * 60 * 60 * 1000;
 /** How long a provider call may take to show up in what the provider reports. */
 export const INFLIGHT_GRACE_MS = 2 * 60 * 1000;
-/** From the first create until T3 answers for the first time. */
+/** From the latest create until the machine runs and T3 answers in it for the first time. */
 export const FIRST_BOOT_DEADLINE_MS = 20 * 60 * 1000;
 /** From a stop or resume until the machine reports it. */
 export const TRANSITION_DEADLINE_MS = 10 * 60 * 1000;
@@ -98,7 +98,7 @@ export interface SandboxRecord {
   readonly inflight: SandboxInflight | null;
   /** The provider's idempotency key for the next create. Replaced only when a create is known not to have happened. */
   readonly createKey: string;
-  /** Set while a create may have reached the provider without its machine id being stored. */
+  /** Set while a create may have reached the provider without its machine id being stored; cleared once it is. */
   readonly createFirstAttemptAt: number | null;
   readonly machineId: ProviderMachineId | null;
   readonly httpBaseUrl: string | null;
@@ -131,6 +131,8 @@ export type SandboxAction =
   | { readonly _tag: "Resume" }
   | { readonly _tag: "Destroy" }
   | { readonly _tag: "ClearInflight" }
+  /** A transition the provider started on its own, recorded as in flight so it gets a deadline. */
+  | { readonly _tag: "Track"; readonly op: "stop" | "resume" }
   /** Look again shortly. */
   | { readonly _tag: "Wait" }
   /** Converged and running: look again now and then, for a stop the provider makes on its own. */
@@ -144,7 +146,9 @@ export interface SandboxPlan {
 }
 
 const plan = (status: SandboxStatus, action: SandboxAction): SandboxPlan => ({ status, action });
-const act = (tag: Exclude<SandboxAction["_tag"], "RecordEnvironment">): SandboxAction => ({
+const act = (
+  tag: Exclude<SandboxAction["_tag"], "RecordEnvironment" | "Track">,
+): SandboxAction => ({
   _tag: tag,
 });
 
@@ -202,12 +206,12 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
         act("Settle"),
       );
     case "stopping":
-      return plan(stopping, act("Wait"));
+      return plan(stopping, { _tag: "Track", op: "stop" });
     case "starting":
-      return plan(
-        firstBootDone ? resuming : record.inputsWrittenAt === null ? creating : booting,
-        act("Wait"),
-      );
+      if (firstBootDone) return plan(resuming, { _tag: "Track", op: "resume" });
+      return firstBootDeadlinePassed(record, observation)
+        ? plan(failed("boot", "The machine did not start in time.", false), act("Settle"))
+        : plan(record.inputsWrittenAt === null ? creating : booting, act("Wait"));
     case "stopped":
       return planStopped(record, observation);
     case "running":
@@ -240,7 +244,7 @@ function resolveInflight(
       if (machine.state === "stopping") {
         return age < TRANSITION_DEADLINE_MS
           ? plan(stopping, act("Wait"))
-          : giveUp(record, stopping, failed("stop", "The machine did not stop in time.", true));
+          : giveUp(record, plan(stopping, act("Stop")), "The machine did not stop in time.");
       }
       return plan(stopping, act(withinGrace ? "Wait" : "ClearInflight"));
     case "resume":
@@ -250,7 +254,7 @@ function resolveInflight(
       if (machine.state === "starting") {
         return age < TRANSITION_DEADLINE_MS
           ? plan(resuming, act("Wait"))
-          : giveUp(record, resuming, failed("resume", "The machine did not start in time.", true));
+          : giveUp(record, plan(resuming, act("Resume")), "The machine did not start in time.");
       }
       return plan(resuming, act(withinGrace ? "Wait" : "ClearInflight"));
     case "destroy":
@@ -259,15 +263,19 @@ function resolveInflight(
 }
 
 /**
- * A transition past its deadline fails the request it served. A delete, or
- * any request after that failure, stops waiting on it and plans from what is
- * observed.
+ * A transition past its deadline fails the request it served. A delete stops
+ * waiting on it; any other request after that failure issues the call again,
+ * which lands the transition before the request is planned.
  */
-function giveUp(record: SandboxRecord, waiting: SandboxStatus, failure: SandboxStatus) {
+function giveUp(record: SandboxRecord, reissue: SandboxPlan, message: string): SandboxPlan {
   if (record.desired === "destroyed") return plan(destroying, act("ClearInflight"));
-  return record.status._tag === "failed"
-    ? plan(waiting, act("ClearInflight"))
-    : plan(failure, act("Settle"));
+  if (record.status._tag === "failed") return reissue;
+  const step = reissue.action._tag === "Stop" ? "stop" : "resume";
+  return plan(failed(step, message, true), act("Settle"));
+}
+
+function firstBootDeadlinePassed(record: SandboxRecord, observation: SandboxObservation) {
+  return observation.now - (record.runningSince ?? record.createdAt) >= FIRST_BOOT_DEADLINE_MS;
 }
 
 function planDestroy(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
@@ -331,10 +339,9 @@ function planFirstBoot(
   if (machine.setup === "failed") {
     return plan(failed("boot", "The sandbox boot script failed.", false), act("Settle"));
   }
-  const bootStartedAt = record.createFirstAttemptAt ?? record.createdAt;
-  return observation.now - bootStartedAt < FIRST_BOOT_DEADLINE_MS
-    ? plan(booting, act("Wait"))
-    : plan(failed("boot", "T3 did not start in the sandbox in time.", false), act("Settle"));
+  return firstBootDeadlinePassed(record, observation)
+    ? plan(failed("boot", "T3 did not start in the sandbox in time.", false), act("Settle"))
+    : plan(booting, act("Wait"));
 }
 
 function planRunning(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
