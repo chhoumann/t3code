@@ -19,6 +19,7 @@ import {
 
 const tarball: SandboxT3Source = { kind: "tarball", version: "0.0.45" };
 const npm: SandboxT3Source = { kind: "npm", version: "0.0.45" };
+const label = "Add hello.txt";
 
 const bashSyntaxErrors = (script: string) =>
   NodeChildProcess.spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
@@ -31,13 +32,13 @@ describe("renderSandboxBootScript", () => {
     ["tarball", tarball],
     ["npm", npm],
   ])("renders valid bash for %s", (_, source) => {
-    const result = bashSyntaxErrors(renderSandboxBootScript(source));
+    const result = bashSyntaxErrors(renderSandboxBootScript({ t3: source, label }));
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
   });
 
   it("installs the machine setup as a boot unit with the account env, after the inputs and before T3", () => {
-    const script = renderSandboxBootScript(tarball);
+    const script = renderSandboxBootScript({ t3: tarball, label });
     const lines = script.split("\n");
     const waitForInputs = lineIndex(
       script,
@@ -56,8 +57,28 @@ describe("renderSandboxBootScript", () => {
     expect(lines).toContain("sudo systemctl enable t3-sandbox-machine-setup.service");
   });
 
+  it("names the machine after the sandbox before T3 starts, hostile titles included", () => {
+    const title = `it's "$HOME" \`id\` $(id) \\`;
+    const script = renderSandboxBootScript({ t3: tarball, label: title });
+    const naming = lineIndex(script, /hostnamectl/);
+    expect(naming).toBeGreaterThanOrEqual(0);
+    expect(naming).toBeLessThan(lineIndex(script, /service install/));
+    const result = NodeChildProcess.spawnSync(
+      "bash",
+      ["-c", `sudo() { printf '%s\\0' "$@"; }\n${script.split("\n")[naming]}`],
+      { encoding: "utf8" },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.stdout.split("\0").slice(0, -1)).toEqual([
+      "hostnamectl",
+      "set-hostname",
+      "--pretty",
+      title,
+    ]);
+  });
+
   it("writes the service drop-in before the service starts", () => {
-    const script = renderSandboxBootScript(tarball);
+    const script = renderSandboxBootScript({ t3: tarball, label });
     const userDropIn = script.lastIndexOf("[Service]");
     const dropIn = script.slice(userDropIn, script.indexOf("EOF", userDropIn));
     expect(dropIn.split("\n").filter(Boolean)).toEqual([
@@ -72,20 +93,22 @@ describe("renderSandboxBootScript", () => {
   });
 
   it("installs an uploaded build without fetching a release", () => {
-    const script = renderSandboxBootScript(tarball);
+    const script = renderSandboxBootScript({ t3: tarball, label });
     expect(script).not.toContain("npx");
     expect(script).toContain("tar -xzf '/home/user/.t3/sandbox/t3.tgz'");
     expect(script).toContain('"$RUNTIME/t3" service install');
   });
 
   it("installs a release through npm at the requested version", () => {
-    expect(renderSandboxBootScript(npm)).toContain("npx --yes 't3@0.0.45' service install");
+    expect(renderSandboxBootScript({ t3: npm, label })).toContain(
+      "npx --yes 't3@0.0.45' service install",
+    );
   });
 
   it("keeps everything out of paths Boat does not persist", () => {
     for (const script of [
-      renderSandboxBootScript(tarball),
-      renderSandboxBootScript(npm),
+      renderSandboxBootScript({ t3: tarball, label }),
+      renderSandboxBootScript({ t3: npm, label }),
       renderRefreshCredentialsCommand(),
     ]) {
       expect(script).not.toMatch(/\/tmp\b/);

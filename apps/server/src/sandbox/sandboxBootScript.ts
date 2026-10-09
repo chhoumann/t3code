@@ -136,7 +136,11 @@ function renderMachineSetupUnit(): ReadonlyArray<string> {
   ];
 }
 
-export function renderSandboxBootScript(source: SandboxT3Source): string {
+export function renderSandboxBootScript(input: {
+  readonly t3: SandboxT3Source;
+  /** What every client calls this environment; T3 reads it from the pretty hostname. */
+  readonly label: string;
+}): string {
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -158,6 +162,7 @@ export function renderSandboxBootScript(source: SandboxT3Source): string {
     "EOF",
     "sudo sysctl -q --system",
     "sudo systemctl set-property user.slice MemorySwapMax=infinity",
+    `sudo hostnamectl set-hostname --pretty ${shellQuote(input.label)}`,
     "sudo loginctl enable-linger user",
     ...renderMachineSetupUnit(),
     "",
@@ -171,7 +176,7 @@ export function renderSandboxBootScript(source: SandboxT3Source): string {
     // The machine's own Boat token must not reach agents running under T3.
     "UnsetEnvironment=ASCII_TOKEN",
     "EOF",
-    ...renderInstall(source),
+    ...renderInstall(input.t3),
     "",
     `for _ in $(seq 1 ${SERVER_START_WAIT_SECONDS}); do`,
     `  curl -fsS -o /dev/null http://127.0.0.1:${SANDBOX_T3_PORT}/.well-known/t3/environment && exit 0`,

@@ -478,7 +478,10 @@ const make = Effect.gen(function* () {
               env: {},
               template: record.spec.machine.template,
               providerEnvironment: record.spec.machine.providerEnvironment,
-              setupScript: renderSandboxBootScript(record.spec.t3),
+              setupScript: renderSandboxBootScript({
+                t3: record.spec.t3,
+                label: record.spec.title,
+              }),
             })
             .pipe(
               Effect.tapError((error) =>
