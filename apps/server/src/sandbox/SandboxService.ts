@@ -475,7 +475,6 @@ const make = Effect.gen(function* () {
               idempotencyKey: record.createKey,
               size: record.spec.machine.size,
               ttlSeconds: record.spec.machine.ttlSeconds,
-              env: {},
               template: record.spec.machine.template,
               providerEnvironment: record.spec.machine.providerEnvironment,
               setupScript: renderSandboxBootScript({

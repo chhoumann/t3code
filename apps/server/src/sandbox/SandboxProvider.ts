@@ -38,7 +38,6 @@ export interface CreateMachineInput {
   readonly size: SandboxMachineSize;
   /** Null disables the provider's auto-stop. */
   readonly ttlSeconds: number | null;
-  readonly env: Readonly<Record<string, string>>;
   /** A provider named snapshot to start from. */
   readonly template: string | null;
   /** A provider secret bundle. Null creates the machine with no account secrets at all. */

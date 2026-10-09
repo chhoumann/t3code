@@ -27,24 +27,9 @@ import {
 
 const BOAT_API_BASE_URL = "https://boat.dev/api/v1";
 
-const BoatSandboxState = Schema.Literals([
-  "init",
-  "provisioning",
-  "provisioned",
-  "cloning",
-  "ready",
-  "idle",
-  "running",
-  "archiving",
-  "archived",
-  "error",
-  "cancelled",
-]);
-type BoatSandboxState = typeof BoatSandboxState.Type;
-
 const BoatSandbox = Schema.Struct({
   id: Schema.String,
-  state: BoatSandboxState,
+  state: Schema.String,
   setupStatus: Schema.optional(
     Schema.NullOr(Schema.Literals(["pending", "running", "done", "failed"])),
   ),
@@ -73,19 +58,20 @@ const BoatErrorBody = Schema.Struct({
   ),
 });
 
-const MACHINE_STATE: Record<BoatSandboxState, ProviderMachineState> = {
-  init: "starting",
-  provisioning: "starting",
-  provisioned: "starting",
-  cloning: "starting",
-  ready: "running",
-  idle: "running",
-  running: "running",
-  archiving: "stopping",
-  archived: "stopped",
-  error: "failed",
-  cancelled: "failed",
-};
+/** A state Boat adds later reads as starting, so the lifecycle waits on it instead of failing. */
+const MACHINE_STATE = new Map<string, ProviderMachineState>([
+  ["init", "starting"],
+  ["provisioning", "starting"],
+  ["provisioned", "starting"],
+  ["cloning", "starting"],
+  ["ready", "running"],
+  ["idle", "running"],
+  ["running", "running"],
+  ["archiving", "stopping"],
+  ["archived", "stopped"],
+  ["error", "failed"],
+  ["cancelled", "failed"],
+]);
 
 const LIMIT_CODES = new Set([
   "limit_reached",
@@ -192,7 +178,7 @@ const ACCESS_PROBES: ReadonlyArray<{
 
 const toMachine = (sandbox: BoatSandbox): ProviderMachine => ({
   id: ProviderMachineId.make(sandbox.id),
-  state: MACHINE_STATE[sandbox.state],
+  state: MACHINE_STATE.get(sandbox.state) ?? "starting",
   setup: sandbox.setupStatus ?? null,
 });
 
@@ -219,12 +205,13 @@ const make = Effect.gen(function* () {
       Effect.mapError((cause) => new SandboxProviderError({ operation, kind: "transient", cause })),
       Effect.flatMap((response) => {
         if (response.status >= 200 && response.status < 300) {
+          // Boat acted, but what it did is unknown: asking again with the same key finds out.
           return HttpClientResponse.schemaBodyJson(success)(response).pipe(
             Effect.mapError(
               (cause) =>
                 new SandboxProviderError({
                   operation,
-                  kind: "invalid",
+                  kind: "transient",
                   status: response.status,
                   cause,
                 }),
@@ -312,7 +299,6 @@ const make = Effect.gen(function* () {
         HttpClientRequest.bodyJsonUnsafe({
           type: input.size,
           ttlSeconds: input.ttlSeconds,
-          env: input.env,
           setupScript: input.setupScript,
           ...(input.template === null ? {} : { from: input.template }),
           ...(input.providerEnvironment === null

@@ -75,7 +75,6 @@ describe("BoatSandboxProvider", () => {
             idempotencyKey: "sandbox-1",
             size: "small",
             ttlSeconds: 3600,
-            env: {},
             template: null,
             providerEnvironment: null,
             setupScript: "true",
@@ -92,6 +91,48 @@ describe("BoatSandboxProvider", () => {
       ]);
       expect(seen[0]?.body).toMatchObject({ type: "small", noEnv: true });
       expect(seen[0]?.headers["authorization"]).toBe("Bearer test-key");
+    }),
+  );
+
+  it.effect("treats an accepted create whose reply cannot be read as unknown, not refused", () =>
+    Effect.gen(function* () {
+      const { exit, seen } = yield* run(
+        [
+          () => new Response("<html>gateway</html>", { status: 202 }),
+          () => new Response(JSON.stringify({ ok: true, sandbox }), { status: 202 }),
+        ],
+        (provider) =>
+          provider.create(account, {
+            idempotencyKey: "sandbox-1",
+            size: "small",
+            ttlSeconds: 3600,
+            template: null,
+            providerEnvironment: null,
+            setupScript: "true",
+          }),
+      );
+      expect(exit._tag === "Success" && exit.value.id).toBe("bx_23456789");
+      expect(seen.map((request) => request.headers["idempotency-key"])).toEqual([
+        "sandbox-1",
+        "sandbox-1",
+      ]);
+    }),
+  );
+
+  it.effect("reads a machine state Boat added later as starting", () =>
+    Effect.gen(function* () {
+      const { exit } = yield* run(
+        [
+          () =>
+            new Response(JSON.stringify({ ok: true, sandbox: { ...sandbox, state: "migrating" } })),
+        ],
+        (provider) => provider.inspect(account, machineId),
+      );
+      expect(exit._tag === "Success" && exit.value).toEqual({
+        id: "bx_23456789",
+        state: "starting",
+        setup: "pending",
+      });
     }),
   );
 
@@ -241,7 +282,6 @@ describe("BoatSandboxProvider", () => {
               idempotencyKey: "sandbox-1",
               size: "large",
               ttlSeconds: 3600,
-              env: {},
               template: null,
               providerEnvironment: null,
               setupScript: "true",
