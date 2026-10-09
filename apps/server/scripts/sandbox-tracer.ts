@@ -44,12 +44,11 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { Socket } from "effect/socket";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import serverPackageJson from "../package.json" with { type: "json" };
-import { stageRuntimeExternals } from "../../../scripts/build-cli-archive.ts";
+import { packSandboxServer } from "./pack-sandbox-server.ts";
 import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
@@ -72,8 +71,6 @@ const { values: flags } = NodeUtil.parseArgs({
   },
 });
 
-const repoRoot = NodePath.resolve(import.meta.dirname, "../../..");
-const serverDir = NodePath.join(repoRoot, "apps/server");
 const ACCOUNT_ID = SandboxAccountId.make("tracer");
 const SETUP_RUNS_LOG = "/home/user/machine-setup-runs.log";
 /** Appends the boot's id and the account env's round on every run of the setup unit. */
@@ -132,39 +129,13 @@ const step = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>) =>
 const check = (ok: boolean, message: string) =>
   ok ? Effect.void : Effect.fail(new TracerError({ reason: `check failed: ${message}` }));
 
-const run = (command: string, args: ReadonlyArray<string>, cwd: string) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(
-      ChildProcess.make(command, args, { cwd, stdout: "inherit", stderr: "inherit" }),
-    );
-    yield* check(exitCode === 0, `${command} ${args.join(" ")} exited ${exitCode}`);
-  });
-
-/**
- * This checkout's server laid out like a linux-x64 release archive (bundle,
- * web client, runtime externals staged by the archive build), minus the
- * single-executable: the machine's Node runs the bundle.
- */
 const packServer = Effect.gen(function* () {
-  if (!flags["skip-build"]) yield* run("vp", ["run", "--filter", "t3", "build"], repoRoot);
-  const stage = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-pack-"));
-  const root = NodePath.join(stage, "t3");
-  NodeFS.mkdirSync(root);
-  yield* stageRuntimeExternals({
-    repoRoot,
-    stageDir: root,
-    platform: "linux",
-    arch: "x64",
-    version: serverPackageJson.version,
-  });
-  NodeFS.cpSync(NodePath.join(serverDir, "dist"), NodePath.join(root, "dist"), {
-    recursive: true,
-    filter: (source) => !source.endsWith(".map"),
-  });
-  const tarball = NodePath.join(stage, "t3.tgz");
-  yield* run("tar", ["--no-mac-metadata", "-czf", tarball, "-C", stage, "t3"], stage);
-  return new Uint8Array(NodeFS.readFileSync(tarball));
+  const out = NodePath.join(
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-tracer-pack-")),
+    "t3.tgz",
+  );
+  yield* packSandboxServer({ skipBuild: flags["skip-build"], out });
+  return new Uint8Array(NodeFS.readFileSync(out));
 });
 
 /** The account env's round; bumped before a resume to prove the env file is rewritten. */

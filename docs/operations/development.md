@@ -96,6 +96,25 @@ startup and keeps its own SQLite data, signing key, and revocation state. Deskto
 servers ignore the value. See [environment authentication](../internals/environment-auth.md#reusable-dev-credential)
 for the security model.
 
+### Sandboxes from a development server
+
+A sandbox installs its owner's own T3 version. A release owner installs it from npm. A
+development checkout's version is not published, so pack the checkout and point the owner at
+the tarball before launching sandboxes:
+
+```sh
+vp run pack-sandbox-server          # add --skip-build to reuse apps/server/dist
+T3CODE_SANDBOX_SERVER_TARBALL=<printed path> vp run dev
+```
+
+The owner uploads that tarball to each new sandbox. Pack again after server changes; existing
+sandboxes keep the build they installed.
+
+`node --env-file=.env.local apps/server/scripts/sandbox-tracer.ts [--skip-build] [--agent-proxy]`
+drives one sandbox through launch, stop, resume, and destroy on real Boat with
+`BOAT_DEV_API_KEY`. `--agent-proxy` also gives it this shell's `ANTHROPIC_*` proxy settings and
+`TAILSCALE_AUTH_KEY`, joins the tailnet on every boot, and checks that the agent replies.
+
 ## Checks
 
 Run checks for the files and packages you changed:
