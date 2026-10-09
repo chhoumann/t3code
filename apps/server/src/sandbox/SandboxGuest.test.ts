@@ -5,10 +5,17 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
+import { HttpClient } from "effect/http";
+import { Socket } from "effect/socket";
 
 import { FLOCK_SHIM } from "../testUtils/flockShim.ts";
 import { SANDBOX_ENV_FILE } from "./sandboxBootScript.ts";
+import * as SandboxGuest from "./SandboxGuest.ts";
 import { renderCloneCommand } from "./SandboxGuest.ts";
+import { ProviderMachineId, SandboxProvider } from "./SandboxProvider.ts";
 
 const git = (cwd: string, ...args: ReadonlyArray<string>) =>
   NodeChildProcess.execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -99,5 +106,62 @@ describe("renderCloneCommand", () => {
     expect(git(checkout, "symbolic-ref", "--short", "HEAD")).toBe("t3/sandbox-0a1b2c3d");
     expect(git(checkout, "rev-parse", "HEAD")).toBe(pinned);
     NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("SandboxGuest", () => {
+  it.effect("names why a guest command failed with the end of its stderr", () => {
+    const unused = () => Effect.die("unused");
+    const stderr = [
+      "Cloning into '/home/user/projects/app.partial'...",
+      "remote: Repository not found.",
+      "line 3",
+      "line 4",
+      "line 5",
+      "line 6",
+      "fatal: Authentication failed for 'https://github.com/acme/app.git/'",
+      "",
+    ].join("\n");
+    const layer = SandboxGuest.layer.pipe(
+      Layer.provide(
+        Layer.succeed(
+          SandboxProvider,
+          SandboxProvider.of({
+            checkAccess: unused,
+            create: unused,
+            inspect: unused,
+            exec: () => Effect.succeed({ exitCode: 128, stdout: "", stderr, timedOut: false }),
+            writeFile: unused,
+            host: unused,
+            stop: unused,
+            resume: unused,
+            destroy: unused,
+          }),
+        ),
+      ),
+      Layer.provide(Layer.succeed(HttpClient.HttpClient, HttpClient.make(unused))),
+      Layer.provide(Socket.layerWebSocketConstructorGlobal),
+    );
+    return Effect.gen(function* () {
+      const guest = yield* SandboxGuest.SandboxGuest;
+      const failure = yield* guest
+        .cloneCheckout({ apiKey: Redacted.make("key") }, ProviderMachineId.make("bx_1"), {
+          remoteUrl: "https://github.com/acme/app.git",
+          commit: null,
+          branch: "t3/sandbox-0a1b2c3d",
+          path: "/home/user/projects/app",
+        })
+        .pipe(Effect.flip);
+      expect(failure.message).toBe(
+        [
+          "Could not clone the repository in the sandbox.",
+          "line 3",
+          "line 4",
+          "line 5",
+          "line 6",
+          "fatal: Authentication failed for 'https://github.com/acme/app.git/'",
+        ].join("\n"),
+      );
+    }).pipe(Effect.provide(layer));
   });
 });

@@ -133,13 +133,16 @@ export class SandboxGuestError extends Schema.TaggedError<SandboxGuestError>()(
   {
     operation: SandboxGuestOperation,
     exitCode: Schema.optional(Schema.NullOr(Schema.Int)),
+    /** The end of the command's stderr, such as git's reason a clone failed. */
+    stderrTail: Schema.optional(Schema.String),
     /** The guest no longer accepts the session the call was made with. */
     unauthorized: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
-    return `Could not ${OPERATION_SUMMARY[this.operation]}.`;
+    const summary = `Could not ${OPERATION_SUMMARY[this.operation]}.`;
+    return this.stderrTail === undefined ? summary : `${summary}\n${this.stderrTail}`;
   }
 }
 
@@ -162,6 +165,19 @@ const READINESS_TIMEOUT = Duration.seconds(5);
 const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const CLONE_TIMEOUT_SECONDS = 600;
 const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
+const STDERR_TAIL_LINES = 5;
+const STDERR_TAIL_CHARS = 600;
+
+/** The last few lines a failed command wrote, enough to name why without flooding a status. */
+const stderrTail = (stderr: string) => {
+  const tail = stderr
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .slice(-STDERR_TAIL_LINES)
+    .join("\n");
+  return tail.length === 0 ? undefined : tail.slice(-STDERR_TAIL_CHARS);
+};
 
 /** The command the owner runs in the guest to clone idempotently and read `t3.json`. */
 export function renderCloneCommand(checkout: SandboxCheckout): string {
@@ -305,15 +321,19 @@ const make = Effect.gen(function* () {
     command: string,
     timeoutSeconds: number,
   ) =>
-    provider
-      .exec(account, machineId, { command, timeoutSeconds })
-      .pipe(
-        Effect.flatMap((result) =>
-          result.exitCode === 0
-            ? Effect.succeed(result.stdout)
-            : Effect.fail(new SandboxGuestError({ operation, exitCode: result.exitCode })),
-        ),
-      );
+    provider.exec(account, machineId, { command, timeoutSeconds }).pipe(
+      Effect.flatMap((result) => {
+        if (result.exitCode === 0) return Effect.succeed(result.stdout);
+        const tail = stderrTail(result.stderr);
+        return Effect.fail(
+          new SandboxGuestError({
+            operation,
+            exitCode: result.exitCode,
+            ...(tail === undefined ? {} : { stderrTail: tail }),
+          }),
+        );
+      }),
+    );
 
   const encode = (text: string) => new TextEncoder().encode(text);
 

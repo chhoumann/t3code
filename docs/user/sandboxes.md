@@ -20,6 +20,11 @@ machine setup script alone and keep it out of the agents' environment. This is
 not a hard boundary: the sandbox's user has passwordless `sudo` and can read the
 file that holds it.
 
+The sandbox clones your project itself, so it needs its own access to private
+repositories. For an HTTPS remote, add a token as an environment variable and
+configure a Git credential helper that reads it in the account's machine setup
+script. An SSH remote needs a key set up the same way.
+
 ## Start a sandbox
 
 In a new thread in a project, open the environment picker and choose
