@@ -533,6 +533,7 @@ const make = Effect.gen(function* () {
           const checkout = {
             remoteUrl: record.spec.repository.remoteUrl,
             commit: record.spec.repository.commit,
+            branch: `t3/sandbox-${record.id.slice(0, 8)}`,
             path: checkoutPath(record.spec.repository.remoteUrl),
           };
           const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);

@@ -74,8 +74,10 @@ export interface SandboxGuestTarget {
 
 export interface SandboxCheckout {
   readonly remoteUrl: string;
-  /** Checked out after cloning; null keeps the remote's default branch. */
+  /** Checked out after cloning; null starts from the remote's default branch. */
   readonly commit: string | null;
+  /** The task branch the clone starts on, created at `commit`. */
+  readonly branch: string;
   /** Absolute path in the guest. */
   readonly path: string;
 }
@@ -148,7 +150,7 @@ const CLONE_TIMEOUT_SECONDS = 600;
 const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
 
 /** The command the owner runs in the guest to clone idempotently and read `t3.json`. */
-function renderCloneCommand(checkout: SandboxCheckout): string {
+export function renderCloneCommand(checkout: SandboxCheckout): string {
   const path = shellQuote(checkout.path);
   const partial = shellQuote(`${checkout.path}.partial`);
   return [
@@ -158,9 +160,9 @@ function renderCloneCommand(checkout: SandboxCheckout): string {
     `if [ ! -d ${path}/.git ]; then`,
     `  rm -rf ${partial}`,
     `  git clone --quiet -- ${shellQuote(checkout.remoteUrl)} ${partial}`,
-    ...(checkout.commit === null
-      ? []
-      : [`  git -C ${partial} checkout --quiet --detach ${shellQuote(checkout.commit)}`]),
+    `  git -C ${partial} checkout --quiet -b ${shellQuote(checkout.branch)}${
+      checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
+    }`,
     `  mv ${partial} ${path}`,
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
