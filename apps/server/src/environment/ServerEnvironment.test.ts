@@ -401,12 +401,15 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
 
       expect((yield* describe).capabilities.sandboxes).toBe(true);
       const inSandbox = yield* describe.pipe(
-        Effect.provideService(ManagedSandbox.ManagedSandbox, {
-          ownerEnvironmentId: EnvironmentId.make("environment-owner"),
-          sandboxId: SandboxId.make("sbx-1"),
-          projectId: ProjectId.make("project-seed"),
-          threadId: ThreadId.make("thread-seed"),
-        }),
+        Effect.provideService(
+          ManagedSandbox.ManagedSandbox,
+          ManagedSandbox.makeManagedSandboxGuest({
+            ownerEnvironmentId: EnvironmentId.make("environment-owner"),
+            sandboxId: SandboxId.make("sbx-1"),
+            projectId: ProjectId.make("project-seed"),
+            threadId: ThreadId.make("thread-seed"),
+          }),
+        ),
       );
       expect(inSandbox.capabilities.sandboxes).toBeUndefined();
     }),

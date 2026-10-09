@@ -498,7 +498,43 @@ it.effect("deletes a project without force once its imported threads were delete
   }).pipe(Effect.provide(layerDatabase)),
 );
 
-it.effect("a sandbox deletes the project it was launched with only for its owner", () =>
+const sandboxGuest = (projectId: ProjectId, threadId: ThreadId) =>
+  ManagedSandbox.makeManagedSandboxGuest({
+    ownerEnvironmentId: EnvironmentId.make("environment:owner"),
+    sandboxId: SandboxId.make("sbx-seed"),
+    projectId,
+    threadId,
+  });
+
+it.effect(
+  "a sandbox deletes its seed project for anyone while another project has an active thread",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:sandbox-seed");
+      const threadId = ThreadId.make("thread:sandbox-seed");
+      const otherProjectId = ProjectId.make("project:other");
+      yield* seedProject(projectId);
+      yield* seedProject(otherProjectId);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        yield* eventSink.write({
+          events: [
+            nativeThreadCreated(projectId, threadId),
+            nativeThreadCreated(otherProjectId, ThreadId.make("thread:other")),
+          ],
+        });
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest(projectId, threadId)),
+        );
+        const deleted = yield* service
+          .delete({ commandId: CommandId.make("command:seed-delete"), projectId, force: true })
+          .pipe(Effect.provideService(ManagedSandbox.CommandCaller, { subject: "mcp-client" }));
+        assert.isNotNull(deleted.deletedAt);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("a sandbox deletes a project holding its last active thread only for its owner", () =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("project:sandbox-seed");
     const threadId = ThreadId.make("thread:sandbox-seed");
@@ -508,12 +544,7 @@ it.effect("a sandbox deletes the project it was launched with only for its owner
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       yield* eventSink.write({ events: [nativeThreadCreated(projectId, threadId)] });
       const service = yield* ProjectService.make.pipe(
-        Effect.provideService(ManagedSandbox.ManagedSandbox, {
-          ownerEnvironmentId: EnvironmentId.make("environment:owner"),
-          sandboxId: SandboxId.make("sbx-seed"),
-          projectId,
-          threadId,
-        }),
+        Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest(projectId, threadId)),
       );
       const input = { commandId: CommandId.make("command:seed-delete"), projectId, force: true };
 

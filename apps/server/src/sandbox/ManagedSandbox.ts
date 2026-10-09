@@ -1,9 +1,9 @@
 /**
  * ManagedSandbox - what a sandbox's own T3 server knows about the owner that
  * runs it, and the guard that keeps clients and agents in the sandbox from
- * archiving its last active top-level thread or deleting the seed thread or
- * project. Each would leave the machine running unseen; the owner stops or
- * destroys the sandbox instead.
+ * archiving or deleting its last active top-level thread, directly or with
+ * its project. That would leave the machine running unseen; the owner stops
+ * or destroys the sandbox instead.
  *
  * The owner writes the marker with the boot inputs. A server without one is
  * not a sandbox and is never guarded.
@@ -23,6 +23,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 import { MANAGED_SANDBOX_FILE } from "./sandboxBootScript.ts";
@@ -43,11 +44,22 @@ export const encodeManagedSandboxMarker = Schema.encodeSync(
 );
 const decodeManagedSandboxMarker = Schema.decodeEffect(Schema.fromJsonString(ManagedSandboxMarker));
 
+export interface ManagedSandboxGuest {
+  readonly marker: ManagedSandboxMarker;
+  /** Held from the guard's check through the change it allows, so two changes cannot both pass. */
+  readonly lock: Semaphore.Semaphore;
+}
+
 /** Null outside a sandbox. Services read it once, when they are built. */
-export class ManagedSandbox extends Context.Reference<ManagedSandboxMarker | null>(
+export class ManagedSandbox extends Context.Reference<ManagedSandboxGuest | null>(
   "t3/sandbox/ManagedSandbox",
   { defaultValue: () => null },
 ) {}
+
+export const makeManagedSandboxGuest = (marker: ManagedSandboxMarker): ManagedSandboxGuest => ({
+  marker,
+  lock: Semaphore.makeUnsafe(1),
+});
 
 /**
  * The authenticated subject a transport is serving. Absent for the CLI and
@@ -58,35 +70,43 @@ export class CommandCaller extends Context.Reference<{ readonly subject: string 
   { defaultValue: () => null },
 ) {}
 
-/** Refuses the change unless it targets nothing the owner manages, or the owner asks. */
-export const guardManaged = (
-  marker: ManagedSandboxMarker | null,
-  target:
-    | {
-        readonly operation: "archive-thread";
-        /** The sandbox's active top-level threads; archiving the last one is the owner's stop. */
-        readonly activeTopLevelThreadIds: ReadonlyArray<ThreadId>;
-        readonly threadId: ThreadId;
-      }
-    | { readonly operation: "delete-thread"; readonly threadId: ThreadId }
-    | { readonly operation: "delete-project"; readonly projectId: ProjectId },
-): Effect.Effect<void, SandboxManagedByOwnerError> =>
+interface GuardedThread {
+  readonly id: ThreadId;
+  readonly projectId: ProjectId;
+}
+
+/**
+ * Runs `change` unless a caller other than the owner would leave the sandbox
+ * with no active top-level thread: `change` removes the threads `removes`
+ * picks from those `activeTopLevelThreads` reads.
+ */
+export const guardLastActiveThread = <A, E, R, E2, R2>(
+  managed: ManagedSandboxGuest | null,
+  input: {
+    readonly operation: SandboxManagedByOwnerError["operation"];
+    readonly activeTopLevelThreads: Effect.Effect<ReadonlyArray<GuardedThread>, E2, R2>;
+    readonly removes: (thread: GuardedThread) => boolean;
+  },
+  change: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | E2 | SandboxManagedByOwnerError, R | R2> =>
   Effect.gen(function* () {
-    if (marker === null) return;
-    const managed =
-      target.operation === "archive-thread"
-        ? target.activeTopLevelThreadIds.length === 1 &&
-          target.activeTopLevelThreadIds[0] === target.threadId
-        : target.operation === "delete-thread"
-          ? target.threadId === marker.threadId
-          : target.projectId === marker.projectId;
-    if (!managed) return;
-    if ((yield* CommandCaller)?.subject === SANDBOX_OWNER_SUBJECT) return;
-    return yield* new SandboxManagedByOwnerError({
-      ownerEnvironmentId: marker.ownerEnvironmentId,
-      sandboxId: marker.sandboxId,
-      operation: target.operation,
-    });
+    if (managed === null || (yield* CommandCaller)?.subject === SANDBOX_OWNER_SUBJECT) {
+      return yield* change;
+    }
+    return yield* managed.lock.withPermits(1)(
+      Effect.gen(function* () {
+        const active = yield* input.activeTopLevelThreads;
+        const remaining = active.filter((thread) => !input.removes(thread));
+        if (remaining.length < active.length && remaining.length === 0) {
+          return yield* new SandboxManagedByOwnerError({
+            ownerEnvironmentId: managed.marker.ownerEnvironmentId,
+            sandboxId: managed.marker.sandboxId,
+            operation: input.operation,
+          });
+        }
+        return yield* change;
+      }),
+    );
   });
 
 export const layer = Layer.effect(
@@ -104,6 +124,8 @@ export const layer = Layer.effect(
         }),
       );
     // The owner writes the marker with our own schema; one it cannot decode is a bug.
-    return raw === null ? null : yield* decodeManagedSandboxMarker(raw).pipe(Effect.orDie);
+    return raw === null
+      ? null
+      : makeManagedSandboxGuest(yield* decodeManagedSandboxMarker(raw).pipe(Effect.orDie));
   }),
 );

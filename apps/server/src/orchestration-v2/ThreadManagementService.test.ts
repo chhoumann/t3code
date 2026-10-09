@@ -515,11 +515,12 @@ it.effect.each([
   }),
 );
 
-it.effect("a sandbox keeps its last active thread and its seed thread for its owner", () => {
+/** A sandbox guest whose orchestrator archives and deletes in memory, yielding mid-dispatch. */
+const sandboxGuestService = () => {
   const seed = ThreadId.make("thread:sandbox-seed");
   const other = ThreadId.make("thread:sandbox-other");
   const child = ThreadId.make("thread:sandbox-child");
-  const archived = new Set<ThreadId>();
+  const removed = new Set<ThreadId>();
   const dispatched: Array<string> = [];
   const layerTest = ThreadManagementService.layer.pipe(
     Layer.provide(
@@ -529,58 +530,107 @@ it.effect("a sandbox keeps its last active thread and its seed thread for its ow
             () =>
               ({
                 threads: [
-                  { id: seed, lineage: { parentThreadId: null } },
-                  { id: other, lineage: { parentThreadId: null } },
-                  { id: child, lineage: { parentThreadId: seed } },
-                ].filter((thread) => !archived.has(thread.id)),
+                  {
+                    id: seed,
+                    projectId: "project:sandbox-seed",
+                    lineage: { parentThreadId: null },
+                  },
+                  {
+                    id: other,
+                    projectId: "project:sandbox-seed",
+                    lineage: { parentThreadId: null },
+                  },
+                  {
+                    id: child,
+                    projectId: "project:sandbox-seed",
+                    lineage: { parentThreadId: seed },
+                  },
+                ].filter((thread) => !removed.has(thread.id)),
               }) as unknown as OrchestrationV2ThreadShellSnapshot,
           ),
+        // Yields before taking effect, as a real dispatch does, so concurrent checks can interleave.
         dispatch: (command) =>
-          Effect.sync(() => {
-            if (command.type === "thread.archive") archived.add(command.threadId);
-            if (command.type === "thread.unarchive") archived.delete(command.threadId);
-            dispatched.push(`${command.type} ${"threadId" in command ? command.threadId : ""}`);
-            return { sequence: dispatched.length, storedEvents: [] };
-          }),
+          Effect.yieldNow.pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                if (command.type === "thread.archive" || command.type === "thread.delete") {
+                  removed.add(command.threadId);
+                }
+                if (command.type === "thread.unarchive") removed.delete(command.threadId);
+                dispatched.push(`${command.type} ${"threadId" in command ? command.threadId : ""}`);
+                return { sequence: dispatched.length, storedEvents: [] };
+              }),
+            ),
+          ),
       }),
     ),
     Layer.provide(
-      Layer.succeed(ManagedSandbox.ManagedSandbox, {
-        ownerEnvironmentId: EnvironmentId.make("environment:owner"),
-        sandboxId: SandboxId.make("sbx-seed"),
-        projectId: ProjectId.make("project:sandbox-seed"),
-        threadId: seed,
-      }),
+      Layer.succeed(
+        ManagedSandbox.ManagedSandbox,
+        ManagedSandbox.makeManagedSandboxGuest({
+          ownerEnvironmentId: EnvironmentId.make("environment:owner"),
+          sandboxId: SandboxId.make("sbx-seed"),
+          projectId: ProjectId.make("project:sandbox-seed"),
+          threadId: seed,
+        }),
+      ),
     ),
   );
-  const command = (
-    type: "thread.archive" | "thread.unarchive" | "thread.delete",
-    threadId: ThreadId,
-  ) => ({ type, commandId: CommandId.make(`${type}:${threadId}`), threadId }) as const;
+  return { seed, other, removed, dispatched, layerTest };
+};
 
+const sandboxCommand = (
+  type: "thread.archive" | "thread.unarchive" | "thread.delete",
+  threadId: ThreadId,
+) => ({ type, commandId: CommandId.make(`${type}:${threadId}`), threadId }) as const;
+
+const asCaller = (subject: string | null) =>
+  Effect.provideService(ManagedSandbox.CommandCaller, subject === null ? null : { subject });
+
+it.effect("a sandbox keeps its last active top-level thread for its owner", () => {
+  const { seed, other, dispatched, layerTest } = sandboxGuestService();
   return Effect.gen(function* () {
     const service = yield* ThreadManagementService.ThreadManagementService;
-    const asCaller = (subject: string | null) =>
-      Effect.provideService(ManagedSandbox.CommandCaller, subject === null ? null : { subject });
 
-    // Another top-level thread keeps the sandbox in view, so the seed archives like any thread.
-    yield* service.dispatch(command("thread.archive", seed));
-    // A subagent child does not count: archiving the last top-level thread is the owner's stop.
-    const refused = yield* Effect.flip(service.dispatch(command("thread.archive", other)));
-    expect(refused).toMatchObject({
+    // Another top-level thread keeps the sandbox in view, so the seed archives and deletes like any thread.
+    yield* service.dispatch(sandboxCommand("thread.archive", seed));
+    yield* service.dispatch(sandboxCommand("thread.delete", seed)).pipe(asCaller("mcp-client"));
+    // A subagent child does not count: removing the last top-level thread is the owner's stop.
+    const archive = yield* Effect.flip(service.dispatch(sandboxCommand("thread.archive", other)));
+    expect(archive).toMatchObject({
       _tag: "SandboxManagedByOwnerError",
       ownerEnvironmentId: "environment:owner",
       sandboxId: "sbx-seed",
       operation: "archive-thread",
     });
     const deleted = yield* Effect.flip(
-      service.dispatch(command("thread.delete", seed)).pipe(asCaller("mcp-client")),
+      service.dispatch(sandboxCommand("thread.delete", other)).pipe(asCaller("mcp-client")),
     );
     expect(deleted).toMatchObject({ operation: "delete-thread" });
 
     yield* service
-      .dispatch(command("thread.archive", other))
+      .dispatch(sandboxCommand("thread.archive", other))
       .pipe(asCaller(ManagedSandbox.SANDBOX_OWNER_SUBJECT));
-    expect(dispatched).toEqual([`thread.archive ${seed}`, `thread.archive ${other}`]);
+    expect(dispatched).toEqual([
+      `thread.archive ${seed}`,
+      `thread.delete ${seed}`,
+      `thread.archive ${other}`,
+    ]);
+  }).pipe(Effect.provide(layerTest));
+});
+
+it.effect("a sandbox lets only one of two concurrent archives take its last active threads", () => {
+  const { seed, other, removed, layerTest } = sandboxGuestService();
+  return Effect.gen(function* () {
+    const service = yield* ThreadManagementService.ThreadManagementService;
+    const [first, second] = yield* Effect.all(
+      [
+        service.dispatch(sandboxCommand("thread.archive", seed)).pipe(Effect.result),
+        service.dispatch(sandboxCommand("thread.archive", other)).pipe(Effect.result),
+      ],
+      { concurrency: "unbounded" },
+    );
+    expect([first._tag, second._tag].toSorted()).toEqual(["Failure", "Success"]);
+    expect(removed.size).toBe(1);
   }).pipe(Effect.provide(layerTest));
 });

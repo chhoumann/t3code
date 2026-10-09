@@ -495,23 +495,37 @@ export const make = Effect.gen(function* () {
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
       const { projectId } = input;
-      yield* ManagedSandbox.guardManaged(managedSandbox, {
-        operation: "delete-project",
-        projectId,
-      });
-      // A deleted row still reaches commit, so a retried command id replays its
-      // receipt and any other command id is rejected as not found.
-      const existing = yield* readRow(projectId, { includeDeleted: true });
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId });
-      }
+      const remove = Effect.gen(function* () {
+        // A deleted row still reaches commit, so a retried command id replays its
+        // receipt and any other command id is rejected as not found.
+        const existing = yield* readRow(projectId, { includeDeleted: true });
+        if (Option.isNone(existing)) {
+          return yield* new ProjectNotFoundError({ projectId });
+        }
 
-      if (existing.value.deletedAt === null) {
-        yield* deleteChildThreads(input);
-      }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-      yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
-      return yield* readCommitted(projectId);
+        if (existing.value.deletedAt === null) {
+          yield* deleteChildThreads(input);
+        }
+        yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+        yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
+        return yield* readCommitted(projectId);
+      });
+      return yield* ManagedSandbox.guardLastActiveThread(
+        managedSandbox,
+        {
+          operation: "delete-project",
+          activeTopLevelThreads: threadProjections.getShellSnapshot().pipe(
+            Effect.map((snapshot) =>
+              snapshot.threads.filter((thread) => thread.lineage.parentThreadId === null),
+            ),
+            Effect.mapError(
+              (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+            ),
+          ),
+          removes: (thread) => thread.projectId === projectId,
+        },
+        remove,
+      );
     },
   );
 

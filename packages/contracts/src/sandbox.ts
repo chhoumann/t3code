@@ -191,7 +191,7 @@ export class SandboxManagedByOwnerError extends Schema.TaggedError<SandboxManage
   },
 ) {
   override get message(): string {
-    return "The environment that owns this sandbox manages its thread and project. Stop or delete the sandbox there instead.";
+    return "Only the environment that owns this sandbox can remove its last active thread. Stop or delete the sandbox there instead.";
   }
 }
 
