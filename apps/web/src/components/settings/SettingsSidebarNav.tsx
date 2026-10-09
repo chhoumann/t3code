@@ -12,6 +12,7 @@ import {
 import {
   ArchiveIcon,
   BlocksIcon,
+  BoxIcon,
   BotIcon,
   createLucideIcon,
   CalendarClockIcon,
@@ -85,6 +86,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/integrations": BlocksIcon,
   "/settings/scheduled-tasks": CalendarClockIcon,
+  "/settings/sandboxes": BoxIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,
