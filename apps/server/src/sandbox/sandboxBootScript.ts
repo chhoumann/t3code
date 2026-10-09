@@ -29,6 +29,12 @@ export const MANAGED_SANDBOX_FILE = "sandbox/managed.json";
 export const SANDBOX_MANAGED_FILE = `${SANDBOX_T3_HOME}/${MANAGED_SANDBOX_FILE}`;
 /** Written by the owner last, once every input is in place. */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
+/**
+ * Held by the clone and the credential refresh, so one replayed while its
+ * first run still goes waits for it and then finds the work done. The kernel
+ * releases it when the holder dies, however it dies.
+ */
+const SANDBOX_EXEC_LOCK = `${SANDBOX_INPUTS_DIR}/exec.lock`;
 /** Everything the boot script prints, kept for diagnosing a failed boot. */
 const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
 /** Stable path to the installed `t3`, for exec calls such as minting sessions. */
@@ -60,6 +66,12 @@ export type SandboxT3Source = typeof SandboxT3Source.Type;
 
 /** Single-quotes a value for bash. */
 export const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+/** Takes the exec lock for the rest of the command. */
+export const SANDBOX_EXEC_LOCK_LINES: ReadonlyArray<string> = [
+  `exec 9>>${shellQuote(SANDBOX_EXEC_LOCK)}`,
+  "flock 9",
+];
 
 /**
  * One `NAME="value"` line per variable. Double quotes with `\ " $ \`` escaped
@@ -206,6 +218,7 @@ export function renderRefreshCredentialsCommand(): string {
   ];
   return [
     "set -euo pipefail",
+    ...SANDBOX_EXEC_LOCK_LINES,
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
     ...swap(SANDBOX_STAGED_ENV_FILE, SANDBOX_ENV_FILE, [SETUP_RESTART_PENDING, T3_RESTART_PENDING]),
     ...swap(SANDBOX_STAGED_SETUP_ENV_FILE, SANDBOX_SETUP_ENV_FILE, [SETUP_RESTART_PENDING]),

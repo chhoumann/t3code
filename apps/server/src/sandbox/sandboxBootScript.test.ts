@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 
+import { FLOCK_SHIM } from "../testUtils/flockShim.ts";
 import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
@@ -150,40 +151,45 @@ describe("renderRefreshCredentialsCommand", () => {
     expect(result.status).toBe(0);
   });
 
-  it("restarts T3 on the next refresh when a refresh died after swapping its env in", () => {
+  /** A guest home under a temp dir, with `systemctl` logged and failing where told. */
+  const refreshFixture = () => {
     const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-refresh-"));
     const at = (path: string) => path.replace("/home/user", home);
     const inputs = NodePath.dirname(at(SANDBOX_SETUP_ENV_FILE));
     NodeFS.mkdirSync(inputs, { recursive: true });
     const script = renderRefreshCredentialsCommand().replaceAll("/home/user", home);
     NodeFS.writeFileSync(at(SANDBOX_ENV_FILE), "OLD=1\n");
-    const stage = (env: string) => {
+    const stage = (env: string, setupEnv = "") => {
       NodeFS.writeFileSync(NodePath.join(inputs, "sandbox.env.next"), env);
-      NodeFS.writeFileSync(NodePath.join(inputs, "setup.env.next"), "");
+      NodeFS.writeFileSync(NodePath.join(inputs, "setup.env.next"), setupEnv);
       NodeFS.writeFileSync(NodePath.join(inputs, "machine-setup.sh.next"), "");
     };
     const log = NodePath.join(home, "systemctl.log");
-    const refresh = (failUserRestart: boolean) =>
+    /** `failing` is a bash test on the systemctl arguments that makes the call fail. */
+    const refresh = (failing = "false") =>
       NodeChildProcess.spawnSync(
         "bash",
         [
           "-c",
           [
+            FLOCK_SHIM,
             'sudo() { "$@"; }',
-            `systemctl() { echo "$*" >> ${JSON.stringify(log)}; ${
-              failUserRestart ? '[ "$1" != --user ]' : "true"
-            }; }`,
+            `systemctl() { echo "$*" >> ${JSON.stringify(log)}; ! ${failing}; }`,
             script,
           ].join("\n"),
         ],
         { encoding: "utf8" },
       );
+    return { home, stage, log, refresh };
+  };
 
+  it("restarts T3 on the next refresh when a refresh died after swapping its env in", () => {
+    const { home, stage, log, refresh } = refreshFixture();
     stage("NEW=1\n");
-    expect(refresh(true).status).not.toBe(0);
+    expect(refresh('[ "$1" = --user ]').status).not.toBe(0);
     NodeFS.writeFileSync(log, "");
     stage("NEW=1\n");
-    const second = refresh(false);
+    const second = refresh();
     const restarts = NodeFS.readFileSync(log, "utf8");
     NodeFS.rmSync(home, { recursive: true });
 

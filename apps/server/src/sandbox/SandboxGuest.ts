@@ -47,6 +47,7 @@ import {
 } from "./ManagedSandbox.ts";
 import {
   SANDBOX_ENV_FILE,
+  SANDBOX_EXEC_LOCK_LINES,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MANAGED_FILE,
   SANDBOX_SETUP_ENV_FILE,
@@ -168,6 +169,8 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
   const partial = shellQuote(`${checkout.path}.partial`);
   return [
     "set -euo pipefail",
+    // A replay must not delete the partial clone of a run still going.
+    ...SANDBOX_EXEC_LOCK_LINES,
     // The account env carries any Git credentials the account provides.
     `set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a`,
     `if [ ! -d ${path}/.git ]; then`,
