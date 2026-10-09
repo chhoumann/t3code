@@ -262,6 +262,27 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
         return seen.value;
       });
 
+    /** Resolves once the sandbox is destroyed, which drops it from the list. */
+    const awaitGone = (options = { failFast: true }) =>
+      Effect.gen(function* () {
+        const seen = yield* sandboxes.subscribe().pipe(
+          Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
+          Stream.filter(
+            (view) => view === undefined || (options.failFast && view.status._tag === "failed"),
+          ),
+          Stream.runHead,
+          Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
+        );
+        if (Option.isNone(seen)) {
+          return yield* new TracerError({ reason: "timed out waiting for destroyed" });
+        }
+        if (seen.value !== undefined) {
+          return yield* new TracerError({
+            reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
+          });
+        }
+      });
+
     yield* sandboxes.subscribe().pipe(
       Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
       Stream.filter((view) => view !== undefined),
@@ -297,7 +318,7 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
     const cleanUp = Effect.gen(function* () {
       yield* say("cleaning up after a failure");
       yield* sandboxes.update({ id, desired: "destroyed" }).pipe(Effect.ignore);
-      yield* awaitStatus("destroyed", { failFast: false });
+      yield* awaitGone({ failFast: false });
       yield* confirmGone;
     }).pipe(
       Effect.catch((error) =>
@@ -485,6 +506,24 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       }),
     );
 
+    yield* step(
+      "a refused owner session is replaced on use",
+      Effect.gen(function* () {
+        const name = `sandbox-${id}-admin`;
+        secrets.set(name, new TextEncoder().encode("revoked-owner-session"));
+        const connected = yield* sandboxes.connect({ id, scopes: ["orchestration:read"] });
+        const stored = new TextDecoder().decode(secrets.get(name));
+        yield* check(
+          stored.length > 0 && stored !== "revoked-owner-session",
+          "a new owner session was minted and stored",
+        );
+        yield* check(
+          connected.pairingCredential.length > 0,
+          "the pairing grant was issued with the new session",
+        );
+      }),
+    );
+
     const pairingLines = yield* exec(
       "grep -c 'Token:\\|pair#token' /home/user/.t3/userdata/logs/boot-service.log || true",
     );
@@ -557,7 +596,7 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
     }
 
     yield* sandboxes.update({ id, desired: "destroyed" });
-    yield* step("destroyed", awaitStatus("destroyed"));
+    yield* step("destroyed", awaitGone());
     yield* confirmGone;
   });
 
