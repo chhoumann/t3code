@@ -174,7 +174,7 @@ export class SandboxService extends Context.Service<
       SandboxNotFoundError | SandboxDestroyedError | SandboxPersistenceError
     >;
     readonly list: () => Effect.Effect<ReadonlyArray<SandboxView>, SandboxPersistenceError>;
-    /** Every sandbox as it is now, then the whole list again after each change. */
+    /** Every sandbox not yet destroyed, then the whole list again after each change. */
     readonly subscribe: () => Stream.Stream<ReadonlyArray<SandboxView>, SandboxPersistenceError>;
     /** A one-time grant a client exchanges for its own session on a ready sandbox, within `scopes`. */
     readonly connect: (input: {
@@ -826,8 +826,12 @@ const make = Effect.gen(function* () {
       return toView(record.value);
     });
 
+  // A destroyed row stays as a tombstone, so a late retry of its launch finds it, but is never listed.
   const list: SandboxService["Service"]["list"] = () =>
-    sql`SELECT * FROM sandboxes ORDER BY created_at`.pipe(
+    sql`
+      SELECT * FROM sandboxes
+      WHERE json_extract(status_json, '$._tag') <> 'destroyed'
+      ORDER BY created_at`.pipe(
       persistence,
       Effect.flatMap((rows) =>
         Effect.forEach(rows, (row) => decodeRow(row).pipe(persistence, Effect.map(recordOf))),
@@ -858,7 +862,8 @@ const make = Effect.gen(function* () {
           Stream.make(snapshot),
           Stream.fromSubscription(subscription).pipe(
             Stream.map((view) => {
-              views.set(view.id, view);
+              if (view.status._tag === "destroyed") views.delete(view.id);
+              else views.set(view.id, view);
               return [...views.values()];
             }),
           ),

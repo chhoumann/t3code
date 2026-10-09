@@ -1,5 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  ProjectId,
+  SandboxId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -25,6 +31,7 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const isServerEnvironmentIdPersistenceError = Schema.is(
@@ -378,6 +385,30 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         );
         expect(writeAttempts).toEqual(operation === "write" ? [tempPath] : []);
       }
+    }),
+  );
+
+  it.effect("offers sandboxes only outside a sandbox", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-test-",
+      });
+      const describe = ServerEnvironment.ServerEnvironment.pipe(
+        Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),
+        Effect.provide(layerServerEnvironment(baseDir)),
+      );
+
+      expect((yield* describe).capabilities.sandboxes).toBe(true);
+      const inSandbox = yield* describe.pipe(
+        Effect.provideService(ManagedSandbox.ManagedSandbox, {
+          ownerEnvironmentId: EnvironmentId.make("environment-owner"),
+          sandboxId: SandboxId.make("sbx-1"),
+          projectId: ProjectId.make("project-seed"),
+          threadId: ThreadId.make("thread-seed"),
+        }),
+      );
+      expect(inSandbox.capabilities.sandboxes).toBeUndefined();
     }),
   );
 });

@@ -245,10 +245,22 @@ const awaitStatus = (id: string, tag: SandboxStatus["_tag"]) =>
 
 const service = SandboxService.SandboxService;
 
-/** Moves the test clock on until the sandbox shows `tag`, for steps that wait between tries. */
-const advanceUntilStatus = (id: string, tag: SandboxStatus["_tag"], step: Duration.Input) =>
+/** Resolves once a launched sandbox is destroyed and so no longer listed. */
+const awaitGone = (id: string) =>
+  SandboxService.SandboxService.pipe(
+    Effect.flatMap((service) =>
+      service.subscribe().pipe(
+        Stream.filter((views) => views.every((view) => view.id !== id)),
+        Stream.runHead,
+      ),
+    ),
+    Effect.asVoid,
+  );
+
+/** Moves the test clock on until `awaited` resolves, for steps that wait between tries. */
+const advanceUntil = <A, E, R>(awaited: Effect.Effect<A, E, R>, step: Duration.Input) =>
   Effect.gen(function* () {
-    const seen = yield* Effect.forkChild(awaitStatus(id, tag));
+    const seen = yield* Effect.forkChild(awaited);
     yield* TestClock.adjust(step).pipe(
       Effect.repeat({ until: () => seen.pollUnsafe() !== undefined }),
     );
@@ -344,8 +356,9 @@ describe("SandboxService", () => {
           assert.isTrue(world.secrets.has("sandbox-sbx-cycle-admin"));
 
           yield* sandboxes.update({ id, desired: "destroyed" });
-          yield* awaitStatus(id, "destroyed");
+          yield* awaitGone(id);
           assert.strictEqual(world.machines.size, 0);
+          assert.deepStrictEqual(yield* sandboxes.list(), []);
           assert.isFalse(world.secrets.has("sandbox-sbx-cycle-admin"));
           const refused = yield* sandboxes.update({ id, desired: "running" }).pipe(Effect.flip);
           assert.strictEqual(refused._tag, "SandboxDestroyedError");
@@ -397,7 +410,7 @@ describe("SandboxService", () => {
       assert.strictEqual(world.machines.size, 1);
 
       const second = yield* start;
-      yield* awaitStatus(id, "destroyed").pipe(Effect.provide(second.context));
+      yield* awaitGone(id).pipe(Effect.provide(second.context));
       yield* Scope.close(second.scope, Exit.void);
       assert.strictEqual(world.machines.size, 0);
       assert.strictEqual(new Set(world.createKeys).size, 1);
@@ -517,7 +530,7 @@ describe("SandboxService", () => {
         const id = SandboxId.make("sbx-defect");
         yield* sandboxes.launch(launchInput(id));
         yield* Deferred.await(died);
-        yield* advanceUntilStatus(id, "ready", Duration.seconds(1));
+        yield* advanceUntil(awaitStatus(id, "ready"), Duration.seconds(1));
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
@@ -535,7 +548,7 @@ describe("SandboxService", () => {
         world.failNextDestroy = "transient";
 
         yield* sandboxes.update({ id, desired: "destroyed" });
-        yield* advanceUntilStatus(id, "destroyed", Duration.seconds(2));
+        yield* advanceUntil(awaitGone(id), Duration.seconds(2));
         assert.strictEqual(world.destroyAttempts, 2);
         assert.strictEqual(world.machines.size, 0);
       }).pipe(Effect.provide(started.context));

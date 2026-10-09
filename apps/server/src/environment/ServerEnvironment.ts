@@ -14,6 +14,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { resolveServerInstallation } from "../cli/invocation.ts";
 import { readAgentActivityPublishingActive } from "../cloud/config.ts";
@@ -188,6 +189,7 @@ export const make = Effect.gen(function* () {
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcessPlatform;
   const hostArchitecture = yield* HostProcessArchitecture;
+  const managedSandbox = yield* ManagedSandbox.ManagedSandbox;
   const environmentId = yield* identity.getEnvironmentId;
   const cwdBaseName = path.basename(serverConfig.cwd).trim();
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
@@ -259,7 +261,8 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
-      sandboxes: true,
+      // A sandbox never launches sandboxes, so clients need not follow it for them.
+      ...(managedSandbox === null ? { sandboxes: true } : {}),
     },
   };
 
