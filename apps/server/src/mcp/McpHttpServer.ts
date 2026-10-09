@@ -20,6 +20,7 @@ import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -820,7 +821,14 @@ const layerEnvironmentRegistration = toolkitRegistration(
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
-const layerSandboxRegistration = toolkitRegistration(SandboxToolkit, SandboxHandlers.layer);
+/** A sandbox has no accounts to launch sandboxes of its own with, so its agents get no sandbox tools. */
+export const layerSandboxToolkit = Layer.unwrap(
+  Effect.gen(function* () {
+    return (yield* ManagedSandbox.ManagedSandbox) === null
+      ? toolkitRegistration(SandboxToolkit, SandboxHandlers.layer)
+      : Layer.empty;
+  }),
+);
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -861,7 +869,7 @@ export const layer = Layer.mergeAll(
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentRegistration,
-  layerSandboxRegistration,
+  layerSandboxToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

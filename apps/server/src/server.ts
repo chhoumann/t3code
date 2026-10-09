@@ -1100,7 +1100,7 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(FetchHttpClient.layer),
       // PR reads, Git operations, and WebSocket discovery share one process limiter.
       Layer.provide(VcsProcess.layer),
-      // Read once at startup, before any service that guards a sandbox's seed is built.
+      // Read once at startup, before the services and MCP tools that depend on it are built.
       Layer.provideMerge(ManagedSandbox.layer),
       Layer.provideMerge(layerPlatformServices),
     );

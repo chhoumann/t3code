@@ -2,19 +2,24 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   SandboxAccountId,
+  SandboxId,
   ThreadId,
   type SandboxLaunchInput,
 } from "@t3tools/contracts";
+import { McpServer } from "effect/ai";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedSandbox from "../../../sandbox/ManagedSandbox.ts";
 import * as SandboxService from "../../../sandbox/SandboxService.ts";
 import * as Settings from "../../../serverSettings.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
@@ -106,5 +111,37 @@ it.effect("launches a sandbox within the calling thread's modes", () =>
         ),
       ),
     );
+  }),
+);
+
+it.effect("offers sandbox tools on an owner and none inside a sandbox", () =>
+  Effect.gen(function* () {
+    const toolNames = (managed: ManagedSandbox.ManagedSandboxGuest | null) =>
+      McpServer.McpServer.pipe(
+        Effect.map((server) => server.tools.map((tool) => tool.tool.name)),
+        Effect.provide(
+          McpHttpServer.layerSandboxToolkit.pipe(
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(ThreadManagement.ThreadManagementService)({}),
+                Layer.mock(SandboxService.SandboxService)({}),
+                Settings.layerTest(),
+                NodeCrypto.layer,
+              ),
+            ),
+            Layer.provide(Layer.succeed(ManagedSandbox.ManagedSandbox, managed)),
+          ),
+        ),
+      );
+
+    expect(yield* toolNames(null)).toContain("sandbox_launch");
+    const guest = ManagedSandbox.makeManagedSandboxGuest({
+      ownerEnvironmentId: environmentId,
+      sandboxId: SandboxId.make("sbx-1"),
+      projectId: ProjectId.make("project-seed"),
+      threadId,
+    });
+    expect((yield* toolNames(guest)).filter((name) => name.startsWith("sandbox_"))).toEqual([]);
   }),
 );
