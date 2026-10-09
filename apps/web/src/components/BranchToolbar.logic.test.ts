@@ -9,6 +9,7 @@ import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   deriveSandboxRunChoices,
+  resolveSandboxDraftSend,
   resolveEnvironmentOptionLabel,
   resolveBranchSelectionTarget,
   resolveCurrentWorkspaceLabel,
@@ -949,5 +950,32 @@ describe("deriveSandboxRunChoices", () => {
         owner(localEnvironmentId, "This device", { work: account("Work") }, false),
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("resolveSandboxDraftSend", () => {
+  const owner = EnvironmentId.make("environment-owner");
+  const work = SandboxAccountId.make("work");
+  const choice = {
+    value: `sandbox:${owner}:${work}`,
+    ownerEnvironmentId: owner,
+    accountId: work,
+    label: "New sandbox · Work",
+  };
+
+  it("launches the picked sandbox while its owner offers the account", () => {
+    expect(
+      resolveSandboxDraftSend({ ownerEnvironmentId: owner, accountId: work }, [choice]),
+    ).toEqual({ _tag: "Sandbox", choice });
+  });
+
+  it("refuses rather than runs locally while the picked owner is unavailable", () => {
+    expect(resolveSandboxDraftSend({ ownerEnvironmentId: owner, accountId: work }, [])).toEqual({
+      _tag: "Unavailable",
+    });
+  });
+
+  it("sends a draft that picked no sandbox in its own environment", () => {
+    expect(resolveSandboxDraftSend(null, [choice])).toEqual({ _tag: "Environment" });
   });
 });

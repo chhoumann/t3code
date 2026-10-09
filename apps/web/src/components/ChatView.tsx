@@ -86,7 +86,6 @@ import {
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
-import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   wasBootstrapThreadDeleted,
   wasBootstrapThreadNotCreated,
@@ -466,17 +465,13 @@ import {
   type SandboxRunChoice,
   deriveSandboxRunChoices,
   resolveEffectiveEnvMode,
+  resolveSandboxDraftSend,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
-import {
-  SANDBOX_REPOSITORY_PROBLEM_MESSAGE,
-  sandboxFailureMessage,
-  sandboxRepositoryFor,
-} from "@t3tools/client-runtime/state/sandboxes";
+import { useSandboxLaunch } from "../hooks/useSandboxLaunch";
 import { useSandboxDraftStore, useSandboxDraftTarget } from "../sandboxDraftStore";
-import { sandboxes } from "../state/sandboxes";
 import {
   getProviderStatusBannerKey,
   ProviderStatusBanner,
@@ -1821,7 +1816,7 @@ export default function ChatView(props: ChatViewProps) {
     return draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false;
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
-  const launchSandbox = useAtomCommand(sandboxes.launch, { reportFailure: false });
+  const launchFromDraft = useSandboxLaunch();
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
@@ -2842,14 +2837,8 @@ export default function ChatView(props: ChatViewProps) {
     [activeProject, activeProjectIsScratch, environments, isLocalDraftThread],
   );
   const sandboxDraftTarget = useSandboxDraftTarget(isLocalDraftThread ? (draftId ?? null) : null);
-  const activeSandboxChoice =
-    sandboxDraftTarget === null
-      ? null
-      : (sandboxRunChoices.find(
-          (choice) =>
-            choice.ownerEnvironmentId === sandboxDraftTarget.ownerEnvironmentId &&
-            choice.accountId === sandboxDraftTarget.accountId,
-        ) ?? null);
+  const sandboxDraftSend = resolveSandboxDraftSend(sandboxDraftTarget, sandboxRunChoices);
+  const activeSandboxChoice = sandboxDraftSend._tag === "Sandbox" ? sandboxDraftSend.choice : null;
   const canPickRunTarget = hasMultipleEnvironments || sandboxRunChoices.length > 0;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
@@ -8771,70 +8760,43 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
-  // The sandbox clones the pushed commit and starts its own thread from the
-  // message, so nothing local travels: attachments and context are refused.
   const launchSandboxFromDraft = async (
     sandboxDraftId: DraftId,
     target: NonNullable<typeof sandboxDraftTarget>,
   ) => {
     if (!activeThread) return;
+    if (sandboxDraftSend._tag === "Unavailable") {
+      setThreadError(
+        activeThread.id,
+        "This sandbox's environment is offline or no longer has its account. Reconnect it or pick where to run.",
+      );
+      return;
+    }
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx?.providerAvailable) return;
     const message = promptRef.current.trim();
     if (message.length === 0) return;
-    if (
-      sendCtx.images.length +
+    sendInFlightRef.current = true;
+    const error = await launchFromDraft({
+      draftId: sandboxDraftId,
+      target,
+      message,
+      extrasCount:
+        sendCtx.images.length +
         sendCtx.files.length +
         sendCtx.terminalContexts.length +
         sendCtx.previewAnnotations.length +
         sendCtx.reviewComments.length +
-        sendCtx.threadContexts.length >
-      0
-    ) {
-      setThreadError(
-        activeThread.id,
-        "A sandbox starts from your message alone. Remove attachments and context to start one.",
-      );
-      return;
-    }
-    const repository = sandboxRepositoryFor({
+        sendCtx.threadContexts.length,
       remoteUrl: activeProject?.repositoryIdentity?.locator.remoteUrl ?? null,
-      status: gitStatusQuery.data ?? null,
-    });
-    if (repository._tag === "Refused") {
-      setThreadError(activeThread.id, SANDBOX_REPOSITORY_PROBLEM_MESSAGE[repository.problem]);
-      return;
-    }
-    sendInFlightRef.current = true;
-    const result = await launchSandbox({
-      environmentId: target.ownerEnvironmentId,
-      input: {
-        id: target.sandboxId,
-        accountId: target.accountId,
-        title: deriveThreadTitleSeed({ text: message, attachments: [] }),
-        message,
-        repository: repository.repository,
-        driver: sendCtx.selectedProvider,
-        model: sendCtx.selectedModel,
-        runtimeMode,
-        interactionMode: sendCtx.interactionMode,
-      },
+      gitStatus: gitStatusQuery.data ?? null,
+      driver: sendCtx.selectedProvider,
+      model: sendCtx.selectedModel,
+      runtimeMode,
+      interactionMode: sendCtx.interactionMode,
     });
     sendInFlightRef.current = false;
-    if (result._tag !== "Success") {
-      if (!isAtomCommandInterrupted(result)) {
-        setThreadError(activeThread.id, sandboxFailureMessage(squashAtomCommandFailure(result)));
-      }
-      return;
-    }
-    setThreadError(activeThread.id, null);
-    await navigate({
-      to: "/sandbox/$environmentId/$sandboxId",
-      params: { environmentId: target.ownerEnvironmentId, sandboxId: target.sandboxId },
-      replace: true,
-    });
-    useComposerDraftStore.getState().clearDraftThread(sandboxDraftId);
-    useSandboxDraftStore.getState().clear(sandboxDraftId);
+    setThreadError(activeThread.id, error);
   };
 
   const onSend = async (
@@ -8889,7 +8851,8 @@ export default function ChatView(props: ChatViewProps) {
       notifyDirectAnnotationAttached();
       return;
     }
-    if (activeSandboxChoice !== null && sandboxDraftTarget !== null && draftId) {
+    // A draft that picked a sandbox never falls back to running here.
+    if (sandboxDraftTarget !== null && draftId) {
       if (directAnnotation) {
         notifyDirectAnnotationAttached();
         return;

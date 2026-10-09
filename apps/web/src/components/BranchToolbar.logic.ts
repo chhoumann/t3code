@@ -64,6 +64,30 @@ export function deriveSandboxRunChoices(
   );
 }
 
+/**
+ * Where sending a draft goes once it picked a new sandbox. The pick is kept
+ * with the draft, so while its owner is offline or no longer has the account
+ * the send is refused rather than run in the draft's own environment.
+ */
+export function resolveSandboxDraftSend(
+  target: {
+    readonly ownerEnvironmentId: EnvironmentId;
+    readonly accountId: SandboxAccountId;
+  } | null,
+  choices: ReadonlyArray<SandboxRunChoice>,
+):
+  | { readonly _tag: "Environment" }
+  | { readonly _tag: "Sandbox"; readonly choice: SandboxRunChoice }
+  | { readonly _tag: "Unavailable" } {
+  if (target === null) return { _tag: "Environment" };
+  const choice = choices.find(
+    (candidate) =>
+      candidate.ownerEnvironmentId === target.ownerEnvironmentId &&
+      candidate.accountId === target.accountId,
+  );
+  return choice === undefined ? { _tag: "Unavailable" } : { _tag: "Sandbox", choice };
+}
+
 export const EnvMode = Schema.Literals(["local", "worktree"]);
 export type EnvMode = typeof EnvMode.Type;
 
