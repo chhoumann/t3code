@@ -1,8 +1,9 @@
 /**
  * ManagedSandbox - what a sandbox's own T3 server knows about the owner that
  * runs it, and the guard that keeps clients and agents in the sandbox from
- * archiving or deleting the seed thread or project. Either would leave the
- * machine running unseen; the owner stops or destroys the sandbox instead.
+ * archiving its last active top-level thread or deleting the seed thread or
+ * project. Each would leave the machine running unseen; the owner stops or
+ * destroys the sandbox instead.
  *
  * The owner writes the marker with the boot inputs. A server without one is
  * not a sandbox and is never guarded.
@@ -61,15 +62,24 @@ export class CommandCaller extends Context.Reference<{ readonly subject: string 
 export const guardManaged = (
   marker: ManagedSandboxMarker | null,
   target:
-    | { readonly operation: "archive-thread" | "delete-thread"; readonly threadId: ThreadId }
+    | {
+        readonly operation: "archive-thread";
+        /** The sandbox's active top-level threads; archiving the last one is the owner's stop. */
+        readonly activeTopLevelThreadIds: ReadonlyArray<ThreadId>;
+        readonly threadId: ThreadId;
+      }
+    | { readonly operation: "delete-thread"; readonly threadId: ThreadId }
     | { readonly operation: "delete-project"; readonly projectId: ProjectId },
 ): Effect.Effect<void, SandboxManagedByOwnerError> =>
   Effect.gen(function* () {
     if (marker === null) return;
     const managed =
-      target.operation === "delete-project"
-        ? target.projectId === marker.projectId
-        : target.threadId === marker.threadId;
+      target.operation === "archive-thread"
+        ? target.activeTopLevelThreadIds.length === 1 &&
+          target.activeTopLevelThreadIds[0] === target.threadId
+        : target.operation === "delete-thread"
+          ? target.threadId === marker.threadId
+          : target.projectId === marker.projectId;
     if (!managed) return;
     if ((yield* CommandCaller)?.subject === SANDBOX_OWNER_SUBJECT) return;
     return yield* new SandboxManagedByOwnerError({

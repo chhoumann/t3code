@@ -178,8 +178,9 @@ export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxErr
 }) {}
 
 /**
- * A sandbox refused to archive or delete the thread or project it was launched
- * with, which would leave its machine running. The owner stops or destroys it.
+ * A sandbox refused to archive its last active top-level thread, or to delete
+ * the thread or project it was launched with, either of which would leave its
+ * machine running unseen. The owner stops or destroys it.
  */
 export class SandboxManagedByOwnerError extends Schema.TaggedError<SandboxManagedByOwnerError>()(
   "SandboxManagedByOwnerError",

@@ -14,31 +14,15 @@ import * as Effect from "effect/Effect";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
-import { v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { routeSandboxThreadLifecycle, type SandboxOwnerChange } from "./sandboxCommands.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const SANDBOX_ENV = EnvironmentId.make("environment-sandbox");
 const SANDBOX_ID = SandboxId.make("sbx-1");
-const SEED = v2ThreadShell.id;
-const OTHER = ThreadId.make("thread-other");
-
-const snapshotWith = (...extra: ReadonlyArray<typeof v2ThreadShell>) => ({
-  ...v2ShellSnapshot,
-  threads: [v2ThreadShell, ...extra],
-});
-const child = {
-  ...v2ThreadShell,
-  id: ThreadId.make("thread-child"),
-  lineage: { rootThreadId: SEED, parentThreadId: SEED, relationshipToParent: "subagent" as const },
-};
-
 const run = (
   input: {
     readonly action: "archive" | "unarchive";
     readonly status?: SandboxStatus;
-    readonly threadId?: ThreadId;
-    readonly snapshot?: typeof v2ShellSnapshot | null;
   },
   guest: Effect.Effect<string, SandboxManagedByOwnerError | OrchestrationV2DispatchCommandError>,
 ) =>
@@ -75,8 +59,6 @@ const run = (
     const result = yield* routeSandboxThreadLifecycle({
       action: input.action,
       environmentId: SANDBOX_ENV,
-      threadId: input.threadId ?? SEED,
-      snapshot: input.snapshot === undefined ? snapshotWith(child) : input.snapshot,
       run: guest,
       toOwner: (change) => Effect.sync(() => changes.push(change)).pipe(Effect.as("owner")),
     }).pipe(
@@ -96,39 +78,35 @@ const ownerChange = (desired: SandboxOwnerChange["desired"]) => [
 ];
 
 describe("routeSandboxThreadLifecycle", () => {
-  it.effect("archiving a sandbox's last active top-level thread stops the sandbox", () =>
-    Effect.gen(function* () {
-      // A subagent child does not keep the sandbox running.
-      const routed = yield* run({ action: "archive", status: ready }, guestOk);
-      expect(routed).toEqual({ result: "owner", changes: ownerChange("stopped") });
-    }),
-  );
-
-  it.effect("archiving one of several active threads archives it in the sandbox", () =>
-    Effect.gen(function* () {
-      const other = {
-        ...v2ThreadShell,
-        id: OTHER,
-        lineage: { ...v2ThreadShell.lineage, rootThreadId: OTHER },
-      };
-      const routed = yield* run(
-        { action: "archive", status: ready, threadId: OTHER, snapshot: snapshotWith(other) },
-        guestOk,
-      );
-      expect(routed).toEqual({ result: "guest", changes: [] });
-    }),
-  );
-
-  it.effect("a sandbox that refuses to archive its seed thread is stopped by its owner", () =>
+  it.effect("an archive the sandbox refuses as its last active thread stops the sandbox", () =>
     Effect.gen(function* () {
       const refused = new SandboxManagedByOwnerError({
         ownerEnvironmentId: OWNER,
         sandboxId: SANDBOX_ID,
         operation: "archive-thread",
       });
+      let asked = 0;
+      const guest = Effect.suspend(() => {
+        asked += 1;
+        return Effect.fail(refused);
+      });
+      expect(yield* run({ action: "archive", status: ready }, guest)).toEqual({
+        result: "owner",
+        changes: ownerChange("stopped"),
+      });
       // Not in the index: the client has not heard from the owner since it started.
-      const routed = yield* run({ action: "archive", snapshot: null }, Effect.fail(refused));
-      expect(routed).toEqual({ result: "owner", changes: ownerChange("stopped") });
+      expect(yield* run({ action: "archive" }, guest)).toEqual({
+        result: "owner",
+        changes: ownerChange("stopped"),
+      });
+      expect(asked).toBe(2);
+    }),
+  );
+
+  it.effect("an archive the sandbox accepts stays in the sandbox", () =>
+    Effect.gen(function* () {
+      const routed = yield* run({ action: "archive", status: ready }, guestOk);
+      expect(routed).toEqual({ result: "guest", changes: [] });
     }),
   );
 

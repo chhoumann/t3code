@@ -180,8 +180,6 @@ export function createThreadEnvironmentAtoms<R, E>(
         routeSandboxThreadLifecycle({
           action: "archive",
           environmentId,
-          threadId: input.threadId,
-          snapshot: registry.get(snapshotAtom(environmentId)),
           run: archiveThread(input),
           toOwner: (change) => updateSandbox(registry, change),
         }),
@@ -194,8 +192,6 @@ export function createThreadEnvironmentAtoms<R, E>(
         routeSandboxThreadLifecycle({
           action: "unarchive",
           environmentId,
-          threadId: input.threadId,
-          snapshot: registry.get(snapshotAtom(environmentId)),
           run: unarchiveThread(input),
           toOwner: (change) => updateSandbox(registry, change),
         }),

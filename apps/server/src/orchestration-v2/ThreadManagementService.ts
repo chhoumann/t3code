@@ -511,14 +511,33 @@ const make = Effect.gen(function* () {
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
     );
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    (command.type === "thread.archive" || command.type === "thread.delete"
-      ? ManagedSandbox.guardManaged(managedSandbox, {
-          operation: command.type === "thread.archive" ? "archive-thread" : "delete-thread",
+  const guardSandbox = (command: OrchestrationV2ServerCommand) => {
+    if (managedSandbox === null) return Effect.void;
+    switch (command.type) {
+      case "thread.archive":
+        return orchestrator.getShellSnapshot({ location: "active" }).pipe(
+          Effect.flatMap((snapshot) =>
+            ManagedSandbox.guardManaged(managedSandbox, {
+              operation: "archive-thread",
+              threadId: command.threadId,
+              activeTopLevelThreadIds: snapshot.threads
+                .filter((thread) => thread.lineage.parentThreadId === null)
+                .map((thread) => thread.id),
+            }),
+          ),
+        );
+      case "thread.delete":
+        return ManagedSandbox.guardManaged(managedSandbox, {
+          operation: "delete-thread",
           threadId: command.threadId,
-        })
-      : Effect.void
-    ).pipe(
+        });
+      default:
+        return Effect.void;
+    }
+  };
+
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
+    guardSandbox(command).pipe(
       Effect.andThen(ensureCommandTranscripts(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );

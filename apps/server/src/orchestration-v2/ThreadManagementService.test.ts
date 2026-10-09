@@ -8,6 +8,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShellSnapshot,
   ProjectId,
   ProviderInstanceId,
   RunId,
@@ -514,15 +515,30 @@ it.effect.each([
   }),
 );
 
-it.effect("a sandbox archives or deletes its seed thread only for its owner", () => {
+it.effect("a sandbox keeps its last active thread and its seed thread for its owner", () => {
   const seed = ThreadId.make("thread:sandbox-seed");
   const other = ThreadId.make("thread:sandbox-other");
+  const child = ThreadId.make("thread:sandbox-child");
+  const archived = new Set<ThreadId>();
   const dispatched: Array<string> = [];
   const layerTest = ThreadManagementService.layer.pipe(
     Layer.provide(
       Layer.mock(Orchestrator.OrchestratorV2)({
+        getShellSnapshot: () =>
+          Effect.sync(
+            () =>
+              ({
+                threads: [
+                  { id: seed, lineage: { parentThreadId: null } },
+                  { id: other, lineage: { parentThreadId: null } },
+                  { id: child, lineage: { parentThreadId: seed } },
+                ].filter((thread) => !archived.has(thread.id)),
+              }) as unknown as OrchestrationV2ThreadShellSnapshot,
+          ),
         dispatch: (command) =>
           Effect.sync(() => {
+            if (command.type === "thread.archive") archived.add(command.threadId);
+            if (command.type === "thread.unarchive") archived.delete(command.threadId);
             dispatched.push(`${command.type} ${"threadId" in command ? command.threadId : ""}`);
             return { sequence: dispatched.length, storedEvents: [] };
           }),
@@ -547,8 +563,11 @@ it.effect("a sandbox archives or deletes its seed thread only for its owner", ()
     const asCaller = (subject: string | null) =>
       Effect.provideService(ManagedSandbox.CommandCaller, subject === null ? null : { subject });
 
-    const archived = yield* Effect.flip(service.dispatch(command("thread.archive", seed)));
-    expect(archived).toMatchObject({
+    // Another top-level thread keeps the sandbox in view, so the seed archives like any thread.
+    yield* service.dispatch(command("thread.archive", seed));
+    // A subagent child does not count: archiving the last top-level thread is the owner's stop.
+    const refused = yield* Effect.flip(service.dispatch(command("thread.archive", other)));
+    expect(refused).toMatchObject({
       _tag: "SandboxManagedByOwnerError",
       ownerEnvironmentId: "environment:owner",
       sandboxId: "sbx-seed",
@@ -559,15 +578,9 @@ it.effect("a sandbox archives or deletes its seed thread only for its owner", ()
     );
     expect(deleted).toMatchObject({ operation: "delete-thread" });
 
-    yield* service.dispatch(command("thread.archive", other));
-    yield* service.dispatch(command("thread.unarchive", seed));
     yield* service
-      .dispatch(command("thread.archive", seed))
+      .dispatch(command("thread.archive", other))
       .pipe(asCaller(ManagedSandbox.SANDBOX_OWNER_SUBJECT));
-    expect(dispatched).toEqual([
-      `thread.archive ${other}`,
-      `thread.unarchive ${seed}`,
-      `thread.archive ${seed}`,
-    ]);
+    expect(dispatched).toEqual([`thread.archive ${seed}`, `thread.archive ${other}`]);
   }).pipe(Effect.provide(layerTest));
 });
