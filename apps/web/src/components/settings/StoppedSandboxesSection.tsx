@@ -21,7 +21,7 @@ export function StoppedSandboxesSection(props: {
   const owners = useAtomValue(sandboxes.ownersAtom);
   const stopped = props.ownerEnvironmentIds.flatMap((ownerEnvironmentId) =>
     (owners.get(ownerEnvironmentId) ?? [])
-      .filter((sandbox) => sandbox.status._tag === "stopped" || sandbox.status._tag === "stopping")
+      .filter((sandbox) => sandbox.desired === "stopped")
       .map((sandbox) => ({ ownerEnvironmentId, sandbox })),
   );
   if (stopped.length === 0) return null;
@@ -83,7 +83,7 @@ function StoppedSandboxRow(props: {
           variant="outline"
           size="xs"
           className="shrink-0"
-          disabled={sandbox.status._tag !== "stopped"}
+          disabled={sandbox.status._tag === "stopping"}
           onClick={() => void resume()}
         >
           <PlayIcon className="size-3.5" />

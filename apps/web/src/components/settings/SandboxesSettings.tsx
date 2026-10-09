@@ -64,8 +64,12 @@ interface AccountEditor {
 
 export function SandboxesSettings() {
   const { environments } = useSettingsScope();
+  const sandboxIndex = useAtomValue(sandboxes.indexAtom);
+  // A sandbox runs T3 too, so it serves sandboxes; it is not where the user keeps accounts.
   const owners = environments.filter(
-    (environment) => environment.serverConfig?.environment.capabilities.sandboxes === true,
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.sandboxes === true &&
+      !sandboxIndex.has(environment.environmentId),
   );
   const [editor, setEditor] = useState<AccountEditor | null>(null);
   const defaultOwner = owners[0] ?? null;
@@ -295,6 +299,9 @@ function SandboxRow(props: {
             ) : null}
             {status === "stopped" ? (
               <MenuItem onClick={() => void setDesired(ref, "running")}>Resume</MenuItem>
+            ) : null}
+            {sandbox.status._tag === "failed" && sandbox.status.retryable ? (
+              <MenuItem onClick={() => void setDesired(ref, sandbox.desired)}>Retry</MenuItem>
             ) : null}
             <MenuSeparator />
             <MenuItem variant="destructive" onClick={() => void confirmAndDelete(ref)}>

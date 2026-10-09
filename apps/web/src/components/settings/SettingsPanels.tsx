@@ -6,6 +6,7 @@ import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { ArchiveIcon, ArchiveX, CheckIcon, ChevronRightIcon, SettingsIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
+import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type BackgroundActivityProfile,
@@ -3413,12 +3414,21 @@ export function ArchivedThreadsPanel() {
   const { scope } = useSettingsScope();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const { confirmAndDelete: confirmAndDeleteSandbox } = useSandboxActions();
+  const sandboxIndex = useAtomValue(sandboxes.indexAtom);
+  // A stopped sandbox cannot answer; its row under Stopped sandboxes stands in for its threads.
+  const archiveEnvironmentIds = useMemo(
+    () =>
+      scope.environmentIds.filter(
+        (environmentId) => sandboxIndex.get(environmentId)?.view.desired !== "stopped",
+      ),
+    [sandboxIndex, scope.environmentIds],
+  );
   const {
     snapshots: archivedSnapshots,
     error: archiveError,
     isLoading: isLoadingArchive,
     refresh: refreshArchivedThreads,
-  } = useArchivedThreadSnapshots(scope.environmentIds);
+  } = useArchivedThreadSnapshots(archiveEnvironmentIds);
 
   const archivedGroups = useMemo(() => {
     const selectedProjectKeys =
