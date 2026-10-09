@@ -14,19 +14,22 @@ import {
 } from "react";
 
 import { cn } from "~/lib/utils";
-import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import { deriveProjectIdentity } from "../../projectIdentity";
+import { ProjectMonogram } from "../ProjectMonogram";
 import { animateSidebarLayoutChanges, resolveSidebarRowAccessibility } from "../Sidebar.logic";
 
 /**
  * A launching sandbox, shaped like the thread card that replaces it once the
  * sandbox's environment lists its thread. Opens the sandbox's launch view.
+ * Its icon is the monogram a new project shows until its favicon loads.
  * It sits in the sortable list so dragged rows move around it, but it cannot
  * be picked up.
  */
 export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(props: {
   sortableId: string;
   pending: PendingSandboxThread;
-  project: ProjectFaviconProject | null;
+  /** The title the sandbox's project will have, which its icon is drawn from. */
+  projectTitle: string;
   projectDisplayName: string;
   isActive: boolean;
   onNavigate: (pending: PendingSandboxThread) => void;
@@ -38,6 +41,7 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
     disabled: { draggable: true },
     animateLayoutChanges: animateSidebarLayoutChanges,
   });
+  const projectIdentity = deriveProjectIdentity(props.projectTitle);
   const failed = pending.view.status._tag === "failed";
   const statusLabel = failed
     ? SANDBOX_STATUS_LABEL.failed
@@ -103,9 +107,11 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
         <span className="sr-only">{pending.view.title}</span>
         <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
           <div className="flex h-5 min-w-0 items-center gap-1.5">
-            {props.project ? (
-              <ProjectFavicon project={props.project} className="size-4 shrink-0" />
-            ) : null}
+            <ProjectMonogram
+              text={projectIdentity.monogram}
+              color={projectIdentity.color}
+              className="size-4 shrink-0"
+            />
             <span
               className={cn(
                 "min-w-0 flex-1 truncate text-secondary-label text-xs",

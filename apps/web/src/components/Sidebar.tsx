@@ -41,7 +41,7 @@ import {
 import {
   type PendingSandboxThread,
   pendingSandboxThreads,
-  sandboxProjectGrouping,
+  sandboxProject,
 } from "@t3tools/client-runtime/state/sandboxes";
 import {
   threadSearchMatchKey,
@@ -133,6 +133,7 @@ import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalPro
 import {
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
+  resolveSandboxProjectGroup,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
@@ -308,7 +309,7 @@ const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
 interface PendingSandboxRowData {
   readonly pending: PendingSandboxThread;
-  readonly project: ProjectFaviconProject | null;
+  readonly projectTitle: string;
   readonly projectDisplayName: string;
 }
 
@@ -2702,9 +2703,8 @@ export default function Sidebar() {
           ),
     [scopedProjectGroup],
   );
-  // Launching sandboxes stand in for their threads until those arrive. Each
-  // takes the project its thread will show: the repository group its cloned
-  // remote joins, or that repository alone when no project shares it.
+  // Launching sandboxes stand in for their threads until those arrive, under
+  // the project group and label their threads will show.
   const sandboxOwners = useAtomValue(sandboxes.ownersAtom);
   const pendingSandboxRows = useMemo(() => {
     const pending = pendingSandboxThreads(sandboxOwners, (environmentId) =>
@@ -2713,23 +2713,31 @@ export default function Sidebar() {
         .map((thread) => thread.source),
     );
     if (pending.length === 0) return EMPTY_PENDING_SANDBOX_ROWS;
-    const groupByKey = new Map(projectGroups.map((group) => [group.projectKey, group] as const));
     const rows = new Map<string, PendingSandboxRowData>();
     for (const entry of pending) {
-      const grouping = sandboxProjectGrouping(entry.view.repository);
-      const group = groupByKey.get(grouping.key) ?? null;
+      const project = sandboxProject(entry.view.repository);
+      const { group, label } = resolveSandboxProjectGroup({
+        groups: projectGroups,
+        mode: projectGroupingSettings.sidebarProjectGroupingMode,
+        project,
+      });
       if (scopedProjectGroup !== null && group?.projectKey !== scopedProjectGroup.projectKey) {
         continue;
       }
       rows.set(sidebarPendingSandboxKey(entry.ownerEnvironmentId, entry.view.id), {
         pending: entry,
-        project:
-          group === null ? null : (projectByKey.get(`${group.environmentId}:${group.id}`) ?? null),
-        projectDisplayName: group?.displayName ?? grouping.label,
+        projectTitle: project.title,
+        projectDisplayName: label,
       });
     }
     return rows;
-  }, [projectByKey, projectGroups, sandboxOwners, scopedProjectGroup, threads]);
+  }, [
+    projectGroupingSettings.sidebarProjectGroupingMode,
+    projectGroups,
+    sandboxOwners,
+    scopedProjectGroup,
+    threads,
+  ]);
   // A persisted scope whose project is gone falls back to all projects, but
   // only after every catalog environment has a live project snapshot. Cached
   // or disconnected environments cannot establish that the project is gone.
@@ -5539,7 +5547,7 @@ export default function Sidebar() {
                               key={item.key}
                               sortableId={item.key}
                               pending={row.pending}
-                              project={row.project}
+                              projectTitle={row.projectTitle}
                               projectDisplayName={row.projectDisplayName}
                               isActive={routeSandboxKey === item.key}
                               onNavigate={navigateToPendingSandbox}

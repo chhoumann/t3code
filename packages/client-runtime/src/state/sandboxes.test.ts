@@ -19,7 +19,7 @@ import {
   sandboxFailureMessage,
   sandboxLandingThreadId,
   sandboxLaunchStageIndex,
-  sandboxProjectGrouping,
+  sandboxProject,
   sandboxRepositoryFor,
 } from "./sandboxes.ts";
 
@@ -340,14 +340,26 @@ describe("pendingSandboxThreads", () => {
   });
 });
 
-describe("sandboxProjectGrouping", () => {
-  it("groups under the cloned remote however it is spelled", () => {
-    expect(sandboxProjectGrouping({ remoteUrl: REMOTE, commit: HEAD })).toEqual({
-      key: "github.com/octocat/hello-world",
-      label: "octocat/hello-world",
+describe("sandboxProject", () => {
+  it("names the project after its checkout and identifies it by the cloned remote", () => {
+    expect(sandboxProject({ remoteUrl: REMOTE, commit: HEAD })).toEqual({
+      title: "Hello-World",
+      repositoryIdentity: {
+        canonicalKey: "github.com/octocat/hello-world",
+        locator: { source: "git-remote", remoteName: "origin", remoteUrl: REMOTE },
+        displayName: "octocat/hello-world",
+        owner: "octocat",
+        name: "hello-world",
+      },
     });
-    expect(
-      sandboxProjectGrouping({ remoteUrl: "git@github.com:Octocat/Hello-World.git", commit: null }),
-    ).toEqual(sandboxProjectGrouping({ remoteUrl: REMOTE, commit: HEAD }));
+  });
+
+  it("identifies an SSH remote like its HTTPS spelling", () => {
+    const ssh = sandboxProject({
+      remoteUrl: "git@github.com:octocat/Hello-World.git/",
+      commit: null,
+    });
+    expect(ssh.title).toBe("Hello-World");
+    expect(ssh.repositoryIdentity?.canonicalKey).toBe("github.com/octocat/hello-world");
   });
 });

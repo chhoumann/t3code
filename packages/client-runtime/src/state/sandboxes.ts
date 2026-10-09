@@ -21,6 +21,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import type { EnvironmentProject } from "./models.ts";
 import {
   SandboxRegistrations,
   type SandboxIndexEntry,
@@ -177,18 +178,35 @@ export function pendingSandboxThreads(
 }
 
 /**
- * The project group a sandbox's thread joins: the sandbox clones its remote,
- * so its project's repository identity is that remote's. The key matches a
- * repository-grouped project's key; the label is what a group of only the
- * sandbox's project shows.
+ * The project a sandbox's environment creates for its clone, as far as
+ * project grouping reads it: titled after the checkout directory and
+ * identified by the cloned remote. Mirrors the server's sandbox checkout path
+ * and repository identity, so a launching sandbox is labeled the way its
+ * thread will be.
  */
-export function sandboxProjectGrouping(repository: SandboxRepository): {
-  readonly key: string;
-  readonly label: string;
-} {
-  const key = normalizeGitRemoteUrl(repository.remoteUrl);
-  const path = key.split("/").slice(1).join("/");
-  return { key, label: path.length > 0 ? path : key };
+export function sandboxProject(
+  repository: SandboxRepository,
+): Pick<EnvironmentProject, "title" | "repositoryIdentity"> {
+  const { remoteUrl } = repository;
+  const canonicalKey = normalizeGitRemoteUrl(remoteUrl);
+  const path = canonicalKey.split("/").slice(1);
+  const owner = path[0];
+  const name = path.at(-1);
+  return {
+    title:
+      remoteUrl
+        .replace(/\/+$/, "")
+        .split(/[/:]/)
+        .at(-1)
+        ?.replace(/\.git$/, "") || "project",
+    repositoryIdentity: {
+      canonicalKey,
+      locator: { source: "git-remote", remoteName: "origin", remoteUrl },
+      ...(path.length > 0 ? { displayName: path.join("/") } : {}),
+      ...(owner ? { owner } : {}),
+      ...(name ? { name } : {}),
+    },
+  };
 }
 
 export interface SandboxAccountChoice {

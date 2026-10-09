@@ -1,4 +1,10 @@
-import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
+import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
+import {
+  repositoryGroupingKeyOf,
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type SidebarProjectGroupingMode,
+} from "@t3tools/contracts";
 import { buildProjectGroups, type ProjectGroupingSettings } from "./logicalProject";
 import type { Project } from "./types";
 
@@ -174,4 +180,32 @@ export function buildSidebarProjectPickerEntries(input: {
     ...entries.slice(0, preferredIndex),
     ...entries.slice(preferredIndex + 1),
   ];
+}
+
+/**
+ * The group a launching sandbox's project will join and the label that group
+ * will then show, read off the groups before it joins. The project is new to
+ * every client, so no per-project grouping override applies to it.
+ */
+export function resolveSandboxProjectGroup(input: {
+  readonly groups: ReadonlyArray<SidebarProjectSnapshot>;
+  readonly mode: SidebarProjectGroupingMode;
+  readonly project: Pick<Project, "title" | "repositoryIdentity">;
+}): { readonly group: SidebarProjectSnapshot | null; readonly label: string } {
+  const { project } = input;
+  const key =
+    input.mode === "separate" || project.repositoryIdentity == null
+      ? null
+      : repositoryGroupingKeyOf(project.repositoryIdentity);
+  const group = key === null ? null : (input.groups.find((g) => g.projectKey === key) ?? null);
+  return {
+    group,
+    label:
+      group === null
+        ? project.title
+        : deriveProjectGroupLabel({
+            representative: group,
+            members: [...group.memberProjects, project],
+          }),
+  };
 }

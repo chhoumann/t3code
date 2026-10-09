@@ -1,3 +1,4 @@
+import { sandboxProject } from "@t3tools/client-runtime/state/sandboxes";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -13,6 +14,7 @@ import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
+  resolveSandboxProjectGroup,
 } from "./sidebarProjectGrouping";
 import { orderItemsByPreferredIds } from "./components/Sidebar.logic";
 import { legacyProjectCwdPreferenceKey } from "./uiStateStore";
@@ -456,5 +458,51 @@ describe("environment grouping", () => {
     });
 
     expect(groups.map((group) => group.displayName)).toEqual(["separate", "shared-repo"]);
+  });
+});
+
+describe("resolveSandboxProjectGroup", () => {
+  const sandboxEnvironmentId = EnvironmentId.make("env-sandbox");
+  const cloned = sandboxProject({
+    remoteUrl: "https://github.com/Example/Shared-Repo.git",
+    commit: null,
+  });
+  const snapshots = (projects: Project[], mode: "repository" | "separate") =>
+    buildSidebarProjectSnapshots({
+      projects,
+      settings: { sidebarProjectGroupingMode: mode, sidebarProjectGroupingOverrides: {} },
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: () => null,
+    });
+  // What the sidebar shows once the sandbox's environment lists its project.
+  const joined = (projects: Project[], mode: "repository" | "separate") => {
+    const sandbox = makeProject({
+      id: ProjectId.make("project-sandbox"),
+      environmentId: sandboxEnvironmentId,
+      workspaceRoot: "/home/user/projects/Shared-Repo",
+      ...cloned,
+    });
+    return snapshots([...projects, sandbox], mode).find((group) =>
+      group.memberProjects.some((member) => member.environmentId === sandboxEnvironmentId),
+    )!;
+  };
+
+  it.each([
+    ["a renamed local checkout", [makeProject({ title: "Shared Repo", repositoryIdentity })]],
+    ["a local checkout", [makeProject({ repositoryIdentity })]],
+    ["no checkout of the repository", [makeProject({ title: "other" })]],
+  ])("labels the sandbox as its thread will be labeled, beside %s", (_, projects) => {
+    for (const mode of ["repository", "separate"] as const) {
+      const resolved = resolveSandboxProjectGroup({
+        groups: snapshots(projects, mode),
+        mode,
+        project: cloned,
+      });
+      const after = joined(projects, mode);
+      expect(resolved.label).toBe(after.displayName);
+      expect(resolved.group?.projectKey ?? null).toBe(
+        after.groupedProjectCount > 1 ? after.projectKey : null,
+      );
+    }
   });
 });
