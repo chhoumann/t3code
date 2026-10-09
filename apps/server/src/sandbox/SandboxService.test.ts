@@ -12,6 +12,7 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -55,6 +56,15 @@ const makeWorld = () => {
     /** The next create registers its machine, then hangs as if its response were lost. */
     hangNextCreate: null as Deferred.Deferred<void> | null,
     failNextCreate: null as SandboxProviderErrorKind | null,
+    failNextDestroy: null as SandboxProviderErrorKind | null,
+    destroyAttempts: 0,
+    /** The next inspect signals `entered`, then waits for `release`. */
+    inspectGate: null as {
+      readonly entered: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    } | null,
+    /** The next readiness check dies, then signals. */
+    dieNextReadiness: null as Deferred.Deferred<void> | null,
   };
 
   const provider = SandboxProvider.of({
@@ -82,7 +92,13 @@ const makeWorld = () => {
         return { id, state: "running" as const, setup: "done" as const };
       }),
     inspect: (_account, id) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
+        const gate = world.inspectGate;
+        if (gate !== null) {
+          world.inspectGate = null;
+          yield* Deferred.succeed(gate.entered, undefined);
+          yield* Deferred.await(gate.release);
+        }
         const machine = machines.get(id);
         return machine === undefined ? null : { id, state: machine.state, setup: "done" as const };
       }),
@@ -95,7 +111,16 @@ const makeWorld = () => {
         world.resumes += 1;
         machines.set(id, { state: "running" });
       }),
-    destroy: (_account, id) => Effect.sync(() => void machines.delete(id)),
+    destroy: (_account, id) =>
+      Effect.gen(function* () {
+        world.destroyAttempts += 1;
+        const failure = world.failNextDestroy;
+        if (failure !== null) {
+          world.failNextDestroy = null;
+          return yield* new SandboxProviderError({ operation: "destroy", kind: failure });
+        }
+        machines.delete(id);
+      }),
   });
 
   const guest = SandboxGuest.SandboxGuest.of({
@@ -106,11 +131,19 @@ const makeWorld = () => {
       }),
     refreshCredentials: () => Effect.sync(() => void (world.credentialRefreshes += 1)),
     readEnvironmentId: (baseUrl) =>
-      Effect.sync(() =>
-        machines.get(new URL(baseUrl).hostname.split(".")[0] ?? "")?.state === "running"
-          ? GUEST_ENV
-          : null,
-      ),
+      Effect.gen(function* () {
+        const died = world.dieNextReadiness;
+        if (died !== null) {
+          world.dieNextReadiness = null;
+          yield* Deferred.succeed(died, undefined);
+          return yield* Effect.die(new Error("readiness check crashed"));
+        }
+        return yield* Effect.sync(() =>
+          machines.get(new URL(baseUrl).hostname.split(".")[0] ?? "")?.state === "running"
+            ? GUEST_ENV
+            : null,
+        );
+      }),
     mintAdminSession: () => Effect.succeed(Redacted.make("admin-token")),
     cloneCheckout: () => Effect.succeed([]),
     launchSeedThread: (_target, input) =>
@@ -204,6 +237,16 @@ const awaitStatus = (id: string, tag: SandboxStatus["_tag"]) =>
   );
 
 const service = SandboxService.SandboxService;
+
+/** Moves the test clock on until the sandbox shows `tag`, for steps that wait between tries. */
+const advanceUntilStatus = (id: string, tag: SandboxStatus["_tag"], step: Duration.Input) =>
+  Effect.gen(function* () {
+    const seen = yield* Effect.forkChild(awaitStatus(id, tag));
+    yield* TestClock.adjust(step).pipe(
+      Effect.repeat({ until: () => seen.pollUnsafe() !== undefined }),
+    );
+    return yield* Fiber.join(seen);
+  });
 
 describe("SandboxService", () => {
   it.effect(
@@ -415,5 +458,81 @@ describe("SandboxService", () => {
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("takes a request made during a step on the next step, not the next look", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-midstep");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        const gate = {
+          entered: yield* Deferred.make<void>(),
+          release: yield* Deferred.make<void>(),
+        };
+        world.inspectGate = gate;
+        yield* TestClock.adjust(Duration.minutes(1));
+        yield* Deferred.await(gate.entered);
+
+        // Every client hears what was asked before the step in flight ends.
+        const subscribed = yield* Deferred.make<void>();
+        const asked = yield* Effect.forkChild(
+          sandboxes.subscribe().pipe(
+            Stream.tap(() => Deferred.succeed(subscribed, undefined)),
+            Stream.map((views) => views.find((view) => view.id === id)),
+            Stream.filter((view) => view?.desired === "stopped"),
+            Stream.runHead,
+          ),
+        );
+        yield* Deferred.await(subscribed);
+        yield* sandboxes.update({ id, desired: "stopped" });
+        const heard = Option.getOrThrow(yield* Fiber.join(asked));
+        assert.strictEqual(heard?.status._tag, "ready");
+
+        yield* Deferred.succeed(gate.release, undefined);
+        yield* awaitStatus(id, "stopped");
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("restarts a sandbox's loop after a defect and carries on", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const died = yield* Deferred.make<void>();
+      world.dieNextReadiness = died;
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-defect");
+        yield* sandboxes.launch(launchInput(id));
+        yield* Deferred.await(died);
+        yield* advanceUntilStatus(id, "ready", Duration.seconds(1));
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("rides out a provider outage during a delete instead of failing it", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-outage");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        world.failNextDestroy = "transient";
+
+        yield* sandboxes.update({ id, desired: "destroyed" });
+        yield* advanceUntilStatus(id, "destroyed", Duration.seconds(2));
+        assert.strictEqual(world.destroyAttempts, 2);
+        assert.strictEqual(world.machines.size, 0);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 });

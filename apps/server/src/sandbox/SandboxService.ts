@@ -3,11 +3,12 @@
  * for this owner environment, and keeps each `sandboxes` row converging on
  * what its user last asked for.
  *
- * Commands write only `desired`. One reconcile fiber per unsettled sandbox
+ * Commands write only `desired` and wake the sandbox's loop. Each loop
  * observes the provider and the guest, asks `planNext` for the next action,
- * runs it, and records the facts it learned. Every provider call is recorded
- * as in flight before it is made, so a restart resolves it by looking before
- * anything else happens. On start, every unsettled row is planned again.
+ * runs it, and records the facts it learned, then waits to be woken again.
+ * Every provider call is recorded as in flight before it is made, so a
+ * restart resolves it by looking before anything else happens. On start,
+ * every unsettled row is planned again.
  *
  * @module SandboxService
  */
@@ -33,7 +34,6 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
-import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
@@ -41,9 +41,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -73,6 +74,11 @@ import { ProviderMachineId, SandboxProvider, SandboxProviderError } from "./Sand
 const POLL_INTERVAL = Duration.seconds(2);
 /** How often a ready sandbox is checked for a stop the provider made on its own. */
 const WATCH_INTERVAL = Duration.minutes(1);
+/** Between restarts of a sandbox's loop after a failure it could not handle. */
+const RESTART_BACKOFF = Schedule.min([
+  Schedule.exponential(Duration.seconds(1)),
+  Schedule.spaced(Duration.minutes(1)),
+]);
 const SANDBOX_HOME_PROJECTS = "/home/user/projects";
 
 export class SandboxNotFoundError extends Schema.TaggedError<SandboxNotFoundError>()(
@@ -353,9 +359,6 @@ const make = Effect.gen(function* () {
   const ownerEnvironmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
-  const lifecycleLock = yield* Semaphore.make(1);
-  /** The wake signal of each live reconcile fiber, for the iteration it is in. */
-  const wakers = new Map<SandboxId, Deferred.Deferred<void>>();
 
   const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
   const persistence = Effect.mapError((cause: unknown) => new SandboxPersistenceError({ cause }));
@@ -616,7 +619,7 @@ const make = Effect.gen(function* () {
   const step = (id: SandboxId) =>
     Effect.gen(function* () {
       const found = yield* readRecord(id);
-      if (Option.isNone(found) || isParked(found.value)) return "exit" as const;
+      if (Option.isNone(found) || isParked(found.value)) return "park" as const;
       const record = found.value;
       const observation = yield* observe(record).pipe(Effect.result);
       // A provider hiccup while looking changes nothing; look again later.
@@ -641,8 +644,11 @@ const make = Effect.gen(function* () {
       if (outcome._tag === "Failure") {
         const error = outcome.failure;
         if (error._tag === "SandboxPersistenceError") return yield* error;
-        // A machine that vanished under a call is seen as gone by the next look.
-        if (isProviderError(error) && error.kind === "not-found") return "continue" as const;
+        // The provider may yet act, and a machine that vanished under a call is
+        // seen as gone by the next look: neither proves the request failed.
+        if (isProviderError(error) && (error.kind === "transient" || error.kind === "not-found")) {
+          return "wait" as const;
+        }
         const current = yield* readRecord(id);
         if (Option.isSome(current)) {
           yield* writeFacts(current.value, {
@@ -650,7 +656,7 @@ const make = Effect.gen(function* () {
             settledRevision: record.desiredRevision,
           });
         }
-        return "exit" as const;
+        return "park" as const;
       }
       switch (next.action._tag) {
         case "Wait":
@@ -658,67 +664,66 @@ const make = Effect.gen(function* () {
         case "Watch":
           return "watch" as const;
         case "Settle":
-          return "exit" as const;
+          return "park" as const;
         default:
           return "continue" as const;
       }
     });
 
-  const reconcile = (id: SandboxId) => {
-    let wake: Deferred.Deferred<void> | undefined;
-    return Effect.gen(function* () {
-      while (true) {
-        const current = yield* Deferred.make<void>();
-        wake = current;
-        yield* lifecycleLock.withPermits(1)(Effect.sync(() => wakers.set(id, current)));
-        const outcome = yield* step(id);
-        if (outcome === "wait" || outcome === "watch") {
-          yield* Deferred.await(current).pipe(
-            Effect.timeoutOrElse({
-              duration: outcome === "wait" ? POLL_INTERVAL : WATCH_INTERVAL,
-              orElse: () => Effect.void,
-            }),
-          );
-        } else if (outcome === "exit") {
-          // A request that arrived during this step is picked up here rather than lost.
-          const requested = yield* lifecycleLock.withPermits(1)(
-            Effect.gen(function* () {
-              if (yield* Deferred.isDone(current)) return true;
-              wakers.delete(id);
-              return false;
-            }),
-          );
-          if (!requested) return;
+  /**
+   * One sandbox's loop, for as long as the service lives. Between steps it
+   * waits on `wake`, which holds at most one pending request, so a request
+   * made during a step runs the next step at once. A failure restarts the loop.
+   */
+  const reconcile = (id: SandboxId, wake: Queue.Queue<void>) => {
+    const waitForWake = (duration: Duration.Duration) =>
+      Queue.take(wake).pipe(Effect.timeoutOrElse({ duration, orElse: () => Effect.void }));
+    return step(id).pipe(
+      Effect.flatMap((outcome) => {
+        switch (outcome) {
+          case "continue":
+            return Effect.void;
+          case "wait":
+            return waitForWake(POLL_INTERVAL);
+          case "watch":
+            return waitForWake(WATCH_INTERVAL);
+          case "park":
+            return Queue.take(wake);
         }
-      }
-    }).pipe(
-      Effect.tapCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.void
-          : Effect.logError("sandbox reconcile stopped").pipe(
-              Effect.annotateLogs({ sandboxId: id, cause }),
-            ),
-      ),
-      Effect.ensuring(
-        lifecycleLock.withPermits(1)(
-          Effect.sync(() => {
-            if (wake !== undefined && wakers.get(id) === wake) wakers.delete(id);
-          }),
+      }),
+      Effect.forever,
+      Effect.sandbox,
+      Effect.tapError((cause) =>
+        Effect.logError("sandbox reconcile failed; restarting").pipe(
+          Effect.annotateLogs({ sandboxId: id, cause }),
         ),
       ),
+      Effect.retry({
+        while: (cause) => !Cause.hasInterruptsOnly(cause),
+        schedule: RESTART_BACKOFF,
+      }),
     );
   };
 
-  /** Wakes the sandbox's reconcile fiber, starting one when none is live. */
-  const kick = (id: SandboxId) =>
-    lifecycleLock.withPermits(1)(
-      Effect.suspend(() => {
-        const waker = wakers.get(id);
-        return waker === undefined
-          ? FiberMap.run(fibers, id, reconcile(id)).pipe(Effect.asVoid)
-          : Deferred.succeed(waker, undefined).pipe(Effect.asVoid);
+  /** Each sandbox's wake signal; read and written only by the dispatcher below. */
+  const wakes = new Map<SandboxId, Queue.Queue<void>>();
+  const kicks = yield* Queue.unbounded<SandboxId>();
+  yield* Queue.take(kicks).pipe(
+    Effect.flatMap((id) =>
+      Effect.gen(function* () {
+        const wake = wakes.get(id);
+        if (wake !== undefined) return yield* Queue.offer(wake, undefined);
+        const created = yield* Queue.sliding<void>(1);
+        wakes.set(id, created);
+        yield* FiberMap.run(fibers, id, reconcile(id, created));
       }),
-    );
+    ),
+    Effect.forever,
+    Effect.forkScoped,
+  );
+
+  /** Wakes the sandbox's loop, starting it on the first request. */
+  const kick = (id: SandboxId) => Queue.offer(kicks, id).pipe(Effect.asVoid);
 
   const launch: SandboxService["Service"]["launch"] = (input) =>
     Effect.gen(function* () {
@@ -799,6 +804,7 @@ const make = Effect.gen(function* () {
       const record = yield* readRecord(id);
       if (Option.isNone(record)) return yield* new SandboxNotFoundError({ sandboxId: id });
       if (updated.length === 0) return yield* new SandboxDestroyedError({ sandboxId: id });
+      yield* PubSub.publish(changesPubSub, toView(record.value));
       yield* kick(id);
       return toView(record.value);
     });
