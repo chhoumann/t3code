@@ -25,6 +25,7 @@ import {
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { isSandboxStopped } from "@t3tools/client-runtime/state/sandboxes";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
@@ -409,6 +410,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
+import { sandboxes } from "../state/sandboxes";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
@@ -2696,6 +2698,9 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [activeReconnectingEnvironmentId]);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
+  const sandboxIndex = useAtomValue(sandboxes.indexAtom);
+  const activeSandbox = activeThread ? sandboxIndex.get(activeThread.environmentId) : undefined;
+  const activeSandboxStopped = activeSandbox !== undefined && isSandboxStopped(activeSandbox.view);
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
@@ -3132,9 +3137,11 @@ export default function ChatView(props: ChatViewProps) {
         unavailableConnection.phase === "reconnecting");
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
-    // phases still surface so the Reconnect action stays reachable.
+    // phases still surface so the Reconnect action stays reachable. A sandbox
+    // its owner stopped is off on purpose, not an outage.
     const suppressUnavailableBanner =
-      environmentReconnecting && (updateRunning || !reconnectWarningGraceElapsed);
+      activeSandboxStopped ||
+      (environmentReconnecting && (updateRunning || !reconnectWarningGraceElapsed));
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
@@ -3247,6 +3254,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
+    activeSandboxStopped,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,
     disconnectingEnvironment,
