@@ -48,8 +48,10 @@ import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MANAGED_FILE,
+  SANDBOX_SETUP_ENV_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_STAGED_ENV_FILE,
+  SANDBOX_STAGED_SETUP_ENV_FILE,
   SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
   SANDBOX_T3_BIN,
   SANDBOX_T3_HOME,
@@ -94,7 +96,10 @@ export interface SandboxSeedThread {
 
 /** What the owner writes into a machine for its account; contents are secret. */
 export interface SandboxMachineCredentials {
+  /** Loaded by T3 and the machine setup. */
   readonly envFile: string;
+  /** Loaded by the machine setup only. */
+  readonly setupEnvFile: string;
   readonly machineSetupScript: string;
 }
 
@@ -310,6 +315,10 @@ const make = Effect.gen(function* () {
         content: encode(inputs.envFile),
       });
       yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_SETUP_ENV_FILE,
+        content: encode(inputs.setupEnvFile),
+      });
+      yield* provider.writeFile(account, machineId, {
         path: SANDBOX_MACHINE_SETUP_SCRIPT,
         content: encode(inputs.machineSetupScript),
       });
@@ -355,6 +364,10 @@ const make = Effect.gen(function* () {
       yield* provider.writeFile(account, machineId, {
         path: SANDBOX_STAGED_ENV_FILE,
         content: encode(credentials.envFile),
+      });
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_STAGED_SETUP_ENV_FILE,
+        content: encode(credentials.setupEnvFile),
       });
       yield* provider.writeFile(account, machineId, {
         path: SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,

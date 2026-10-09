@@ -77,24 +77,36 @@ describe("SandboxAccounts", () => {
         env: [
           { name: "ANTHROPIC_API_KEY", value: "" },
           { name: "ANTHROPIC_AUTH_TOKEN", value: "proxy-secret-token" },
+          { name: "TAILSCALE_AUTH_KEY", value: "tskey-secret", setupOnly: true },
         ],
       });
-      assert.deepStrictEqual(saved.envNames, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+      assert.deepStrictEqual(saved.env, [
+        { name: "ANTHROPIC_API_KEY", setupOnly: false },
+        { name: "ANTHROPIC_AUTH_TOKEN", setupOnly: false },
+        { name: "TAILSCALE_AUTH_KEY", setupOnly: true },
+      ]);
 
       const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
       assert.deepStrictEqual(settings.sandboxAccounts[ID], saved);
       const settingsText = JSON.stringify(settings);
       assert.notInclude(settingsText, "boat-secret-key");
       assert.notInclude(settingsText, "proxy-secret-token");
-      assert.includeMembers(storedText(world), ["boat-secret-key", "proxy-secret-token", ""]);
+      assert.notInclude(settingsText, "tskey-secret");
+      assert.includeMembers(storedText(world), [
+        "boat-secret-key",
+        "proxy-secret-token",
+        "tskey-secret",
+        "",
+      ]);
 
       const account = yield* accounts.get(ID);
       assert.strictEqual(Redacted.value(account.apiKey), "boat-secret-key");
       assert.deepStrictEqual(
-        account.env.map((entry) => [entry.name, Redacted.value(entry.value)]),
+        account.env.map((entry) => [entry.name, Redacted.value(entry.value), entry.setupOnly]),
         [
-          ["ANTHROPIC_API_KEY", ""],
-          ["ANTHROPIC_AUTH_TOKEN", "proxy-secret-token"],
+          ["ANTHROPIC_API_KEY", "", false],
+          ["ANTHROPIC_AUTH_TOKEN", "proxy-secret-token", false],
+          ["TAILSCALE_AUTH_KEY", "tskey-secret", true],
         ],
       );
       assert.strictEqual(account.machineSetupScript, "tailscale up");

@@ -10,6 +10,7 @@ import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
+  SANDBOX_SETUP_ENV_FILE,
   renderRefreshCredentialsCommand,
   renderSandboxBootScript,
   renderSandboxEnvFile,
@@ -48,6 +49,8 @@ describe("renderSandboxBootScript", () => {
     expect(waitForInputs).toBeLessThan(unitStart);
     expect(unitStart).toBeLessThan(install);
     expect(lines).toContain(`EnvironmentFile=${SANDBOX_ENV_FILE}`);
+    // Setup-only values reach the setup; the T3 drop-in below never loads them.
+    expect(lines).toContain(`EnvironmentFile=${SANDBOX_SETUP_ENV_FILE}`);
     expect(lines).toContain(`ExecStart=/bin/bash ${SANDBOX_MACHINE_SETUP_SCRIPT}`);
     expect(lines).toContain("Before=user@$(id -u).service");
     expect(lines).toContain("sudo systemctl enable t3-sandbox-machine-setup.service");

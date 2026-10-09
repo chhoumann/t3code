@@ -413,12 +413,19 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const machineCredentials = (account: SandboxAccounts.SandboxAccount) => ({
-    envFile: renderSandboxEnvFile(
-      account.env.map((entry) => ({ name: entry.name, value: Redacted.value(entry.value) })),
-    ),
-    machineSetupScript: account.machineSetupScript ?? "",
-  });
+  const machineCredentials = (account: SandboxAccounts.SandboxAccount) => {
+    const envFile = (setupOnly: boolean) =>
+      renderSandboxEnvFile(
+        account.env
+          .filter((entry) => entry.setupOnly === setupOnly)
+          .map((entry) => ({ name: entry.name, value: Redacted.value(entry.value) })),
+      );
+    return {
+      envFile: envFile(false),
+      setupEnvFile: envFile(true),
+      machineSetupScript: account.machineSetupScript ?? "",
+    };
+  };
 
   const observe = (record: SandboxRecord) =>
     Effect.gen(function* () {

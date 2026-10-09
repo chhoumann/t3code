@@ -48,6 +48,7 @@ const makeWorld = () => {
     resumes: 0,
     credentialRefreshes: 0,
     managedMarkers: [] as Array<ManagedSandboxMarker>,
+    bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
     launchedThreads: [] as Array<string>,
     pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
@@ -99,7 +100,10 @@ const makeWorld = () => {
 
   const guest = SandboxGuest.SandboxGuest.of({
     writeBootInputs: (_account, _machineId, inputs) =>
-      Effect.sync(() => void world.managedMarkers.push(inputs.managed)),
+      Effect.sync(() => {
+        world.managedMarkers.push(inputs.managed);
+        world.bootEnvFiles.push({ envFile: inputs.envFile, setupEnvFile: inputs.setupEnvFile });
+      }),
     refreshCredentials: () => Effect.sync(() => void (world.credentialRefreshes += 1)),
     readEnvironmentId: (baseUrl) =>
       Effect.sync(() =>
@@ -137,7 +141,10 @@ const makeWorld = () => {
           id: ACCOUNT_ID,
           provider: "boat",
           apiKey: Redacted.make("boat-key"),
-          env: [{ name: "ANTHROPIC_API_KEY", value: Redacted.make("") }],
+          env: [
+            { name: "ANTHROPIC_API_KEY", value: Redacted.make(""), setupOnly: false },
+            { name: "TAILSCALE_AUTH_KEY", value: Redacted.make("tskey"), setupOnly: true },
+          ],
           machineSetupScript: null,
           template: null,
           providerEnvironment: null,
@@ -242,6 +249,10 @@ describe("SandboxService", () => {
         assert.strictEqual((yield* sandboxes.list()).length, 1);
         assert.strictEqual(world.machines.size, 1);
         assert.strictEqual(world.launchedThreads.length, 1);
+        // Setup-only values go only to the file the machine setup loads.
+        assert.deepStrictEqual(world.bootEnvFiles, [
+          { envFile: 'ANTHROPIC_API_KEY=""\n', setupEnvFile: 'TAILSCALE_AUTH_KEY="tskey"\n' },
+        ]);
         // The guest learns which owner manages it and which seed to guard.
         assert.deepStrictEqual(world.managedMarkers, [
           {

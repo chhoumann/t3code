@@ -37,7 +37,12 @@ export interface SandboxAccount extends SandboxProviderAccount {
    * Written to the machine's env file on every boot and loaded by T3 and the
    * machine setup. An empty value is kept: `ANTHROPIC_API_KEY=""` matters.
    */
-  readonly env: ReadonlyArray<{ readonly name: string; readonly value: Redacted.Redacted<string> }>;
+  readonly env: ReadonlyArray<{
+    readonly name: string;
+    readonly value: Redacted.Redacted<string>;
+    /** Loaded only by the machine setup; see `SandboxAccountConfig`. */
+    readonly setupOnly: boolean;
+  }>;
   /** Run on every boot before T3 starts, with the env loaded. Must be idempotent. */
   readonly machineSetupScript: string | null;
   /** A provider named snapshot to create machines from. */
@@ -154,11 +159,11 @@ const make = Effect.gen(function* () {
       const apiKey = yield* readSecret(apiKeySecretName(accountId)).pipe(Effect.orDie);
       if (Option.isNone(apiKey)) return yield* notFound;
       const env = [];
-      for (const name of config.envNames) {
+      for (const { name, setupOnly } of config.env) {
         const value = yield* readSecret(envSecretName(accountId, name)).pipe(Effect.orDie);
         // Only a hand-edited settings file lists a name without a value.
         if (Option.isNone(value)) return yield* notFound;
-        env.push({ name, value: Redacted.make(value.value) });
+        env.push({ name, value: Redacted.make(value.value), setupOnly });
       }
       return {
         id: accountId,
@@ -184,7 +189,11 @@ const make = Effect.gen(function* () {
       if (apiKey === undefined) {
         return yield* new SandboxAccountInvalidError({ accountId: id, reason: "api-key-required" });
       }
-      const env: Array<{ readonly name: string; readonly value: string }> = [];
+      const env: Array<{
+        readonly name: string;
+        readonly value: string;
+        readonly setupOnly: boolean;
+      }> = [];
       for (const entry of input.env) {
         if (env.some((existing) => existing.name === entry.name)) {
           return yield* new SandboxAccountInvalidError({
@@ -203,7 +212,7 @@ const make = Effect.gen(function* () {
             envName: entry.name,
           });
         }
-        env.push({ name: entry.name, value });
+        env.push({ name: entry.name, value, setupOnly: entry.setupOnly ?? false });
       }
 
       const missingActions = yield* provider.checkAccess({ apiKey: Redacted.make(apiKey) });
@@ -219,7 +228,7 @@ const make = Effect.gen(function* () {
         size: input.size,
         stopAfterHours: input.stopAfterHours,
         machineSetupScript: input.machineSetupScript,
-        envNames: env.map((entry) => entry.name),
+        env: env.map(({ name, setupOnly }) => ({ name, setupOnly })),
       };
       yield* settings
         .updateSandboxAccounts((accounts) =>
@@ -228,8 +237,10 @@ const make = Effect.gen(function* () {
             for (const entry of env) {
               yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
             }
-            for (const name of accounts[id]?.envNames ?? []) {
-              if (!config.envNames.includes(name)) yield* secrets.remove(envSecretName(id, name));
+            for (const { name } of accounts[id]?.env ?? []) {
+              if (!env.some((entry) => entry.name === name)) {
+                yield* secrets.remove(envSecretName(id, name));
+              }
             }
             return { ...accounts, [id]: config };
           }),
@@ -256,7 +267,7 @@ const make = Effect.gen(function* () {
           const live = row?.live ?? 0;
           if (live > 0) return yield* new SandboxAccountInUseError({ accountId, sandboxes: live });
           yield* secrets.remove(apiKeySecretName(accountId)).pipe(store);
-          for (const name of config.envNames) {
+          for (const { name } of config.env) {
             yield* secrets.remove(envSecretName(accountId, name)).pipe(store);
           }
           const { [accountId]: _removed, ...rest } = accounts;

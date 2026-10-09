@@ -14,6 +14,12 @@ export const SANDBOX_T3_PORT = 3773;
 export const SANDBOX_ENV_FILE = `${SANDBOX_T3_HOME}/sandbox.env`;
 /** Owner uploads (env, setup script, server tarball) land here. */
 const SANDBOX_INPUTS_DIR = `${SANDBOX_T3_HOME}/sandbox`;
+/**
+ * Setup-only account env, loaded by the machine setup unit alone so agents
+ * under T3 never inherit it. Agents can still read the file; it keeps values
+ * out of their environment, not out of their reach.
+ */
+export const SANDBOX_SETUP_ENV_FILE = `${SANDBOX_INPUTS_DIR}/setup.env`;
 /** The account's machine setup script, run by a system unit on every boot. */
 export const SANDBOX_MACHINE_SETUP_SCRIPT = `${SANDBOX_INPUTS_DIR}/machine-setup.sh`;
 /** Where the owner uploads an unreleased server build. */
@@ -29,6 +35,7 @@ const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
 export const SANDBOX_T3_BIN = `${SANDBOX_T3_HOME}/bin/t3`;
 /** Staged by the owner, then swapped in by the refresh command. */
 export const SANDBOX_STAGED_ENV_FILE = `${SANDBOX_INPUTS_DIR}/sandbox.env.next`;
+export const SANDBOX_STAGED_SETUP_ENV_FILE = `${SANDBOX_INPUTS_DIR}/setup.env.next`;
 export const SANDBOX_STAGED_MACHINE_SETUP_SCRIPT = `${SANDBOX_INPUTS_DIR}/machine-setup.sh.next`;
 
 const SERVICE_DROP_IN_DIR = `${SANDBOX_HOME}/.config/systemd/user/t3code.service.d`;
@@ -113,6 +120,7 @@ function renderMachineSetupUnit(): ReadonlyArray<string> {
     "RemainAfterExit=yes",
     "User=$(id -un)",
     `EnvironmentFile=${SANDBOX_ENV_FILE}`,
+    `EnvironmentFile=${SANDBOX_SETUP_ENV_FILE}`,
     `ExecStart=/bin/bash ${SANDBOX_MACHINE_SETUP_SCRIPT}`,
     `StandardOutput=append:${MACHINE_SETUP_LOG}`,
     `StandardError=append:${MACHINE_SETUP_LOG}`,
@@ -140,7 +148,7 @@ export function renderSandboxBootScript(source: SandboxT3Source): string {
     "",
     `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do [ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] && break; sleep 1; done`,
     `[ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
-    `chmod 600 ${shellQuote(SANDBOX_ENV_FILE)}`,
+    `chmod 600 ${shellQuote(SANDBOX_ENV_FILE)} ${shellQuote(SANDBOX_SETUP_ENV_FILE)}`,
     "",
     // Dev servers and T3's own file watching exhaust the stock inotify limits,
     // and Boat caps user.slice swap at zero although the VM has a swapfile.
@@ -176,9 +184,9 @@ export function renderSandboxBootScript(source: SandboxT3Source): string {
 }
 
 /**
- * Swaps the staged env file and setup script in after a boot the owner did not
- * script, re-runs the setup unit when either changed, and restarts T3 when its
- * env changed. Prints `env_changed=0|1 setup_changed=0|1`.
+ * Swaps the staged env files and setup script in after a boot the owner did
+ * not script, re-runs the setup unit when any of them changed, and restarts T3
+ * when its own env changed. Prints `env_changed=0|1 setup_changed=0|1`.
  */
 export function renderRefreshCredentialsCommand(): string {
   const swap = (staged: string, target: string, flag: string) => [
@@ -191,6 +199,7 @@ export function renderRefreshCredentialsCommand(): string {
     "env_changed=0",
     "setup_changed=0",
     ...swap(SANDBOX_STAGED_ENV_FILE, SANDBOX_ENV_FILE, "env_changed"),
+    ...swap(SANDBOX_STAGED_SETUP_ENV_FILE, SANDBOX_SETUP_ENV_FILE, "setup_changed"),
     ...swap(SANDBOX_STAGED_MACHINE_SETUP_SCRIPT, SANDBOX_MACHINE_SETUP_SCRIPT, "setup_changed"),
     `if [ "$env_changed$setup_changed" != 00 ]; then sudo systemctl restart ${MACHINE_SETUP_UNIT} || echo "machine setup failed" >&2; fi`,
     'if [ "$env_changed" = 1 ]; then systemctl --user restart t3code.service; fi',

@@ -472,7 +472,7 @@ describe("sandbox RPC authorization", () => {
               ),
             ),
             group.toLayerHandler(WS_METHODS.sandboxesSaveAccount, () =>
-              record("saveAccount").pipe(Effect.as({ ...account, envNames: [] })),
+              record("saveAccount").pipe(Effect.as({ ...account, env: [] })),
             ),
             group.toLayerHandler(WS_METHODS.sandboxesRemoveAccount, () => record("removeAccount")),
             RpcAuthorization.layer(scopes),

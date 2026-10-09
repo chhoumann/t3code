@@ -54,7 +54,7 @@ import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
-import { SANDBOX_ENV_FILE } from "../src/sandbox/sandboxBootScript.ts";
+import { SANDBOX_ENV_FILE, SANDBOX_SETUP_ENV_FILE } from "../src/sandbox/sandboxBootScript.ts";
 import * as SandboxAccounts from "../src/sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "../src/sandbox/SandboxGuest.ts";
 import { ProviderMachineId, SandboxProvider } from "../src/sandbox/SandboxProvider.ts";
@@ -143,20 +143,27 @@ const packServer = Effect.gen(function* () {
 /** The account env's round; bumped before a resume to prove the env file is rewritten. */
 let envRound = 1;
 
-type AccountEnv = ReadonlyArray<{
-  readonly name: string;
-  readonly value: Redacted.Redacted<string>;
-}>;
+type AccountEnv = SandboxAccounts.SandboxAccount["env"];
 
 /** The proxy credentials and tailnet key from this shell, read without printing them. */
 const agentProxyEnv = Effect.gen(function* () {
   const optional = (name: string) =>
     Config.Redacted(name).pipe(Config.withDefault(Redacted.make("")));
+  const agentEnv = (name: string, value: Redacted.Redacted<string>) => ({
+    name,
+    value,
+    setupOnly: false,
+  });
   return [
-    { name: "ANTHROPIC_BASE_URL", value: yield* Config.Redacted("ANTHROPIC_BASE_URL") },
-    { name: "ANTHROPIC_AUTH_TOKEN", value: yield* Config.Redacted("ANTHROPIC_AUTH_TOKEN") },
-    { name: "ANTHROPIC_API_KEY", value: yield* optional("ANTHROPIC_API_KEY") },
-    { name: "TAILSCALE_AUTH_KEY", value: yield* Config.Redacted("TAILSCALE_AUTH_KEY") },
+    agentEnv("ANTHROPIC_BASE_URL", yield* Config.Redacted("ANTHROPIC_BASE_URL")),
+    agentEnv("ANTHROPIC_AUTH_TOKEN", yield* Config.Redacted("ANTHROPIC_AUTH_TOKEN")),
+    agentEnv("ANTHROPIC_API_KEY", yield* optional("ANTHROPIC_API_KEY")),
+    // Only the machine setup needs it to join the tailnet.
+    {
+      name: "TAILSCALE_AUTH_KEY",
+      value: yield* Config.Redacted("TAILSCALE_AUTH_KEY"),
+      setupOnly: true,
+    },
   ] satisfies AccountEnv;
 });
 
@@ -172,8 +179,14 @@ const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv |
               provider: "boat" as const,
               apiKey,
               env: [
-                ...(proxyEnv ?? [{ name: "ANTHROPIC_API_KEY", value: Redacted.make("") }]),
-                { name: "T3_TRACER_ROUND", value: Redacted.make(String(envRound)) },
+                ...(proxyEnv ?? [
+                  { name: "ANTHROPIC_API_KEY", value: Redacted.make(""), setupOnly: false },
+                ]),
+                {
+                  name: "T3_TRACER_ROUND",
+                  value: Redacted.make(String(envRound)),
+                  setupOnly: false,
+                },
               ],
               machineSetupScript: proxyEnv === null ? MACHINE_SETUP_SCRIPT : TAILSCALE_SETUP_SCRIPT,
               template: null,
@@ -445,6 +458,27 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
           headers: { authorization: `Bearer ${issued.access_token}` },
         });
         yield* check(session.authenticated, "the paired client session authenticates");
+
+        const refused = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const rpc = yield* SandboxGuest.connectGuestRpc({
+              baseUrl,
+              token: Redacted.make(issued.access_token),
+            });
+            return yield* rpc["orchestration.dispatchCommand"]({
+              type: "thread.archive",
+              commandId: CommandId.make(NodeCrypto.randomUUID()),
+              threadId,
+            }).pipe(Effect.flip);
+          }),
+        );
+        yield* say(`a paired client archiving the seed thread: ${refused._tag}`);
+        yield* check(
+          refused._tag === "SandboxManagedByOwnerError" &&
+            refused.sandboxId === id &&
+            refused.ownerEnvironmentId === "sandbox-tracer-owner",
+          "the sandbox refuses to archive its seed thread for anyone but its owner",
+        );
       }),
     );
 
@@ -487,10 +521,34 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
       if (flags["agent-proxy"]) {
         yield* diagnoseProxy(`round ${round}: proxy route after resume`);
-        yield* sendFollowUp("What does hello.txt contain? Answer with its contents only.");
-        yield* checkReply(
-          `round ${round}: follow-up`,
-          yield* step(`round ${round}: follow-up -> reply`, awaitReply(1 + followUps)),
+        const envNames = yield* exec(
+          [
+            'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+            "pid=$(systemctl --user show -p MainPID --value t3code.service)",
+            `count() { tr '\\0' '\\n' < "$1" | grep -c "^$2=" || true; }`,
+            `echo "service_tailscale=$(count /proc/$pid/environ TAILSCALE_AUTH_KEY)" \\`,
+            `"service_anthropic=$(count /proc/$pid/environ ANTHROPIC_BASE_URL)" \\`,
+            `"sandbox_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_ENV_FILE} || true)" \\`,
+            `"setup_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_SETUP_ENV_FILE} || true)"`,
+          ].join("\n"),
+        );
+        yield* say(`round ${round}: env names: ${envNames}`);
+        yield* check(
+          envNames ===
+            "service_tailscale=0 service_anthropic=1 sandbox_env_tailscale=0 setup_env_tailscale=1",
+          "the setup-only key reaches the machine setup but not T3",
+        );
+        yield* sendFollowUp(
+          "Run `printenv TAILSCALE_AUTH_KEY >/dev/null && echo SET || echo UNSET` in a shell and answer with its output only.",
+        );
+        const outcome = yield* step(
+          `round ${round}: follow-up -> reply`,
+          awaitReply(1 + followUps),
+        );
+        yield* checkReply(`round ${round}: follow-up`, outcome);
+        yield* check(
+          /\bUNSET\b/.test(outcome.reply) && !/\bSET\b/.test(outcome.reply),
+          "the agent's process env lacks the setup-only key",
         );
       }
     }

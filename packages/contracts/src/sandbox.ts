@@ -104,13 +104,20 @@ const SandboxAccountFields = {
 };
 
 /**
+ * Set on a value only the machine setup needs, such as a tailnet auth key. It
+ * is loaded by the setup and never into T3's environment, so agents do not
+ * inherit it. Not a hard boundary: the machine's user has passwordless sudo.
+ */
+const SandboxEnvSetupOnly = Schema.Boolean;
+
+/**
  * One sandbox account in the owner's server settings. Its API key and env
  * values live only in the owner's secret store, so this is safe to show any
  * client: a listed env name always has a value.
  */
 export const SandboxAccountConfig = Schema.Struct({
   ...SandboxAccountFields,
-  envNames: Schema.Array(SandboxEnvName),
+  env: Schema.Array(Schema.Struct({ name: SandboxEnvName, setupOnly: SandboxEnvSetupOnly })),
 });
 export type SandboxAccountConfig = typeof SandboxAccountConfig.Type;
 
@@ -121,7 +128,12 @@ export const SandboxAccountSaveInput = Schema.Struct({
   apiKey: Schema.optionalKey(TrimmedNonEmptyString),
   /** The account's whole env. An entry without a value keeps its saved value; empty is a value. */
   env: Schema.Array(
-    Schema.Struct({ name: SandboxEnvName, value: Schema.optionalKey(Schema.String) }),
+    Schema.Struct({
+      name: SandboxEnvName,
+      value: Schema.optionalKey(Schema.String),
+      /** Omitted is false. */
+      setupOnly: Schema.optionalKey(SandboxEnvSetupOnly),
+    }),
   ),
 });
 export type SandboxAccountSaveInput = typeof SandboxAccountSaveInput.Type;
