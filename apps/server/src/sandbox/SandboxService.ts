@@ -603,6 +603,11 @@ const make = Effect.gen(function* () {
         case "Watch":
         case "Settle": {
           if (status._tag === "destroyed") {
+            if (record.machineId === null && record.createFirstAttemptAt !== null) {
+              yield* Effect.logWarning(
+                "Deleted a sandbox whose machine create could not be confirmed. Check the provider for a stray machine.",
+              ).pipe(Effect.annotateLogs({ sandboxId: record.id }));
+            }
             yield* secrets.remove(adminSecretName(record.id)).pipe(Effect.ignore({ log: true }));
           }
           return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });

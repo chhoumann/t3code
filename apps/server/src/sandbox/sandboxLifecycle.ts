@@ -35,8 +35,14 @@ export const CREATE_KEY_WINDOW_MS = 23 * 60 * 60 * 1000;
 export const INFLIGHT_GRACE_MS = 2 * 60 * 1000;
 /** From the first create until T3 answers for the first time. */
 export const FIRST_BOOT_DEADLINE_MS = 20 * 60 * 1000;
-/** From a resume until T3 answers again, and from a stop until the machine is stopped. */
+/** From a stop or resume until the machine reports it. */
 export const TRANSITION_DEADLINE_MS = 10 * 60 * 1000;
+/**
+ * From a create or resume until T3 answers in the running machine. A resume
+ * may spend a transition starting and the guest's ten-minute exec rewriting
+ * credentials before T3 restarts.
+ */
+export const ANSWER_DEADLINE_MS = 30 * 60 * 1000;
 
 /** Fixed at launch, so a replayed create sends the provider the same request. */
 export const SandboxSpec = Schema.Struct({
@@ -232,7 +238,7 @@ function resolveInflight(
       if (machine.state === "stopping") {
         return age < TRANSITION_DEADLINE_MS
           ? plan(stopping, act("Wait"))
-          : plan(failed("stop", "The machine did not stop in time.", true), act("Settle"));
+          : giveUp(record, stopping, failed("stop", "The machine did not stop in time.", true));
       }
       return plan(stopping, act(withinGrace ? "Wait" : "ClearInflight"));
     case "resume":
@@ -242,12 +248,24 @@ function resolveInflight(
       if (machine.state === "starting") {
         return age < TRANSITION_DEADLINE_MS
           ? plan(resuming, act("Wait"))
-          : plan(failed("resume", "The machine did not start in time.", true), act("Settle"));
+          : giveUp(record, resuming, failed("resume", "The machine did not start in time.", true));
       }
       return plan(resuming, act(withinGrace ? "Wait" : "ClearInflight"));
     case "destroy":
       return plan(destroying, act(machine === null || !withinGrace ? "ClearInflight" : "Wait"));
   }
+}
+
+/**
+ * A transition past its deadline fails the request it served. A delete, or
+ * any request after that failure, stops waiting on it and plans from what is
+ * observed.
+ */
+function giveUp(record: SandboxRecord, waiting: SandboxStatus, failure: SandboxStatus) {
+  if (record.desired === "destroyed") return plan(destroying, act("ClearInflight"));
+  return record.status._tag === "failed"
+    ? plan(waiting, act("ClearInflight"))
+    : plan(failure, act("Settle"));
 }
 
 function planDestroy(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
@@ -256,11 +274,12 @@ function planDestroy(record: SandboxRecord, observation: SandboxObservation): Sa
       ? plan(destroyed, act("Settle"))
       : plan(destroying, act("Destroy"));
   }
-  if (record.createFirstAttemptAt === null) return plan(destroyed, act("Settle"));
   // Replaying the create with the same key is the only way to learn the id of a machine it made.
-  return observation.now - record.createFirstAttemptAt < CREATE_KEY_WINDOW_MS
+  // Past the key window nothing more can be learned, so the sandbox is let go.
+  return record.createFirstAttemptAt !== null &&
+    observation.now - record.createFirstAttemptAt < CREATE_KEY_WINDOW_MS
     ? plan(destroying, act("Create"))
-    : plan(creationUnknown, act("Settle"));
+    : plan(destroyed, act("Settle"));
 }
 
 function planCreate(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
@@ -323,7 +342,7 @@ function planRunning(record: SandboxRecord, observation: SandboxObservation): Sa
   if (record.status._tag === "ready") return plan(ready, act("Watch"));
   if (observation.environmentId === null) {
     const since = record.runningSince ?? record.createdAt;
-    return observation.now - since < TRANSITION_DEADLINE_MS
+    return observation.now - since < ANSWER_DEADLINE_MS
       ? plan(waiting, act("Wait"))
       : plan(
           failed(

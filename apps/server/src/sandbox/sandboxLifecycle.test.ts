@@ -11,6 +11,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  ANSWER_DEADLINE_MS,
   CREATE_KEY_WINDOW_MS,
   FIRST_BOOT_DEADLINE_MS,
   INFLIGHT_GRACE_MS,
@@ -274,6 +275,42 @@ const cases: ReadonlyArray<Case> = [
     failed("stop", true),
   ],
   [
+    "a delete gives up on a stop past its deadline",
+    {
+      ...stopRequested,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "a delete after a stop failed past its deadline gives up on the stop",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "asking again after a stop failed past its deadline plans from what is observed",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
     "a stopped machine resolves the stop",
     { ...stopRequested, inflight: { op: "stop", startedAt: NOW - MINUTE } },
     observed({ machine: machine("stopped") }),
@@ -322,6 +359,23 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
   ],
   [
+    "a resume past its deadline fails",
+    { ...resumed, inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS } },
+    observed({ machine: machine("starting") }),
+    failed("resume", true),
+  ],
+  [
+    "a delete gives up on a resume past its deadline",
+    {
+      ...resumed,
+      desired: "destroyed",
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
     "a running machine resolves the resume",
     { ...resumed, inflight: { op: "resume", startedAt: NOW - MINUTE } },
     running,
@@ -340,8 +394,14 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
   ],
   [
-    "T3 silent past the resume deadline fails, retryably",
-    { ...resumed, runningSince: NOW - TRANSITION_DEADLINE_MS, credentialsStale: false },
+    "waits for T3 after a credential refresh that outlasted a transition",
+    { ...resumed, runningSince: NOW - TRANSITION_DEADLINE_MS - MINUTE, credentialsStale: false },
+    running,
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "T3 silent past the answer deadline fails, retryably",
+    { ...resumed, runningSince: NOW - ANSWER_DEADLINE_MS, credentialsStale: false },
     running,
     failed("resume", true),
   ],
@@ -416,7 +476,7 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "destroying" }, action: { _tag: "Create" } },
   ],
   [
-    "destroy of a create unknown past the key window fails",
+    "destroy of a create unknown past the key window lets the sandbox go",
     {
       ...fresh,
       desired: "destroyed",
@@ -425,7 +485,7 @@ const cases: ReadonlyArray<Case> = [
       createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
     },
     observed(),
-    failed("create", false),
+    settle({ _tag: "destroyed" }),
   ],
   [
     "destroy while booting",
