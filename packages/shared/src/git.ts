@@ -390,6 +390,9 @@ function toLocalStatusPart(status: VcsStatusResult): VcsStatusLocalResult {
     refName: status.refName,
     ...(status.headCommit === undefined ? {} : { headCommit: status.headCommit }),
     hasWorkingTreeChanges: status.hasWorkingTreeChanges,
+    ...(status.hasTrackedChanges === undefined
+      ? {}
+      : { hasTrackedChanges: status.hasTrackedChanges }),
     workingTree: status.workingTree,
     ...(status.branchChanges ? { branchChanges: status.branchChanges } : {}),
   };

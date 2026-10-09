@@ -181,7 +181,10 @@ export function sandboxRepositoryFor(input: {
   if (status === null || !status.isRepo) return refuse("not-a-repository");
   if (input.remoteUrl === null || !status.hasPrimaryRemote) return refuse("no-remote");
   if (status.headCommit === undefined) return refuse("no-commit");
-  if (status.hasWorkingTreeChanges) return refuse("uncommitted-changes");
+  // Untracked files never reach the sandbox either, but they are usually caches or build
+  // output, so only edits to tracked files block a launch.
+  if (status.hasTrackedChanges ?? status.hasWorkingTreeChanges)
+    return refuse("uncommitted-changes");
   if (!status.hasUpstream || status.aheadCount > 0) return refuse("not-pushed");
   return {
     _tag: "Ready",

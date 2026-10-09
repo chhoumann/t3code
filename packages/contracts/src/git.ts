@@ -233,6 +233,8 @@ const VcsStatusLocalShape = {
   /** The checked-out commit. Absent before the first commit and on older servers. */
   headCommit: Schema.optional(TrimmedNonEmptyStringSchema),
   hasWorkingTreeChanges: Schema.Boolean,
+  /** Like `hasWorkingTreeChanges`, but untracked files do not count. Absent on older servers. */
+  hasTrackedChanges: Schema.optional(Schema.Boolean),
   workingTree: Schema.Struct({
     files: Schema.Array(
       Schema.Struct({

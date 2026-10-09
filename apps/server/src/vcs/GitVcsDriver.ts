@@ -77,6 +77,7 @@ export interface GitStatusDetails {
   headCommit?: string;
   upstreamRef: string | null;
   hasWorkingTreeChanges: boolean;
+  hasTrackedChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
   branchChanges?: VcsStatusResult["branchChanges"];
   hasUpstream: boolean;

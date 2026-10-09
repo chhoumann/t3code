@@ -2273,6 +2273,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.equal(status.isRepo, true);
         assert.equal(status.branch, initialBranch);
         assert.equal(status.hasWorkingTreeChanges, true);
+        assert.equal(status.hasTrackedChanges, false);
         assert.include(
           status.workingTree.files.map((file) => file.path),
           "feature.ts",
@@ -2293,6 +2294,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
 
         assert.equal(status.isRepo, true);
         assert.equal(status.hasWorkingTreeChanges, true);
+        assert.equal(status.hasTrackedChanges, true);
         assert.deepInclude(status.workingTree.files, {
           path: "HEAD",
           insertions: 1,

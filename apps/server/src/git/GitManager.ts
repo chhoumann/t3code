@@ -1054,6 +1054,7 @@ export const make = Effect.gen(function* () {
     branch: null,
     upstreamRef: null,
     hasWorkingTreeChanges: false,
+    hasTrackedChanges: false,
     workingTree: { files: [], insertions: 0, deletions: 0 },
     hasUpstream: false,
     aheadCount: 0,
@@ -1078,6 +1079,7 @@ export const make = Effect.gen(function* () {
       refName: details.branch,
       ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
       hasWorkingTreeChanges: details.hasWorkingTreeChanges,
+      hasTrackedChanges: details.hasTrackedChanges,
       workingTree: details.workingTree,
       ...(details.branchChanges ? { branchChanges: details.branchChanges } : {}),
     } satisfies VcsStatusLocalResult;

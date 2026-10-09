@@ -110,6 +110,7 @@ const NON_REPOSITORY_STATUS_DETAILS = Object.freeze<GitVcsDriver.GitStatusDetail
   branch: null,
   upstreamRef: null,
   hasWorkingTreeChanges: false,
+  hasTrackedChanges: false,
   workingTree: { files: [], insertions: 0, deletions: 0 },
   hasUpstream: false,
   aheadCount: 0,
@@ -1998,6 +1999,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     let behindCount = 0;
     let aheadOfDefaultCount = 0;
     let hasWorkingTreeChanges = false;
+    let hasTrackedChanges = false;
     const changedFilesWithoutNumstat = new Set<string>();
 
     for (const line of statusStdout.split(/\r?\n/g)) {
@@ -2025,6 +2027,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }
       if (line.trim().length > 0 && !line.startsWith("#")) {
         hasWorkingTreeChanges = true;
+        if (!line.startsWith("? ")) hasTrackedChanges = true;
         const pathValue = parsePorcelainPath(line);
         if (pathValue) changedFilesWithoutNumstat.add(pathValue);
       }
@@ -2087,6 +2090,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ...(headCommit === null ? {} : { headCommit }),
       upstreamRef,
       hasWorkingTreeChanges,
+      hasTrackedChanges,
       workingTree: {
         files,
         insertions,
@@ -2142,6 +2146,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         refName: details.branch,
         ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
         hasWorkingTreeChanges: details.hasWorkingTreeChanges,
+        hasTrackedChanges: details.hasTrackedChanges,
         workingTree: details.workingTree,
         hasUpstream: details.hasUpstream,
         aheadCount: details.aheadCount,

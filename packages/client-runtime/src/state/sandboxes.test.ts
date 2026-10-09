@@ -62,10 +62,23 @@ describe("sandboxRepositoryFor", () => {
     ["no-remote", REMOTE, { ...pushed, hasPrimaryRemote: false }],
     ["no-commit", REMOTE, { ...pushed, headCommit: undefined }],
     ["uncommitted-changes", REMOTE, { ...pushed, hasWorkingTreeChanges: true }],
+    [
+      "uncommitted-changes",
+      REMOTE,
+      { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: true },
+    ],
     ["not-pushed", REMOTE, { ...pushed, aheadCount: 1 }],
     ["not-pushed", REMOTE, { ...pushed, hasUpstream: false }],
   ] as const)("refuses with %s", (problem, remoteUrl, status) => {
     expect(sandboxRepositoryFor({ remoteUrl, status })).toEqual({ _tag: "Refused", problem });
+  });
+
+  it("launches when only untracked files changed, since they never travel anyway", () => {
+    const status = { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: false };
+    expect(sandboxRepositoryFor({ remoteUrl: REMOTE, status })).toEqual({
+      _tag: "Ready",
+      repository: { remoteUrl: REMOTE, commit: HEAD },
+    });
   });
 
   it("refuses before the status has loaded", () => {
