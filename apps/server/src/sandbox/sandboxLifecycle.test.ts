@@ -563,6 +563,19 @@ const cases: ReadonlyArray<Case> = [
     settle({ _tag: "destroyed" }),
   ],
   [
+    "a delete after the create-unknown warning lets the sandbox go whatever its wording",
+    {
+      ...fresh,
+      status: { _tag: "failed", step: "create", message: "reworded", retryable: false },
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
     "a delete of a create refused outright lets the sandbox go",
     {
       ...fresh,

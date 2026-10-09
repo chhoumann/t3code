@@ -166,9 +166,11 @@ const failed = (step: SandboxFailedStep, message: string, retryable: boolean): S
   message,
   retryable,
 });
-const CREATION_UNKNOWN_MESSAGE =
-  "T3 could not confirm whether Boat created this machine. Check the Boat dashboard, then delete the sandbox to forget it.";
-const creationUnknown = failed("create", CREATION_UNKNOWN_MESSAGE, false);
+const creationUnknown = failed(
+  "create",
+  "T3 could not confirm whether Boat created this machine. Check the Boat dashboard, then delete the sandbox to forget it.",
+  false,
+);
 
 /** Converged or given up on the latest request: nothing happens until the next one. */
 export function isParked(record: SandboxRecord): boolean {
@@ -290,7 +292,11 @@ function planDestroy(record: SandboxRecord, observation: SandboxObservation): Sa
   }
   // Past the key window nothing more can be learned. The user is told to look for a stray
   // machine first; a delete after that lets the sandbox go.
-  return record.status._tag === "failed" && record.status.message === CREATION_UNKNOWN_MESSAGE
+  // Only that warning fails a create for good while its attempt is still unresolved: a refusal
+  // that proves nothing was created clears the attempt.
+  return record.status._tag === "failed" &&
+    record.status.step === "create" &&
+    !record.status.retryable
     ? plan(destroyed, act("Settle"))
     : plan(creationUnknown, act("Settle"));
 }
