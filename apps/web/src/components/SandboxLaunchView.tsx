@@ -1,18 +1,18 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   SANDBOX_LAUNCH_STAGES,
   SANDBOX_STATUS_LABEL,
+  sandboxLandingThreadId,
   sandboxLaunchStageIndex,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, CircleIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 
 import { isElectron } from "../env";
 import { useSandboxActions } from "../hooks/useSandboxActions";
-import { useThreadShell } from "../state/entities";
+import { useEnvironmentThreads } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { sandboxes } from "../state/sandboxes";
 import { Button } from "./ui/button";
@@ -80,30 +80,26 @@ export function SandboxLaunchView(props: {
 }
 
 /**
- * Replaces this route with the sandbox's thread once its environment knows
- * the thread, so the thread view never opens on an empty state.
+ * Replaces this route with the sandbox's thread once it runs and its
+ * environment lists that thread, so the thread view never opens on an empty
+ * state. See `sandboxLandingThreadId` for which thread.
  */
 function useHandOffToThread(view: SandboxView | null) {
   const navigate = useNavigate();
   const environmentId = view?.environmentId ?? null;
-  const threadId = view?.threadId ?? null;
   const environment = useEnvironment(environmentId);
-  const threadRef = useMemo(
-    () =>
-      environmentId !== null && threadId !== null ? scopeThreadRef(environmentId, threadId) : null,
-    [environmentId, threadId],
-  );
-  const thread = useThreadShell(threadRef);
+  const threads = useEnvironmentThreads(environmentId);
+  const threadId = view === null ? null : sandboxLandingThreadId(threads, view.threadId);
   const ready = view?.status._tag === "ready" && environment?.connection.phase === "connected";
 
   useEffect(() => {
-    if (!ready || threadRef === null || thread === null) return;
+    if (!ready || environmentId === null || threadId === null) return;
     void navigate({
       to: "/$environmentId/$threadId",
-      params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+      params: { environmentId, threadId },
       replace: true,
     });
-  }, [navigate, ready, thread, threadRef]);
+  }, [navigate, ready, environmentId, threadId]);
 }
 
 function SandboxProgress(props: {

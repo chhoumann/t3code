@@ -1,12 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { SANDBOX_STATUS_LABEL, isSandboxStopped } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { BoxIcon, PlayIcon } from "lucide-react";
 
 import { useSandboxActions } from "../../hooks/useSandboxActions";
-import { useThreadActions } from "../../hooks/useThreadActions";
 import { readLocalApi } from "../../localApi";
 import { sandboxes } from "../../state/sandboxes";
 import { Button } from "../ui/button";
@@ -14,9 +12,8 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 /**
  * Sandboxes stopped by archiving their last thread, at their TTL, or by the
- * provider. A stopped machine cannot
- * list its threads, so the sandbox stands in for them: Resume brings the
- * machine and its thread back.
+ * provider. A stopped machine cannot list its threads, so the sandbox stands
+ * in for them: Resume brings the machine and its thread back.
  */
 export function StoppedSandboxesSection(props: {
   readonly ownerEnvironmentIds: ReadonlyArray<EnvironmentId>;
@@ -48,15 +45,11 @@ function StoppedSandboxRow(props: {
   const { sandbox } = props;
   const navigate = useNavigate();
   const { setDesired, confirmAndDelete } = useSandboxActions();
-  const { unarchiveThread } = useThreadActions();
   const ref = { ownerEnvironmentId: props.ownerEnvironmentId, view: sandbox };
+  // Archiving a sandbox's last thread stops the sandbox and leaves the thread
+  // active, so resuming needs only the owner. The launch view opens the thread.
   const resume = async () => {
-    // Unarchiving its thread resumes the sandbox and brings the thread back once it runs.
-    if (sandbox.environmentId !== null && sandbox.status._tag === "stopped") {
-      void unarchiveThread(scopeThreadRef(sandbox.environmentId, sandbox.threadId));
-    } else if (!(await setDesired(ref, "running"))) {
-      return;
-    }
+    if (!(await setDesired(ref, "running"))) return;
     await navigate({
       to: "/sandbox/$environmentId/$sandboxId",
       params: { environmentId: props.ownerEnvironmentId, sandboxId: sandbox.id },

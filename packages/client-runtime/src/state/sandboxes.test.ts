@@ -5,13 +5,16 @@ import {
   type SandboxAccountConfig,
   SandboxError,
   type SandboxStatus,
+  ThreadId,
   type VcsStatusResult,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 import {
   isSandboxStopped,
   sandboxAccountChoices,
   sandboxFailureMessage,
+  sandboxLandingThreadId,
   sandboxLaunchStageIndex,
   sandboxRepositoryFor,
 } from "./sandboxes.ts";
@@ -142,5 +145,48 @@ describe("sandboxFailureMessage", () => {
   it("passes any other failure's own message through", () => {
     const error = new SandboxError({ code: "account-in-use", message: "Work owns 2 sandboxes." });
     expect(sandboxFailureMessage(error)).toBe("Work owns 2 sandboxes.");
+  });
+});
+
+describe("sandboxLandingThreadId", () => {
+  const SEED = ThreadId.make("thread-seed");
+  const thread = (
+    id: string,
+    updatedAt: string,
+    overrides: { archived?: boolean; deleted?: boolean; parent?: ThreadId } = {},
+  ) => ({
+    id: ThreadId.make(id),
+    updatedAt: DateTime.makeUnsafe(updatedAt),
+    archivedAt: overrides.archived ? DateTime.makeUnsafe(updatedAt) : null,
+    deletedAt: overrides.deleted ? DateTime.makeUnsafe(updatedAt) : null,
+    lineage: { parentThreadId: overrides.parent ?? null },
+  });
+
+  it("opens the first thread while it is active, however recently others changed", () => {
+    expect(
+      sandboxLandingThreadId(
+        [
+          thread("thread-later", "2026-10-09T13:00:00Z"),
+          thread("thread-seed", "2026-10-09T12:00:00Z"),
+        ],
+        SEED,
+      ),
+    ).toBe(SEED);
+  });
+
+  it("opens the active top-level thread updated last once the first is gone or archived", () => {
+    const threads = [
+      thread("thread-seed", "2026-10-09T14:00:00Z", { archived: true }),
+      thread("thread-older", "2026-10-09T12:00:00Z"),
+      thread("thread-newer", "2026-10-09T13:00:00Z"),
+      thread("thread-child", "2026-10-09T15:00:00Z", { parent: ThreadId.make("thread-newer") }),
+      thread("thread-deleted", "2026-10-09T16:00:00Z", { deleted: true }),
+    ];
+    expect(sandboxLandingThreadId(threads, SEED)).toBe("thread-newer");
+    expect(sandboxLandingThreadId(threads.slice(1), SEED)).toBe("thread-newer");
+  });
+
+  it("has nothing to open before the sandbox lists an active thread", () => {
+    expect(sandboxLandingThreadId([], SEED)).toBeNull();
   });
 });

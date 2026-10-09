@@ -10,7 +10,11 @@ import {
   type ThreadHistoryMeta,
 } from "@t3tools/client-runtime/state/threads";
 import type { ScopedProjectRef, ScopedThreadRef, ServerConfig } from "@t3tools/contracts";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2ThreadShell,
+} from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
@@ -34,6 +38,9 @@ const EMPTY_THREAD_REFS_ATOM = Atom.make(EMPTY_THREAD_REFS).pipe(
 const EMPTY_THREAD_SHELLS_ATOM = Atom.make<ReadonlyArray<EnvironmentThreadShell>>(
   Object.freeze([]),
 ).pipe(Atom.withLabel("web-thread-shells:empty"));
+const EMPTY_ENVIRONMENT_THREADS_ATOM = Atom.make<ReadonlyArray<OrchestrationV2ThreadShell>>(
+  Object.freeze([]),
+).pipe(Atom.withLabel("web-environment-threads:empty"));
 const EMPTY_THREAD_SHELL_ATOM = Atom.make<EnvironmentThreadShell | null>(null).pipe(
   Atom.withLabel("web-thread-shell:empty"),
 );
@@ -74,6 +81,17 @@ export function useEnvironmentThreadRefs(
     environmentId === null
       ? EMPTY_THREAD_REFS_ATOM
       : environmentThreadShells.environmentThreadRefsAtom(environmentId),
+  );
+}
+
+/** One environment's thread shells as its server lists them. */
+export function useEnvironmentThreads(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<OrchestrationV2ThreadShell> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_ENVIRONMENT_THREADS_ATOM
+      : environmentThreadShells.environmentThreadsAtom(environmentId),
   );
 }
 

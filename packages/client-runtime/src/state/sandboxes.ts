@@ -1,14 +1,17 @@
 import {
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
+  type OrchestrationV2ThreadShell,
   SandboxAccountId,
   SandboxError,
   type SandboxRepository,
   type SandboxStatus,
   type SandboxView,
   type ServerSettings,
+  type ThreadId,
   type VcsStatusResult,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -88,6 +91,32 @@ export const SANDBOX_LAUNCH_STAGES = ["creating", "booting", "launching"] as con
 export function sandboxLaunchStageIndex(status: SandboxStatus): number | null {
   const index = SANDBOX_LAUNCH_STAGES.findIndex((stage) => stage === status._tag);
   return index === -1 ? null : index;
+}
+
+type LandingCandidate = Pick<
+  OrchestrationV2ThreadShell,
+  "id" | "archivedAt" | "deletedAt" | "updatedAt"
+> & { readonly lineage: Pick<OrchestrationV2ThreadShell["lineage"], "parentThreadId"> };
+
+/**
+ * The thread a sandbox opens on once it runs: its first thread while that is
+ * active, else the active top-level thread updated last. The sandbox always
+ * keeps one active top-level thread, but its first may be archived or gone.
+ */
+export function sandboxLandingThreadId(
+  threads: ReadonlyArray<LandingCandidate>,
+  seedThreadId: ThreadId,
+): ThreadId | null {
+  let latest: LandingCandidate | null = null;
+  for (const thread of threads) {
+    if (thread.archivedAt !== null || thread.deletedAt !== null) continue;
+    if (thread.lineage.parentThreadId !== null) continue;
+    if (thread.id === seedThreadId) return thread.id;
+    if (latest === null || DateTime.isGreaterThan(thread.updatedAt, latest.updatedAt)) {
+      latest = thread;
+    }
+  }
+  return latest?.id ?? null;
 }
 
 export interface SandboxAccountChoice {
