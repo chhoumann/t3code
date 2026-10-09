@@ -419,6 +419,24 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /** Calls the guest as the owner, minting a new admin session once if it no longer accepts the stored one. */
+  const asOwner = <A>(
+    record: SandboxRecord,
+    account: SandboxAccounts.SandboxAccount,
+    machineId: ProviderMachineId,
+    call: (token: Redacted.Redacted<string>) => Effect.Effect<A, SandboxGuest.SandboxGuestError>,
+  ) =>
+    getAdminToken(record, account, machineId).pipe(
+      Effect.flatMap(call),
+      Effect.catchIf(
+        (error) => error._tag === "SandboxGuestError" && error.unauthorized === true,
+        () =>
+          secrets
+            .remove(adminSecretName(record.id))
+            .pipe(Effect.andThen(getAdminToken(record, account, machineId)), Effect.flatMap(call)),
+      ),
+    );
+
   const machineCredentials = (account: SandboxAccounts.SandboxAccount) => {
     const envFile = (setupOnly: boolean) =>
       renderSandboxEnvFile(
@@ -531,7 +549,9 @@ const make = Effect.gen(function* () {
           return yield* writeFacts(record, { status, environmentId: action.environmentId });
         case "LaunchSeed": {
           const resolved = yield* account();
-          const token = yield* getAdminToken(record, resolved, yield* machineId);
+          const baseUrl =
+            record.httpBaseUrl ??
+            (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
           const checkout = {
             remoteUrl: record.spec.repository.remoteUrl,
             commit: record.spec.repository.commit,
@@ -539,26 +559,23 @@ const make = Effect.gen(function* () {
             path: checkoutPath(record.spec.repository.remoteUrl),
           };
           const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
-          yield* guest.launchSeedThread(
-            {
-              baseUrl:
-                record.httpBaseUrl ??
-                (yield* Effect.die(new Error("LaunchSeed planned without a base URL."))),
-              token,
-            },
-            {
-              checkout,
-              scripts,
-              seed: {
-                ...record.seed,
-                title: record.spec.title,
-                message: record.spec.message,
-                driver: record.spec.driver,
-                model: record.spec.model,
-                runtimeMode: record.spec.runtimeMode,
-                interactionMode: record.spec.interactionMode,
+          yield* asOwner(record, resolved, yield* machineId, (token) =>
+            guest.launchSeedThread(
+              { baseUrl, token },
+              {
+                checkout,
+                scripts,
+                seed: {
+                  ...record.seed,
+                  title: record.spec.title,
+                  message: record.spec.message,
+                  driver: record.spec.driver,
+                  model: record.spec.model,
+                  runtimeMode: record.spec.runtimeMode,
+                  interactionMode: record.spec.interactionMode,
+                },
               },
-            },
+            ),
           );
           return yield* writeFacts(record, { status, seedLaunchedAt: now });
         }
@@ -864,10 +881,11 @@ const make = Effect.gen(function* () {
         return yield* new SandboxNotReadyError({ sandboxId: id });
       }
       const account = yield* accounts.get(record.accountId);
-      const token = yield* getAdminToken(record, account, machineId);
-      const credential = yield* guest.issuePairingCredential(
-        { baseUrl: httpBaseUrl, token },
-        { label: "T3 client", scopes },
+      const credential = yield* asOwner(record, account, machineId, (token) =>
+        guest.issuePairingCredential(
+          { baseUrl: httpBaseUrl, token },
+          { label: "T3 client", scopes },
+        ),
       );
       return { environmentId, httpBaseUrl, pairingCredential: Redacted.value(credential) };
     });

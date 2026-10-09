@@ -13,6 +13,7 @@
 import {
   type AuthGrantScope,
   CommandId,
+  EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
   type EnvironmentId,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
@@ -131,6 +132,8 @@ export class SandboxGuestError extends Schema.TaggedError<SandboxGuestError>()(
   {
     operation: SandboxGuestOperation,
     exitCode: Schema.optional(Schema.NullOr(Schema.Int)),
+    /** The guest no longer accepts the session the call was made with. */
+    unauthorized: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -138,6 +141,16 @@ export class SandboxGuestError extends Schema.TaggedError<SandboxGuestError>()(
     return `Could not ${OPERATION_SUMMARY[this.operation]}.`;
   }
 }
+
+const isAuthInvalid = Schema.is(EnvironmentAuthInvalidError);
+
+/** The error of a call made over the guest's HTTP or RPC seams with a session. */
+const sessionCallError = (operation: SandboxGuestOperation) => (cause: unknown) =>
+  new SandboxGuestError({
+    operation,
+    cause,
+    ...(isAuthInvalid(cause) ? { unauthorized: true } : {}),
+  });
 
 const decodeIssuedSession = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ token: Schema.String })),
@@ -256,7 +269,7 @@ export class SandboxGuest extends Context.Service<
         readonly scripts: ReadonlyArray<ProjectScript>;
         readonly seed: SandboxSeedThread;
       },
-    ) => Effect.Effect<{ readonly resumed: boolean }, SandboxGuestError>;
+    ) => Effect.Effect<void, SandboxGuestError>;
     /** A one-time grant a client exchanges for its own session on the guest. */
     readonly issuePairingCredential: (
       target: SandboxGuestTarget,
@@ -446,7 +459,7 @@ const make = Effect.gen(function* () {
       Effect.provideService(HttpClient.HttpClient, httpClient),
       Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
       Effect.timeout(GUEST_CALL_TIMEOUT),
-      Effect.mapError((cause) => new SandboxGuestError({ operation: "launch-thread", cause })),
+      Effect.mapError(sessionCallError("launch-thread")),
     );
 
   const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (target, input) =>
@@ -466,10 +479,9 @@ const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.timeout(GUEST_CALL_TIMEOUT),
-          Effect.mapError((cause) => new SandboxGuestError({ operation: "create-project", cause })),
+          Effect.mapError(sessionCallError("create-project")),
         );
-      const launched = yield* launchThread(target, input.seed);
-      return { resumed: launched.resumed };
+      yield* launchThread(target, input.seed);
     });
 
   const issuePairingCredential: SandboxGuest["Service"]["issuePairingCredential"] = (
@@ -488,7 +500,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.timeout(GUEST_CALL_TIMEOUT),
       Effect.map((result) => Redacted.make(result.credential)),
-      Effect.mapError((cause) => new SandboxGuestError({ operation: "issue-pairing", cause })),
+      Effect.mapError(sessionCallError("issue-pairing")),
     );
 
   return SandboxGuest.of({

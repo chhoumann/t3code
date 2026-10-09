@@ -53,6 +53,8 @@ const makeWorld = () => {
     launchedThreads: [] as Array<string>,
     pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
+    /** Admin sessions the guest accepts. */
+    adminTokens: new Set<string>(),
     /** The next create registers its machine, then hangs as if its response were lost. */
     hangNextCreate: null as Deferred.Deferred<void> | null,
     failNextCreate: null as SandboxProviderErrorKind | null,
@@ -144,19 +146,24 @@ const makeWorld = () => {
             : null,
         );
       }),
-    mintAdminSession: () => Effect.succeed(Redacted.make("admin-token")),
+    mintAdminSession: () =>
+      Effect.sync(() => {
+        const token = `admin-token-${world.adminTokens.size + 1}`;
+        world.adminTokens.add(token);
+        return Redacted.make(token);
+      }),
     cloneCheckout: () => Effect.succeed([]),
     launchSeedThread: (_target, input) =>
-      Effect.sync(() => {
-        const resumed = world.launchedThreads.includes(input.seed.threadId);
-        world.launchedThreads.push(input.seed.threadId);
-        return { resumed };
-      }),
+      Effect.sync(() => void world.launchedThreads.push(input.seed.threadId)),
     issuePairingCredential: (target, grant) =>
-      Effect.sync(() => {
-        world.pairingGrants.push({ baseUrl: target.baseUrl, scopes: grant.scopes });
-        return Redacted.make("pairing");
-      }),
+      world.adminTokens.has(Redacted.value(target.token))
+        ? Effect.sync(() => {
+            world.pairingGrants.push({ baseUrl: target.baseUrl, scopes: grant.scopes });
+            return Redacted.make("pairing");
+          })
+        : Effect.fail(
+            new SandboxGuest.SandboxGuestError({ operation: "issue-pairing", unauthorized: true }),
+          ),
   });
 
   const secretStore = ServerSecretStore.ServerSecretStore.of({
@@ -531,6 +538,26 @@ describe("SandboxService", () => {
         yield* advanceUntilStatus(id, "destroyed", Duration.seconds(2));
         assert.strictEqual(world.destroyAttempts, 2);
         assert.strictEqual(world.machines.size, 0);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("mints a new owner session when the sandbox no longer accepts the stored one", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-revoked");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        world.secrets.set("sandbox-sbx-revoked-admin", new TextEncoder().encode("expired"));
+
+        const connected = yield* sandboxes.connect({ id, scopes: ["orchestration:read"] });
+        assert.strictEqual(connected.pairingCredential, "pairing");
+        const stored = new TextDecoder().decode(world.secrets.get("sandbox-sbx-revoked-admin"));
+        assert.isTrue(world.adminTokens.has(stored));
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
