@@ -50,13 +50,23 @@ const cloneFixture = () => {
   return { root, pinned, checkout, script: `${FLOCK_SHIM}\n${command}` };
 };
 
-const runBash = (script: string) =>
-  new Promise<{ readonly status: number | null; readonly stderr: string }>((resolve) => {
-    const child = NodeChildProcess.spawn("bash", ["-c", script]);
-    let stderr = "";
-    child.stderr.on("data", (chunk) => (stderr += String(chunk)));
-    child.on("close", (status) => resolve({ status, stderr }));
-  });
+/** Runs `script`; `printed` resolves once its stdout shows `line`. */
+const runBash = (script: string, line: string) => {
+  const child = NodeChildProcess.spawn("bash", ["-c", script]);
+  let stdout = "";
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const printed = new Promise<void>((resolve) =>
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.includes(line)) resolve();
+    }),
+  );
+  const done = new Promise<{ readonly status: number | null; readonly stderr: string }>((resolve) =>
+    child.on("close", (status) => resolve({ status, stderr })),
+  );
+  return { printed, done };
+};
 
 describe("renderCloneCommand", () => {
   it("starts the clone on a task branch at the pinned commit, and a rerun keeps it", () => {
@@ -73,16 +83,15 @@ describe("renderCloneCommand", () => {
 
   it("lets a replay that starts while the first clone runs wait for it and keep its clone", async () => {
     const { root, pinned, checkout, script } = cloneFixture();
-    const cloning = NodePath.join(root, "cloning");
     // A slow clone, so the replay starts while the first run is still cloning.
-    const slowClone = `git() { if [ "$1" = clone ]; then touch ${JSON.stringify(cloning)}; sleep 2; fi; command git "$@"; }`;
-    const first = runBash(`${slowClone}\n${script}`);
-    while (!NodeFS.existsSync(cloning)) await new Promise((resolve) => setTimeout(resolve, 20));
-    const replay = runBash(`${slowClone}\n${script}`);
+    const slowClone = `git() { if [ "$1" = clone ]; then echo cloning; sleep 2; fi; command git "$@"; }`;
+    const first = runBash(`${slowClone}\n${script}`, "cloning");
+    await first.printed;
+    const replay = runBash(`${slowClone}\n${script}`, "cloning");
 
     for (const [run, result] of [
-      ["first", await first],
-      ["replay", await replay],
+      ["first", await first.done],
+      ["replay", await replay.done],
     ] as const) {
       expect(result.stderr, run).toBe("");
       expect(result.status, run).toBe(0);
