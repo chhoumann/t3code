@@ -1607,6 +1607,44 @@ it.effect("replays a server-allocated launch", () =>
   }),
 );
 
+// A sandbox's owner allocates the seed's ids and replays the launch until it learns the outcome.
+it.effect("replays a launch with caller-allocated ids after it settled, returning the first", () =>
+  Effect.gen(function* () {
+    const harness = makeHarness();
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = launchInput({
+        command: "command:launch:sandbox-seed",
+        thread: "thread:launch:sandbox-seed",
+        message: "Fix the bug",
+      });
+      const first = yield* launches.launch(input);
+      yield* threads.streamStoredEventsFrom({ threadId: first.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.commandId === CommandId.make(`${input.commandId}:release`) &&
+            stored.event.type === "run.updated",
+        ),
+        Stream.runHead,
+      );
+      const replay = yield* launches.launch(input);
+      assert.isFalse(first.resumed);
+      assert.isTrue(replay.resumed);
+      assert.equal(replay.threadId, input.threadId);
+      assert.deepEqual(
+        replay.projection.messages.map((message) => message.id),
+        [MessageId.make("Fix the bug:id")],
+      );
+      assert.deepEqual(
+        replay.projection.runs.map((run) => run.id),
+        first.projection.runs.map((run) => run.id),
+      );
+      assert.equal(harness.runSetup.mock.calls.length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
 it.effect("rejects a server-allocated launch replay with a mismatching thread id", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
