@@ -570,8 +570,6 @@ const sandboxGuestService = () => {
         ManagedSandbox.makeManagedSandboxGuest({
           ownerEnvironmentId: EnvironmentId.make("environment:owner"),
           sandboxId: SandboxId.make("sbx-seed"),
-          projectId: ProjectId.make("project:sandbox-seed"),
-          threadId: seed,
         }),
       ),
     ),

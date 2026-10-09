@@ -1,11 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import {
-  EnvironmentId,
-  ORCHESTRATION_PROTOCOL_VERSION,
-  ProjectId,
-  SandboxId,
-  ThreadId,
-} from "@t3tools/contracts";
+import { EnvironmentId, ORCHESTRATION_PROTOCOL_VERSION, SandboxId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -406,8 +400,6 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
           ManagedSandbox.makeManagedSandboxGuest({
             ownerEnvironmentId: EnvironmentId.make("environment-owner"),
             sandboxId: SandboxId.make("sbx-1"),
-            projectId: ProjectId.make("project-seed"),
-            threadId: ThreadId.make("thread-seed"),
           }),
         ),
       );

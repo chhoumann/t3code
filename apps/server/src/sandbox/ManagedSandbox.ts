@@ -34,8 +34,6 @@ export const SANDBOX_OWNER_SUBJECT = "sandbox-owner";
 export const ManagedSandboxMarker = Schema.Struct({
   ownerEnvironmentId: EnvironmentId,
   sandboxId: SandboxId,
-  projectId: ProjectId,
-  threadId: ThreadId,
 });
 export type ManagedSandboxMarker = typeof ManagedSandboxMarker.Type;
 

@@ -498,12 +498,10 @@ it.effect("deletes a project without force once its imported threads were delete
   }).pipe(Effect.provide(layerDatabase)),
 );
 
-const sandboxGuest = (projectId: ProjectId, threadId: ThreadId) =>
+const sandboxGuest = () =>
   ManagedSandbox.makeManagedSandboxGuest({
     ownerEnvironmentId: EnvironmentId.make("environment:owner"),
     sandboxId: SandboxId.make("sbx-seed"),
-    projectId,
-    threadId,
   });
 
 it.effect(
@@ -524,7 +522,7 @@ it.effect(
           ],
         });
         const service = yield* ProjectService.make.pipe(
-          Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest(projectId, threadId)),
+          Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest()),
         );
         const deleted = yield* service
           .delete({ commandId: CommandId.make("command:seed-delete"), projectId, force: true })
@@ -544,7 +542,7 @@ it.effect("a sandbox deletes a project holding its last active thread only for i
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       yield* eventSink.write({ events: [nativeThreadCreated(projectId, threadId)] });
       const service = yield* ProjectService.make.pipe(
-        Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest(projectId, threadId)),
+        Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest()),
       );
       const input = { commandId: CommandId.make("command:seed-delete"), projectId, force: true };
 

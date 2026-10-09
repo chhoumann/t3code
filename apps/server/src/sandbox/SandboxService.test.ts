@@ -315,14 +315,9 @@ describe("SandboxService", () => {
         assert.deepStrictEqual(world.bootEnvFiles, [
           { envFile: 'ANTHROPIC_API_KEY=""\n', setupEnvFile: 'TAILSCALE_AUTH_KEY="tskey"\n' },
         ]);
-        // The guest learns which owner manages it and which seed to guard.
+        // The guest learns which owner manages it.
         assert.deepStrictEqual(world.managedMarkers, [
-          {
-            ownerEnvironmentId: OWNER_ENV,
-            sandboxId: first.id,
-            projectId: world.managedMarkers[0]?.projectId,
-            threadId: world.launchedThreads[0],
-          },
+          { ownerEnvironmentId: OWNER_ENV, sandboxId: first.id },
         ]);
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);

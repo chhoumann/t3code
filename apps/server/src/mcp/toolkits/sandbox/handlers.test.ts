@@ -2,7 +2,6 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
-  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   SandboxAccountId,
@@ -139,8 +138,6 @@ it.effect("offers sandbox tools on an owner and none inside a sandbox", () =>
     const guest = ManagedSandbox.makeManagedSandboxGuest({
       ownerEnvironmentId: environmentId,
       sandboxId: SandboxId.make("sbx-1"),
-      projectId: ProjectId.make("project-seed"),
-      threadId,
     });
     expect((yield* toolNames(guest)).filter((name) => name.startsWith("sandbox_"))).toEqual([]);
   }),

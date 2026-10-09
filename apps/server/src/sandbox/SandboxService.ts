@@ -538,8 +538,6 @@ const make = Effect.gen(function* () {
             managed: {
               ownerEnvironmentId,
               sandboxId: record.id,
-              projectId: record.seed.projectId,
-              threadId: record.seed.threadId,
             },
           });
           return yield* writeFacts(record, {
