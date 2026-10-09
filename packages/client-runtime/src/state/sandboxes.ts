@@ -73,6 +73,14 @@ export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
   failed: "Failed",
 };
 
+/**
+ * Asked to stop, or stopped on its own at its TTL or by the provider. Either
+ * way its threads cannot be listed until it resumes.
+ */
+export function isSandboxStopped(view: Pick<SandboxView, "desired" | "status">): boolean {
+  return view.desired === "stopped" || view.status._tag === "stopped";
+}
+
 /** The stages a new sandbox shows before its thread opens, in order. */
 export const SANDBOX_LAUNCH_STAGES = ["creating", "booting", "launching"] as const;
 

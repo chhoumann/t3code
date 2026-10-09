@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  isSandboxStopped,
   sandboxAccountChoices,
   sandboxFailureMessage,
   sandboxLaunchStageIndex,
@@ -69,6 +70,19 @@ describe("sandboxRepositoryFor", () => {
       _tag: "Refused",
       problem: "not-a-repository",
     });
+  });
+});
+
+describe("isSandboxStopped", () => {
+  it("counts a sandbox stopped at its TTL or by the provider, not only one asked to stop", () => {
+    expect(
+      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "expired" } }),
+    ).toBe(true);
+    expect(
+      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "external" } }),
+    ).toBe(true);
+    expect(isSandboxStopped({ desired: "stopped", status: { _tag: "stopping" } })).toBe(true);
+    expect(isSandboxStopped({ desired: "running", status: { _tag: "ready" } })).toBe(false);
   });
 });
 

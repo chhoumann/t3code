@@ -40,7 +40,9 @@ automatically.
 
 Archiving a sandbox's last active thread stops the sandbox, and unarchiving one
 of its threads resumes it. A sandbox also stops on its own after the account's
-**Stop after** time. Stopped sandboxes are listed in **Settings → Archive**.
+**Stop after** time. Stopped sandboxes, including ones that stopped on their
+own, are listed in **Settings → Archive** and **Settings → Sandboxes**, where
+you can resume them.
 
 **Delete sandbox**, in a sandbox thread's menu or in Settings, destroys the
 machine and everything on it, including its threads.

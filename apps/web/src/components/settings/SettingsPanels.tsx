@@ -17,6 +17,7 @@ import {
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { isSandboxStopped } from "@t3tools/client-runtime/state/sandboxes";
 import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
@@ -3418,9 +3419,10 @@ export function ArchivedThreadsPanel() {
   // A stopped sandbox cannot answer; its row under Stopped sandboxes stands in for its threads.
   const archiveEnvironmentIds = useMemo(
     () =>
-      scope.environmentIds.filter(
-        (environmentId) => sandboxIndex.get(environmentId)?.view.desired !== "stopped",
-      ),
+      scope.environmentIds.filter((environmentId) => {
+        const sandbox = sandboxIndex.get(environmentId);
+        return sandbox === undefined || !isSandboxStopped(sandbox.view);
+      }),
     [sandboxIndex, scope.environmentIds],
   );
   const {
