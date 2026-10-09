@@ -45,8 +45,6 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.sandboxesSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.sandboxesLaunch]: AuthOrchestrationOperateScope,
   [WS_METHODS.sandboxesUpdate]: AuthOrchestrationOperateScope,
-  // Read is enough to ask: the grant it mints carries only the caller's own scopes.
-  [WS_METHODS.sandboxesConnect]: AuthOrchestrationReadScope,
   [WS_METHODS.sandboxesSaveAccount]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesRemoveAccount]: AuthSettingsWriteScope,
 } as const;
