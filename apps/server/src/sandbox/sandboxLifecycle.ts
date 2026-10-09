@@ -166,11 +166,9 @@ const failed = (step: SandboxFailedStep, message: string, retryable: boolean): S
   message,
   retryable,
 });
-const creationUnknown = failed(
-  "create",
-  "Could not confirm whether the machine was created. Check the provider for a stray machine.",
-  false,
-);
+const CREATION_UNKNOWN_MESSAGE =
+  "T3 could not confirm whether Boat created this machine. Check the Boat dashboard, then delete the sandbox to forget it.";
+const creationUnknown = failed("create", CREATION_UNKNOWN_MESSAGE, false);
 
 /** Converged or given up on the latest request: nothing happens until the next one. */
 export function isParked(record: SandboxRecord): boolean {
@@ -284,12 +282,16 @@ function planDestroy(record: SandboxRecord, observation: SandboxObservation): Sa
       ? plan(destroyed, act("Settle"))
       : plan(destroying, act("Destroy"));
   }
+  if (record.createFirstAttemptAt === null) return plan(destroyed, act("Settle"));
   // Replaying the create with the same key is the only way to learn the id of a machine it made.
-  // Past the key window nothing more can be learned, so the sandbox is let go.
-  return record.createFirstAttemptAt !== null &&
-    observation.now - record.createFirstAttemptAt < CREATE_KEY_WINDOW_MS
-    ? plan(destroying, act("Create"))
-    : plan(destroyed, act("Settle"));
+  if (observation.now - record.createFirstAttemptAt < CREATE_KEY_WINDOW_MS) {
+    return plan(destroying, act("Create"));
+  }
+  // Past the key window nothing more can be learned. The user is told to look for a stray
+  // machine first; a delete after that lets the sandbox go.
+  return record.status._tag === "failed" && record.status.message === CREATION_UNKNOWN_MESSAGE
+    ? plan(destroyed, act("Settle"))
+    : plan(creationUnknown, act("Settle"));
 }
 
 function planCreate(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {

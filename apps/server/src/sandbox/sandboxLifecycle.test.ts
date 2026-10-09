@@ -524,13 +524,40 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "destroying" }, action: { _tag: "Create" } },
   ],
   [
-    "destroy of a create unknown past the key window lets the sandbox go",
+    "destroy of a create unknown past the key window tells the user to check the provider",
     {
       ...fresh,
       desired: "destroyed",
       desiredRevision: 2,
       inflight: { op: "create", startedAt: NOW - CREATE_KEY_WINDOW_MS },
       createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    failed("create", false),
+  ],
+  [
+    "a delete after the user was told the create is unknown lets the sandbox go",
+    {
+      ...fresh,
+      status: planNext({ ...fresh, createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS }, observed())
+        .status,
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "create", startedAt: NOW - CREATE_KEY_WINDOW_MS },
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
+    "a delete of a create refused outright lets the sandbox go",
+    {
+      ...fresh,
+      status: { _tag: "failed", step: "create", message: "x", retryable: false },
+      settledRevision: 1,
+      desired: "destroyed",
+      desiredRevision: 2,
     },
     observed(),
     settle({ _tag: "destroyed" }),
