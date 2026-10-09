@@ -2,13 +2,19 @@ import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Atom } from "effect/reactivity";
+import { Atom, type AtomRegistry } from "effect/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
 
+import {
+  type SandboxOwnerChange,
+  createSandboxEnvironmentAtoms,
+  routeSandboxThreadLifecycle,
+  runAtomCommand,
+} from "./sandboxCommands.ts";
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
 
@@ -143,6 +149,13 @@ export function createThreadEnvironmentAtoms<R, E>(
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
 ) {
   const scheduler = createAtomCommandScheduler();
+  const sandboxes = createSandboxEnvironmentAtoms(runtime);
+  // A sandbox's lifecycle is its owner's: archive and unarchive may stop or resume it there.
+  const updateSandbox = (registry: AtomRegistry.AtomRegistry, change: SandboxOwnerChange) =>
+    runAtomCommand(sandboxes.update, registry, {
+      environmentId: change.ownerEnvironmentId,
+      input: { id: change.sandboxId, desired: change.desired },
+    });
   const concurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
@@ -163,13 +176,29 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     archive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:archive",
-      execute: (input: ArchiveThreadInput) => archiveThread(input),
+      execute: (input: ArchiveThreadInput, registry, environmentId) =>
+        routeSandboxThreadLifecycle({
+          action: "archive",
+          environmentId,
+          threadId: input.threadId,
+          snapshot: registry.get(snapshotAtom(environmentId)),
+          run: archiveThread(input),
+          toOwner: (change) => updateSandbox(registry, change),
+        }),
       scheduler,
       concurrency,
     }),
     unarchive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unarchive",
-      execute: (input: UnarchiveThreadInput) => unarchiveThread(input),
+      execute: (input: UnarchiveThreadInput, registry, environmentId) =>
+        routeSandboxThreadLifecycle({
+          action: "unarchive",
+          environmentId,
+          threadId: input.threadId,
+          snapshot: registry.get(snapshotAtom(environmentId)),
+          run: unarchiveThread(input),
+          toOwner: (change) => updateSandbox(registry, change),
+        }),
       scheduler,
       concurrency,
     }),
