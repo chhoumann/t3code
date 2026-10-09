@@ -38,6 +38,24 @@ export type DraftActionMenuId =
   | "project-settings"
   | "discard";
 
+export type PendingSandboxMenuId = "retry" | "delete-sandbox";
+
+/** Right-click menu for a launching sandbox's row in the sidebar. */
+export function buildPendingSandboxMenuItems(options: {
+  readonly retryable: boolean;
+}): ReadonlyArray<ContextMenuItem<PendingSandboxMenuId>> {
+  return [
+    ...(options.retryable ? [{ id: "retry" as const, label: "Retry", icon: "refresh-cw" }] : []),
+    {
+      id: "delete-sandbox",
+      label: "Delete sandbox",
+      icon: "trash",
+      destructive: true,
+      separatorBefore: options.retryable,
+    },
+  ];
+}
+
 /** Right-click menu for an unsent draft row in the sidebar. */
 export function buildDraftActionMenuItems(options: {
   readonly hasPath: boolean;

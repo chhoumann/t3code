@@ -168,10 +168,46 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 
 export type SidebarListItem =
   | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
+  /** A launching sandbox, listed in the active rows until its thread
+      arrives. It holds a place but takes no part in arranging them. */
+  | { readonly kind: "sandbox"; readonly key: string; readonly section: "active" }
   | { readonly kind: "marker"; readonly marker: SidebarListMarker };
 
 export function sidebarListItemId(item: SidebarListItem): string {
-  return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+  return item.kind === "marker" ? sidebarMarkerId(item.marker) : item.key;
+}
+
+export function sidebarPendingSandboxKey(ownerEnvironmentId: string, sandboxId: string): string {
+  return `sidebar-sandbox-${ownerEnvironmentId}:${sandboxId}`;
+}
+
+/**
+ * Slots launching sandboxes into the sorted active rows where their threads
+ * will land. A new thread leads the active list by creation time and
+ * arranged rows follow every unarranged one, so each sandbox goes above the
+ * first row that is arranged or was created before it. `anchorMs` is a row's
+ * creation anchor, or null once it is arranged; sandboxes come newest first.
+ */
+export function slotPendingSandboxRows(
+  rows: ReadonlyArray<{ readonly item: SidebarListItem; readonly anchorMs: number | null }>,
+  sandboxes: ReadonlyArray<{ readonly key: string; readonly createdAtMs: number }>,
+): SidebarListItem[] {
+  const items: SidebarListItem[] = [];
+  let next = 0;
+  for (const row of rows) {
+    while (
+      next < sandboxes.length &&
+      (row.anchorMs === null || sandboxes[next]!.createdAtMs >= row.anchorMs)
+    ) {
+      items.push({ kind: "sandbox", key: sandboxes[next]!.key, section: "active" });
+      next += 1;
+    }
+    items.push(row.item);
+  }
+  for (const sandbox of sandboxes.slice(next)) {
+    items.push({ kind: "sandbox", key: sandbox.key, section: "active" });
+  }
+  return items;
 }
 
 /** The section a slot belongs to, read off the markers around it: from
@@ -223,7 +259,8 @@ export function resolveSidebarDropTarget(
         item.marker === "settled-header"
       )
         break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
+    } else if (item.kind === "sandbox") continue;
+    else if (currentSection === "pinned") pinnedOrder.push(item.key);
     else activeOrder.push(item.key);
   }
   return { section, pinnedOrder, activeOrder };

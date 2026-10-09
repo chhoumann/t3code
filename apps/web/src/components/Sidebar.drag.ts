@@ -11,7 +11,7 @@ import {
 
 const stationary = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
 const hidden = { ...stationary, scaleY: 0 };
-type ThreadItem = Extract<SidebarListItem, { kind: "thread" }>;
+type RowItem = Exclude<SidebarListItem, { kind: "marker" }>;
 type Layout = Parameters<SortingStrategy>[0];
 const isShelfHeader = (item: SidebarListItem | undefined) =>
   item?.kind === "marker" &&
@@ -126,7 +126,7 @@ export function createSidebarSortingStrategy(input: {
     if (active?.kind !== "thread" || !over || !rects[0]) return [];
     const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
     if (!target) return [];
-    const groups: Record<SidebarSection, ThreadItem[]> = {
+    const groups: Record<SidebarSection, RowItem[]> = {
       pinned: [],
       active: [],
       working: [],
@@ -164,8 +164,9 @@ export function createSidebarSortingStrategy(input: {
           : (input.activeOrder ?? target.activeOrder);
     const ranks = new Map(order.map((key, index) => [key, index]));
     const rank = ranks.get(active.key) ?? Number.POSITIVE_INFINITY;
+    // Launching sandboxes keep their place, so only thread rows decide the gap.
     const index = group.findIndex(
-      (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
+      (item) => item.kind === "thread" && (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
     );
     group.splice(index < 0 ? group.length : index, 0, { ...active, section: target.section });
     const settledOrder = (
@@ -207,7 +208,7 @@ export function createSidebarSortingStrategy(input: {
       const index = indices.get(sidebarListItemId(item));
       const rect = index === undefined ? undefined : rects[index];
       const fallback =
-        item.kind === "thread" &&
+        item.kind !== "marker" &&
         (item.section === "pinned" || item.section === "active" || item.section === "working")
           ? cardHeight
           : slimHeight;

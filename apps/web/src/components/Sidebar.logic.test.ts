@@ -54,6 +54,7 @@ import {
   sortSidebarV2ProjectGroups,
   shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
+  slotPendingSandboxRows,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
   type SidebarListMarker,
@@ -2314,5 +2315,43 @@ describe("Working shelf (beta)", () => {
         unsnooze: false,
       });
     });
+  });
+});
+
+describe("slotPendingSandboxRows", () => {
+  const at = (time: string) => Date.parse(time);
+  const row = (key: string, anchor: string | null) => ({
+    item: { kind: "thread" as const, key, section: "active" as const },
+    anchorMs: anchor === null ? null : at(anchor),
+  });
+  const keys = (items: ReturnType<typeof slotPendingSandboxRows>) =>
+    items.map((item) => (item.kind === "marker" ? item.marker : `${item.kind}:${item.key}`));
+
+  it("places each sandbox where a thread created with it would sort", () => {
+    const rows = [
+      row("newer", "2026-10-09T13:00:00Z"),
+      row("older", "2026-10-09T11:00:00Z"),
+      row("arranged", null),
+    ];
+    expect(
+      keys(
+        slotPendingSandboxRows(rows, [
+          { key: "x", createdAtMs: at("2026-10-09T12:30:00Z") },
+          { key: "y", createdAtMs: at("2026-10-09T12:00:00Z") },
+        ]),
+      ),
+    ).toEqual(["thread:newer", "sandbox:x", "sandbox:y", "thread:older", "thread:arranged"]);
+  });
+
+  it("keeps sandboxes above arranged rows and lists them alone when there are no rows", () => {
+    const sandboxes = [{ key: "x", createdAtMs: at("2026-10-09T10:00:00Z") }];
+    expect(keys(slotPendingSandboxRows([row("arranged", null)], sandboxes))).toEqual([
+      "sandbox:x",
+      "thread:arranged",
+    ]);
+    expect(keys(slotPendingSandboxRows([row("newer", "2026-10-09T13:00:00Z")], sandboxes))).toEqual(
+      ["thread:newer", "sandbox:x"],
+    );
+    expect(keys(slotPendingSandboxRows([], sandboxes))).toEqual(["sandbox:x"]);
   });
 });

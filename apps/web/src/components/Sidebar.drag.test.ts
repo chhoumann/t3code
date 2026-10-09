@@ -36,7 +36,7 @@ function layout(
   let top = 100;
   const rects = items.map((item) => {
     const height =
-      item.kind === "thread"
+      item.kind !== "marker"
         ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
         : item.marker === "pinned-header" || item.marker === "pinned-divider"
           ? 0
@@ -602,6 +602,22 @@ describe("sidebar drag projection", () => {
       expect(result.get(sidebarMarkerId("settled-header"))?.y).toBe(83);
     },
   );
+
+  it("keeps a launching sandbox in place while a thread drops into Active", () => {
+    const sandbox: SidebarListItem = { kind: "sandbox", key: "x", section: "active" };
+    const items = [
+      pinnedHeader,
+      divider,
+      sandbox,
+      thread("a", "active"),
+      settledHeader,
+      thread("s", "settled"),
+    ];
+    expect(resolveSidebarDropTarget(items, "s", "x")?.activeOrder).toEqual(["s", "a"]);
+    const result = preview({ items, settledOrder: ["s"], settledExpanded: true }, "s", "x");
+    expect(result.get("x")).toEqual(stationary);
+    expect(result.get("a")?.y).toBe(83);
+  });
 
   it("removes the snoozed header when its last row leaves", () => {
     const items = [
