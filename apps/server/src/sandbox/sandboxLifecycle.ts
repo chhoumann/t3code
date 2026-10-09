@@ -58,6 +58,8 @@ export const SandboxSpec = Schema.Struct({
     ttlSeconds: Schema.NullOr(Schema.Number),
     template: Schema.NullOr(Schema.String),
     providerEnvironment: Schema.NullOr(Schema.String),
+    /** Rendered once: a newer owner build must not change what a replayed create sends. */
+    setupScript: Schema.String,
   }),
   t3: SandboxT3Source,
 });

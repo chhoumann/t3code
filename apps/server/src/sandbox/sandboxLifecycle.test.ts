@@ -44,7 +44,13 @@ const fresh: SandboxRecord = {
     model: "claude-sonnet-4-6",
     runtimeMode: "full-access",
     interactionMode: "default",
-    machine: { size: "small", ttlSeconds: TTL_SECONDS, template: null, providerEnvironment: null },
+    machine: {
+      size: "small",
+      ttlSeconds: TTL_SECONDS,
+      template: null,
+      providerEnvironment: null,
+      setupScript: "#!/usr/bin/env bash",
+    },
     t3: { kind: "npm", version: "0.0.45" },
   },
   seed: {

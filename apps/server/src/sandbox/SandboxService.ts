@@ -477,10 +477,7 @@ const make = Effect.gen(function* () {
               ttlSeconds: record.spec.machine.ttlSeconds,
               template: record.spec.machine.template,
               providerEnvironment: record.spec.machine.providerEnvironment,
-              setupScript: renderSandboxBootScript({
-                t3: record.spec.t3,
-                label: record.spec.title,
-              }),
+              setupScript: record.spec.machine.setupScript,
             })
             .pipe(
               Effect.tapError((error) =>
@@ -750,6 +747,10 @@ const make = Effect.gen(function* () {
               account.stopAfterHours === null ? null : Math.round(account.stopAfterHours * 3600),
             template: account.template,
             providerEnvironment: account.providerEnvironment,
+            setupScript: renderSandboxBootScript({
+              t3: { kind: build.kind, version: build.version },
+              label: input.title,
+            }),
           },
           t3: { kind: build.kind, version: build.version },
         },
