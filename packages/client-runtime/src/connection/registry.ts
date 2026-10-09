@@ -102,6 +102,22 @@ export class EnvironmentRegistry extends Context.Service<
       registration: ConnectionRegistration,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly registerPlatform: (registration: PrimaryConnectionRegistration) => Effect.Effect<void>;
+    /**
+     * Drops the routes `source` contributed to an environment (see
+     * `BearerConnectionProfile.managedBy`), and the environment with them
+     * when no other route is left. Removing `source` itself does this for
+     * every environment it contributed to.
+     */
+    readonly removeContributed: (
+      source: EnvironmentId,
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<
+      void,
+      | Persistence.ConnectionPersistenceError
+      | ConnectionAttemptError
+      | EnvironmentNotRegisteredError
+      | PlatformEnvironmentRemovalError
+    >;
     readonly reconcilePlatform: (
       registrations: ReadonlyArray<PlatformConnectionRegistration>,
     ) => Effect.Effect<void>;
@@ -196,6 +212,18 @@ export class EnvironmentRegistry extends Context.Service<
     ) => Stream.Stream<A, E, Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>>;
   }
 >()("@t3tools/client-runtime/connection/registry/EnvironmentRegistry") {}
+
+function contributedRouteIds(
+  entry: ConnectionCatalogEntry,
+  source: EnvironmentId,
+): ReadonlyArray<string> {
+  return connectionRoutes(entry).flatMap((route) => {
+    const profile = Option.getOrNull(route.profile);
+    return profile?._tag === "BearerConnectionProfile" && profile.managedBy === source
+      ? [connectionRouteId(route.target)]
+      : [];
+  });
+}
 
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
@@ -861,11 +889,46 @@ export const make = Effect.gen(function* () {
         yield* disconnectSsh(environmentId, profile);
       }
     }
+
+    const contributedTo = [...(yield* SubscriptionRef.get(entries)).values()]
+      .filter((candidate) => contributedRouteIds(candidate, environmentId).length > 0)
+      .map((candidate) => candidate.target.environmentId);
+    yield* Effect.forEach(
+      contributedTo,
+      (contributedId) =>
+        removeContributed(environmentId, contributedId).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Could not remove routes a removed environment contributed.", {
+              environmentId: contributedId,
+              error,
+            }),
+          ),
+        ),
+      { discard: true },
+    );
   });
 
   const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
     return yield* withLeaseLock(environmentId, removeLocked(environmentId));
   });
+
+  const removeContributed: EnvironmentRegistry["Service"]["removeContributed"] = (
+    source,
+    environmentId,
+  ) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) return;
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (entry === undefined) return;
+        const removedIds = contributedRouteIds(entry, source);
+        if (removedIds.length === 0) return;
+        const remaining = removedIds.reduce(routesAfterRemoving, connectionRoutes(entry));
+        if (remaining.length === 0) return yield* removeLocked(environmentId);
+        yield* replaceRoutesLocked(entry, remaining);
+      }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.removeContributed"));
 
   const disconnectSsh = (environmentId: EnvironmentId, profile: SshConnectionProfile) =>
     ssh.disconnect(profile.target).pipe(
@@ -1161,6 +1224,7 @@ export const make = Effect.gen(function* () {
     registerPlatform,
     reconcilePlatform,
     remove,
+    removeContributed,
     removeRoute,
     reorderRoutes,
     removeRelayEnvironments,

@@ -33,6 +33,12 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * Connect credential instead of a stored bearer token.
      */
     authorization: Schema.optionalKey(Schema.Literal("t3-connect")),
+    /**
+     * The environment that contributed this route, such as the owner of a
+     * sandbox. The route goes when that environment withdraws it or is itself
+     * removed; routes the user paired to the same environment stay.
+     */
+    managedBy: Schema.optionalKey(EnvironmentId),
   },
 ) {}
 

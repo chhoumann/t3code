@@ -1990,6 +1990,136 @@ describe("EnvironmentRegistry routes", () => {
     }),
   );
 
+  describe("contributed routes", () => {
+    // RELAY_TARGET's environment plays the sandbox owner.
+    const OWNER = RELAY_TARGET.environmentId;
+    const SANDBOX = EnvironmentId.make("environment-sandbox");
+    const MANAGED_TARGET = new BearerConnectionTarget({
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      connectionId: "bearer:sandbox:managed",
+    });
+    const MANAGED_PROFILE = new BearerConnectionProfile({
+      connectionId: MANAGED_TARGET.connectionId,
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      httpBaseUrl: "https://sandbox.example.test",
+      wsBaseUrl: "wss://sandbox.example.test",
+      managedBy: OWNER,
+    });
+    const USER_TARGET = new BearerConnectionTarget({
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      connectionId: "bearer:sandbox:user",
+    });
+    const USER_PROFILE = new BearerConnectionProfile({
+      connectionId: USER_TARGET.connectionId,
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      httpBaseUrl: "http://100.64.0.9:3773",
+      wsBaseUrl: "ws://100.64.0.9:3773",
+    });
+    const LEARNED_TARGET = new BearerConnectionTarget({
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      connectionId: `learned:${SANDBOX}:http://10.0.0.5:3773@${MANAGED_TARGET.connectionId}`,
+    });
+    const LEARNED_PROFILE = new BearerConnectionProfile({
+      connectionId: LEARNED_TARGET.connectionId,
+      environmentId: SANDBOX,
+      label: "Sandbox",
+      httpBaseUrl: "http://10.0.0.5:3773",
+      wsBaseUrl: "ws://10.0.0.5:3773",
+      learned: true,
+    });
+
+    it.effect("withdrawing keeps a route the user paired to the same environment", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET, USER_TARGET, RELAY_TARGET],
+          [MANAGED_PROFILE, USER_PROFILE],
+          [
+            [MANAGED_TARGET.connectionId, BEARER_CREDENTIAL],
+            [USER_TARGET.connectionId, BEARER_CREDENTIAL],
+          ],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.removeContributed(OWNER, SANDBOX);
+
+          expect(routesOf(yield* Ref.get(harness.storedTargets), SANDBOX)).toEqual([USER_TARGET]);
+          expect((yield* SubscriptionRef.get(registry.entries)).get(SANDBOX)?.target).toEqual(
+            USER_TARGET,
+          );
+          expect(yield* Ref.get(harness.cacheClears)).toEqual([]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
+
+    it.effect("withdrawing the only contributed route forgets the environment", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET, LEARNED_TARGET, RELAY_TARGET],
+          [MANAGED_PROFILE, LEARNED_PROFILE],
+          [[MANAGED_TARGET.connectionId, BEARER_CREDENTIAL]],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          // Another source withdrawing changes nothing.
+          yield* registry.removeContributed(SECOND_RELAY_TARGET.environmentId, SANDBOX);
+          expect(routesOf(yield* Ref.get(harness.storedTargets), SANDBOX)).toEqual([
+            MANAGED_TARGET,
+            LEARNED_TARGET,
+          ]);
+
+          // The learned route borrows the withdrawn route's credential, so it goes too.
+          yield* registry.removeContributed(OWNER, SANDBOX);
+          expect(hasRoutes(yield* Ref.get(harness.storedTargets), SANDBOX)).toBe(false);
+          expect((yield* SubscriptionRef.get(registry.entries)).has(SANDBOX)).toBe(false);
+          expect(yield* Ref.get(harness.cacheClears)).toEqual([SANDBOX]);
+          expect(routesOf(yield* Ref.get(harness.storedTargets), OWNER)).toEqual([RELAY_TARGET]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
+
+    it.effect("removing the owner removes only the routes it contributed", () =>
+      Effect.gen(function* () {
+        const OTHER = EnvironmentId.make("environment-other-sandbox");
+        const otherTarget = new BearerConnectionTarget({
+          environmentId: OTHER,
+          label: "Other sandbox",
+          connectionId: "bearer:other:managed",
+        });
+        const otherProfile = new BearerConnectionProfile({
+          connectionId: otherTarget.connectionId,
+          environmentId: OTHER,
+          label: "Other sandbox",
+          httpBaseUrl: "https://other.example.test",
+          wsBaseUrl: "wss://other.example.test",
+          managedBy: SECOND_RELAY_TARGET.environmentId,
+        });
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET, USER_TARGET, RELAY_TARGET, SECOND_RELAY_TARGET, otherTarget],
+          [MANAGED_PROFILE, USER_PROFILE, otherProfile],
+          [
+            [MANAGED_TARGET.connectionId, BEARER_CREDENTIAL],
+            [USER_TARGET.connectionId, BEARER_CREDENTIAL],
+            [otherTarget.connectionId, BEARER_CREDENTIAL],
+          ],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.remove(OWNER);
+
+          const targets = yield* Ref.get(harness.storedTargets);
+          expect(hasRoutes(targets, OWNER)).toBe(false);
+          expect(routesOf(targets, SANDBOX)).toEqual([USER_TARGET]);
+          expect(routesOf(targets, OTHER)).toEqual([otherTarget]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
+  });
+
   it.effect("removing the last route forgets the environment", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness(

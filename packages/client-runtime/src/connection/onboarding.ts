@@ -43,6 +43,8 @@ export interface PairingConnectionInput {
    * environment, or nothing is saved.
    */
   readonly expectedEnvironmentId?: EnvironmentId;
+  /** Registers the route as contributed by this environment; see `BearerConnectionProfile`. */
+  readonly managedBy?: EnvironmentId;
 }
 
 export interface SshConnectionInput {
@@ -147,6 +149,7 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      ...(input.managedBy === undefined ? {} : { managedBy: input.managedBy }),
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
