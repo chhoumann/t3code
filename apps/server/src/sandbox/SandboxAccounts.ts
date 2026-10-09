@@ -14,13 +14,13 @@ import type {
   SandboxAccountSaveInput,
   SandboxMachineSize,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -155,7 +155,9 @@ const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const sql = yield* SqlClient.SqlClient;
   const provider = yield* SandboxProvider;
-  const removalLock = yield* Semaphore.make(1);
+  // Saves, removals, and launches of one account run one at a time, cleanup included, so a
+  // save's cleanup never deletes a value a later save stored and removal sees every launch.
+  const accountLocks = yield* KeyedLock.make<SandboxAccountId>();
 
   const readSecret = (name: string) =>
     secrets.get(name).pipe(Effect.map(Option.map((bytes) => textDecoder.decode(bytes))));
@@ -189,78 +191,85 @@ const make = Effect.gen(function* () {
     });
 
   const save: SandboxAccounts["Service"]["save"] = (input) =>
-    Effect.gen(function* () {
-      const { id } = input;
-      const store = Effect.mapError(
-        (cause: unknown) => new SandboxAccountStoreError({ accountId: id, cause }),
-      );
-      const apiKey =
-        input.apiKey ?? Option.getOrUndefined(yield* readSecret(apiKeySecretName(id)).pipe(store));
-      if (apiKey === undefined) {
-        return yield* new SandboxAccountInvalidError({ accountId: id, reason: "api-key-required" });
-      }
-      const env: Array<{
-        readonly name: string;
-        readonly value: string;
-        readonly setupOnly: boolean;
-      }> = [];
-      for (const entry of input.env) {
-        if (env.some((existing) => existing.name === entry.name)) {
+    accountLocks.withLock(
+      input.id,
+      Effect.gen(function* () {
+        const { id } = input;
+        const store = Effect.mapError(
+          (cause: unknown) => new SandboxAccountStoreError({ accountId: id, cause }),
+        );
+        const apiKey =
+          input.apiKey ??
+          Option.getOrUndefined(yield* readSecret(apiKeySecretName(id)).pipe(store));
+        if (apiKey === undefined) {
           return yield* new SandboxAccountInvalidError({
             accountId: id,
-            reason: "duplicate-env-name",
-            envName: entry.name,
+            reason: "api-key-required",
           });
         }
-        const value =
-          entry.value ??
-          Option.getOrUndefined(yield* readSecret(envSecretName(id, entry.name)).pipe(store));
-        if (value === undefined) {
-          return yield* new SandboxAccountInvalidError({
-            accountId: id,
-            reason: "env-value-required",
-            envName: entry.name,
-          });
+        const env: Array<{
+          readonly name: string;
+          readonly value: string;
+          readonly setupOnly: boolean;
+        }> = [];
+        for (const entry of input.env) {
+          if (env.some((existing) => existing.name === entry.name)) {
+            return yield* new SandboxAccountInvalidError({
+              accountId: id,
+              reason: "duplicate-env-name",
+              envName: entry.name,
+            });
+          }
+          const value =
+            entry.value ??
+            Option.getOrUndefined(yield* readSecret(envSecretName(id, entry.name)).pipe(store));
+          if (value === undefined) {
+            return yield* new SandboxAccountInvalidError({
+              accountId: id,
+              reason: "env-value-required",
+              envName: entry.name,
+            });
+          }
+          env.push({ name: entry.name, value, setupOnly: entry.setupOnly ?? false });
         }
-        env.push({ name: entry.name, value, setupOnly: entry.setupOnly ?? false });
-      }
 
-      const missingActions = yield* provider.checkAccess({ apiKey: Redacted.make(apiKey) });
-      if (missingActions.length > 0) {
-        return yield* new SandboxAccountKeyScopeError({ accountId: id, missingActions });
-      }
+        const missingActions = yield* provider.checkAccess({ apiKey: Redacted.make(apiKey) });
+        if (missingActions.length > 0) {
+          return yield* new SandboxAccountKeyScopeError({ accountId: id, missingActions });
+        }
 
-      const config: SandboxAccountConfig = {
-        label: input.label,
-        provider: input.provider,
-        template: input.template,
-        providerEnvironment: input.providerEnvironment,
-        size: input.size,
-        stopAfterHours: input.stopAfterHours,
-        machineSetupScript: input.machineSetupScript,
-        env: env.map(({ name, setupOnly }) => ({ name, setupOnly })),
-      };
-      let dropped: ReadonlyArray<string> = [];
-      yield* settings
-        .updateSandboxAccounts((accounts) =>
-          Effect.gen(function* () {
-            yield* secrets.set(apiKeySecretName(id), textEncoder.encode(apiKey));
-            for (const entry of env) {
-              yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
-            }
-            dropped = (accounts[id]?.env ?? [])
-              .map(({ name }) => name)
-              .filter((name) => !env.some((entry) => entry.name === name));
-            return { ...accounts, [id]: config };
-          }),
-        )
-        .pipe(store);
-      // Only once the settings no longer name them, or a failed write leaves names without values.
-      for (const name of dropped) {
-        yield* secrets.remove(envSecretName(id, name)).pipe(store);
-      }
-      return config;
-    });
+        const config: SandboxAccountConfig = {
+          label: input.label,
+          provider: input.provider,
+          template: input.template,
+          providerEnvironment: input.providerEnvironment,
+          size: input.size,
+          stopAfterHours: input.stopAfterHours,
+          machineSetupScript: input.machineSetupScript,
+          env: env.map(({ name, setupOnly }) => ({ name, setupOnly })),
+        };
+        let dropped: ReadonlyArray<string> = [];
+        yield* settings
+          .updateSandboxAccounts((accounts) =>
+            Effect.gen(function* () {
+              yield* secrets.set(apiKeySecretName(id), textEncoder.encode(apiKey));
+              for (const entry of env) {
+                yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
+              }
+              dropped = (accounts[id]?.env ?? [])
+                .map(({ name }) => name)
+                .filter((name) => !env.some((entry) => entry.name === name));
+              return { ...accounts, [id]: config };
+            }),
+          )
+          .pipe(store);
+        // Only once the settings no longer name them, or a failed write leaves names without values.
+        for (const name of dropped) {
+          yield* secrets.remove(envSecretName(id, name)).pipe(store);
+        }
+        return config;
+      }),
+    );
 
   const remove: SandboxAccounts["Service"]["remove"] = (accountId) => {
     const store = Effect.mapError(
@@ -298,11 +307,11 @@ const make = Effect.gen(function* () {
       for (const { name } of removed.env) {
         yield* secrets.remove(envSecretName(accountId, name)).pipe(store);
       }
-    }).pipe(removalLock.withPermits(1));
+    }).pipe((removal) => accountLocks.withLock(accountId, removal));
   };
 
   const withAccount: SandboxAccounts["Service"]["withAccount"] = (accountId, use) =>
-    get(accountId).pipe(Effect.flatMap(use), removalLock.withPermits(1));
+    accountLocks.withLock(accountId, get(accountId).pipe(Effect.flatMap(use)));
 
   return SandboxAccounts.of({ get, withAccount, save, remove });
 });

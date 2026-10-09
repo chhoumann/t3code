@@ -23,6 +23,12 @@ const makeWorld = () => {
     checkedKeys: [] as Array<string>,
     /** Fails the next settings write after its update has run, as a failed file write would. */
     failSettingsWrite: false,
+    /** The next removal of a secret whose name contains `match` signals `entered`, then waits for `release`. */
+    removeGate: null as {
+      readonly match: string;
+      readonly entered: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    } | null,
   };
   const unused = () => Effect.die("unused");
   const provider = SandboxProvider.of({
@@ -45,7 +51,16 @@ const makeWorld = () => {
     set: (name, value) => Effect.sync(() => void world.secrets.set(name, value)),
     create: (name, value) => Effect.sync(() => void world.secrets.set(name, value)),
     getOrCreateRandom: unused,
-    remove: (name) => Effect.sync(() => void world.secrets.delete(name)),
+    remove: (name) =>
+      Effect.gen(function* () {
+        const gate = world.removeGate;
+        if (gate !== null && name.includes(gate.match)) {
+          world.removeGate = null;
+          yield* Deferred.succeed(gate.entered, undefined);
+          yield* Deferred.await(gate.release);
+        }
+        world.secrets.delete(name);
+      }),
   });
   const settingsLayer = Layer.effect(
     ServerSettings.ServerSettingsService,
@@ -258,6 +273,38 @@ describe("SandboxAccounts", () => {
           ["TOKEN", "token"],
           ["DROPPED", "dropped-value"],
         ],
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps a value a later save adds back while an earlier save drops it", () => {
+    const { world, layer } = makeWorld();
+    return Effect.gen(function* () {
+      const accounts = yield* SandboxAccounts.SandboxAccounts;
+      yield* accounts.save({ ...input, apiKey: "key", env: [{ name: "TOKEN", value: "old" }] });
+      const gate = {
+        // The secret name carries the env name base64url-encoded.
+        match: Buffer.from("TOKEN").toString("base64url"),
+        entered: yield* Deferred.make<void>(),
+        release: yield* Deferred.make<void>(),
+      };
+      world.removeGate = gate;
+      const dropping = yield* Effect.forkChild(accounts.save({ ...input, env: [] }));
+      yield* Deferred.await(gate.entered);
+      const readding = yield* Effect.forkChild(
+        accounts.save({ ...input, env: [{ name: "TOKEN", value: "new" }] }),
+      );
+      for (let turn = 0; turn < 100 && readding.pollUnsafe() === undefined; turn++) {
+        yield* Effect.yieldNow;
+      }
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(dropping);
+      yield* Fiber.join(readding);
+
+      const account = yield* accounts.get(ID);
+      assert.deepStrictEqual(
+        account.env.map((entry) => [entry.name, Redacted.value(entry.value)]),
+        [["TOKEN", "new"]],
       );
     }).pipe(Effect.provide(layer));
   });
