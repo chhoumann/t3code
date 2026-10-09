@@ -124,8 +124,10 @@ const probePath = `/sandboxes/${PROBE_MACHINE}`;
 /**
  * One request per Boat action sandboxes take. Boat refuses a scoped key's
  * missing action with 403 before looking any further, so every allowed probe
- * ends at the missing probe machine or, for create, at a setup script Boat
- * rejects before creating anything.
+ * ends at the missing probe machine or, for create, at a body Boat rejects
+ * before creating anything: no machine type has the probe's name, and the
+ * setup script is not a string. Were one ever made, it would stop within a
+ * minute.
  */
 const ACCESS_PROBES: ReadonlyArray<{
   readonly action: string;
@@ -135,7 +137,12 @@ const ACCESS_PROBES: ReadonlyArray<{
     action: "sandbox.create",
     request: HttpClientRequest.post("/sandboxes").pipe(
       HttpClientRequest.setHeader("Idempotency-Key", PROBE_MACHINE),
-      HttpClientRequest.bodyJsonUnsafe({ setupScript: 0, noEnv: true, type: "small" }),
+      HttpClientRequest.bodyJsonUnsafe({
+        type: PROBE_MACHINE,
+        setupScript: 0,
+        ttlSeconds: 60,
+        noEnv: true,
+      }),
     ),
   },
   { action: "sandbox.read", request: HttpClientRequest.get(probePath) },

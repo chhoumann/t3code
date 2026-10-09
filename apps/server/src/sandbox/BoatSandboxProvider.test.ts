@@ -1,8 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
+import { SandboxMachineSize } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
@@ -17,6 +19,7 @@ interface Seen {
 }
 
 const account = { apiKey: Redacted.make("test-key") };
+const isMachineSize = Schema.is(SandboxMachineSize);
 const machineId = ProviderMachineId.make("bx_23456789");
 const sandbox = { id: "bx_23456789", state: "provisioning", setupStatus: "pending" };
 
@@ -253,9 +256,11 @@ describe("BoatSandboxProvider", () => {
         );
       }
       const create = seen.find((request) => new URL(request.url).pathname === "/api/v1/sandboxes");
-      expect(typeof (create?.body as { setupScript?: unknown } | undefined)?.setupScript).not.toBe(
-        "string",
-      );
+      const body = create?.body as Record<string, unknown> | undefined;
+      // Each alone keeps Boat from provisioning a machine.
+      expect(isMachineSize(body?.["type"])).toBe(false);
+      expect(typeof body?.["setupScript"]).not.toBe("string");
+      expect(body?.["ttlSeconds"]).toBe(60);
     }),
   );
 
