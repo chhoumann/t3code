@@ -1,8 +1,14 @@
-import { EnvironmentId, type VcsRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  SandboxAccountId,
+  type SandboxAccountConfig,
+  type VcsRef,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
+  deriveSandboxRunChoices,
   resolveEnvironmentOptionLabel,
   resolveBranchSelectionTarget,
   resolveCurrentWorkspaceLabel,
@@ -881,5 +887,67 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+describe("deriveSandboxRunChoices", () => {
+  const account = (label: string): SandboxAccountConfig => ({
+    label,
+    provider: "boat",
+    template: null,
+    providerEnvironment: null,
+    size: "small",
+    stopAfterHours: 8,
+    machineSetupScript: null,
+    env: [],
+  });
+  const owner = (
+    environmentId: EnvironmentId,
+    label: string,
+    accounts: Record<string, SandboxAccountConfig>,
+    sandboxes = true,
+  ) => ({
+    environmentId,
+    label,
+    serverConfig: {
+      environment: { capabilities: { sandboxes } },
+      settings: { sandboxAccounts: accounts },
+    },
+  });
+
+  it("offers one entry per account, without naming a sole owner", () => {
+    expect(
+      deriveSandboxRunChoices([
+        owner(localEnvironmentId, "This device", {
+          work: account("Work"),
+          personal: account("Personal"),
+        }),
+        owner(remoteEnvironmentId, "Build box", {}),
+      ]).map((choice) => choice.label),
+    ).toEqual(["New sandbox · Personal", "New sandbox · Work"]);
+  });
+
+  it("names the owner when several environments offer accounts", () => {
+    const choices = deriveSandboxRunChoices([
+      owner(localEnvironmentId, "This device", { work: account("Work") }),
+      owner(remoteEnvironmentId, "Build box", { work: account("Work") }),
+    ]);
+    expect(choices.map((choice) => choice.label)).toEqual([
+      "New sandbox · Work on This device",
+      "New sandbox · Work on Build box",
+    ]);
+    expect(new Set(choices.map((choice) => choice.value)).size).toBe(2);
+    expect(choices[1]).toMatchObject({
+      ownerEnvironmentId: remoteEnvironmentId,
+      accountId: SandboxAccountId.make("work"),
+    });
+  });
+
+  it("skips environments that do not serve sandboxes", () => {
+    expect(
+      deriveSandboxRunChoices([
+        owner(localEnvironmentId, "This device", { work: account("Work") }, false),
+      ]),
+    ).toEqual([]);
   });
 });

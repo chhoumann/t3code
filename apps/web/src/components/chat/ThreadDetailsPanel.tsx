@@ -8,7 +8,11 @@ import type {
 
 import type { DraftId } from "../../composerDraftStore";
 import { useT3ProjectFileScripts } from "../../hooks/useT3ProjectFileScripts";
-import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
+import {
+  type EnvMode,
+  type EnvironmentOption,
+  type SandboxRunChoice,
+} from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
 import GitActionsControl from "../GitActionsControl";
 import ProjectScriptsControl, {
@@ -43,6 +47,9 @@ export interface ThreadDetailsPanelProps extends Pick<
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange: (environmentId: EnvironmentId) => void;
+  sandboxChoices?: readonly SandboxRunChoice[] | undefined;
+  activeSandboxValue?: string | null | undefined;
+  onSandboxChoose?: ((choice: SandboxRunChoice) => void) | undefined;
   onEnvModeChange: (mode: EnvMode) => void;
   /** The thread's env mode as ChatView resolves it. */
   envMode: EnvMode;
@@ -114,6 +121,9 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   onEnvironmentChange={props.onEnvironmentChange}
                   autoEnvironmentLabel={props.autoEnvironmentLabel}
                   onAutoEnvironment={props.onAutoEnvironment}
+                  sandboxChoices={props.sandboxChoices}
+                  activeSandboxValue={props.activeSandboxValue}
+                  onSandboxChoose={props.onSandboxChoose}
                   {...branchToolbarProps}
                 />
               ) : null}

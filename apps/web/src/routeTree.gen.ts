@@ -35,6 +35,7 @@ import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$proje
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
+import { Route as ChatSandboxEnvironmentIdSandboxIdRouteImport } from './routes/_chat.sandbox.$environmentId.$sandboxId'
 
 const WelcomeRoute = WelcomeRouteImport.update({
   id: '/welcome',
@@ -167,6 +168,12 @@ const ChatEnvironmentIdThreadIdRoute =
     path: '/$environmentId/$threadId',
     getParentRoute: () => ChatRoute,
   } as any)
+const ChatSandboxEnvironmentIdSandboxIdRoute =
+  ChatSandboxEnvironmentIdSandboxIdRouteImport.update({
+    id: '/sandbox/$environmentId/$sandboxId',
+    path: '/sandbox/$environmentId/$sandboxId',
+    getParentRoute: () => ChatRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -194,6 +201,7 @@ export interface FileRoutesByFullPath {
   '/settings/storage': typeof SettingsStorageRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
@@ -221,6 +229,7 @@ export interface FileRoutesByTo {
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -250,6 +259,7 @@ export interface FileRoutesById {
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/_chat/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -279,6 +289,7 @@ export interface FileRouteTypes {
     | '/settings/storage'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/sandbox/$environmentId/$sandboxId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
@@ -306,6 +317,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/sandbox/$environmentId/$sandboxId'
   id:
     | '__root__'
     | '/_chat'
@@ -334,6 +346,7 @@ export interface FileRouteTypes {
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
+    | '/_chat/sandbox/$environmentId/$sandboxId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -531,6 +544,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatEnvironmentIdThreadIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/sandbox/$environmentId/$sandboxId': {
+      id: '/_chat/sandbox/$environmentId/$sandboxId'
+      path: '/sandbox/$environmentId/$sandboxId'
+      fullPath: '/sandbox/$environmentId/$sandboxId'
+      preLoaderRoute: typeof ChatSandboxEnvironmentIdSandboxIdRouteImport
+      parentRoute: typeof ChatRoute
+    }
   }
 }
 
@@ -539,6 +559,7 @@ interface ChatRouteChildren {
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
+  ChatSandboxEnvironmentIdSandboxIdRoute: typeof ChatSandboxEnvironmentIdSandboxIdRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
@@ -546,6 +567,8 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
+  ChatSandboxEnvironmentIdSandboxIdRoute:
+    ChatSandboxEnvironmentIdSandboxIdRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)

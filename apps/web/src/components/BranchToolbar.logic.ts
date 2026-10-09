@@ -1,10 +1,12 @@
 import type {
   EnvironmentId,
   EnvironmentMachineKind,
+  SandboxAccountId,
   VcsRef,
   ProjectId,
   WorktreeSubmodules,
 } from "@t3tools/contracts";
+import { sandboxAccountChoices, sandboxLaunchLabel } from "@t3tools/client-runtime/state/sandboxes";
 import * as Schema from "effect/Schema";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
 import { toSortableTimestamp } from "../lib/threadSort";
@@ -21,6 +23,45 @@ export interface EnvironmentOption {
   label: string;
   isPrimary: boolean;
   machine: EnvironmentMachineKind;
+}
+
+/** A picker entry that starts a new sandbox under one owner's account. */
+export interface SandboxRunChoice {
+  /** The picker value; never collides with an environment id. */
+  readonly value: string;
+  readonly ownerEnvironmentId: EnvironmentId;
+  readonly accountId: SandboxAccountId;
+  readonly label: string;
+}
+
+/**
+ * One entry per account on every environment that launches sandboxes. The
+ * owner is named only when more than one environment offers accounts.
+ */
+export function deriveSandboxRunChoices(
+  owners: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly serverConfig: Parameters<typeof sandboxAccountChoices>[1];
+  }>,
+): ReadonlyArray<SandboxRunChoice> {
+  const perOwner = owners
+    .map((owner) => ({
+      owner,
+      accounts: sandboxAccountChoices(owner.environmentId, owner.serverConfig),
+    }))
+    .filter(({ accounts }) => accounts.length > 0);
+  return perOwner.flatMap(({ owner, accounts }) =>
+    accounts.map((account) => ({
+      value: `sandbox:${owner.environmentId}:${account.accountId}`,
+      ownerEnvironmentId: owner.environmentId,
+      accountId: account.accountId,
+      label:
+        perOwner.length > 1
+          ? `${sandboxLaunchLabel(account.label)} on ${owner.label}`
+          : sandboxLaunchLabel(account.label),
+    })),
+  );
 }
 
 export const EnvMode = Schema.Literals(["local", "worktree"]);
