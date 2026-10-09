@@ -1595,14 +1595,6 @@ function SavedBackendListRow({
   const sandboxStatus = sandbox?.view.status._tag ?? null;
   const { setDesired: setSandboxDesired, confirmAndDelete: confirmAndDeleteSandbox } =
     useSandboxActions();
-  const sandboxRef =
-    sandbox === null
-      ? null
-      : {
-          ownerEnvironmentId: sandbox.ownerEnvironmentId,
-          sandboxId: sandbox.sandboxId,
-          title: sandbox.view.title,
-        };
   const subtitleText = [
     sandbox ? "Sandbox" : null,
     environmentTransportLabel(environment, connectedTarget),
@@ -1759,14 +1751,14 @@ function SavedBackendListRow({
           appearance="icon"
         />
       ) : null}
-      {sandboxRef !== null ? (
+      {sandbox !== null ? (
         <Button
           type="button"
           variant="outline"
           size="xs"
           disabled={sandboxStatus !== "ready" && sandboxStatus !== "stopped"}
           onClick={() =>
-            void setSandboxDesired(sandboxRef, sandboxStatus === "stopped" ? "running" : "stopped")
+            void setSandboxDesired(sandbox, sandboxStatus === "stopped" ? "running" : "stopped")
           }
         >
           {sandboxStatus === "stopped" ? "Resume" : "Stop"}
@@ -1819,11 +1811,8 @@ function SavedBackendListRow({
             <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
           ) : null}
           <MenuSeparator />
-          {sandboxRef !== null ? (
-            <MenuItem
-              variant="destructive"
-              onClick={() => void confirmAndDeleteSandbox(sandboxRef)}
-            >
+          {sandbox !== null ? (
+            <MenuItem variant="destructive" onClick={() => void confirmAndDeleteSandbox(sandbox)}>
               Delete sandbox…
             </MenuItem>
           ) : (

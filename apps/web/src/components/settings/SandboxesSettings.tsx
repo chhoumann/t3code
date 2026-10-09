@@ -255,11 +255,7 @@ function SandboxRow(props: {
   const { sandbox } = props;
   const navigate = useNavigate();
   const { setDesired, confirmAndDelete } = useSandboxActions();
-  const ref = {
-    ownerEnvironmentId: props.ownerEnvironmentId,
-    sandboxId: sandbox.id,
-    title: sandbox.title,
-  };
+  const ref = { ownerEnvironmentId: props.ownerEnvironmentId, view: sandbox };
   const status = sandbox.status._tag;
   const open = () =>
     status === "ready" && sandbox.environmentId !== null

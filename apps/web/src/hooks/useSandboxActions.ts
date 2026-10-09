@@ -3,7 +3,8 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { sandboxFailureMessage } from "@t3tools/client-runtime/state/sandboxes";
-import type { EnvironmentId, SandboxDesired, SandboxId } from "@t3tools/contracts";
+import type { EnvironmentId, SandboxDesired, SandboxView } from "@t3tools/contracts";
+import { useRouter } from "@tanstack/react-router";
 import { useCallback } from "react";
 
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -11,10 +12,10 @@ import { readLocalApi } from "../localApi";
 import { sandboxes } from "../state/sandboxes";
 import { useAtomCommand } from "../state/use-atom-command";
 
+/** A sandbox as its owner lists it. A sandbox index entry is one. */
 export interface SandboxRef {
   readonly ownerEnvironmentId: EnvironmentId;
-  readonly sandboxId: SandboxId;
-  readonly title: string;
+  readonly view: SandboxView;
 }
 
 const DESIRED_FAILURE_TITLE: Record<SandboxDesired, string> = {
@@ -25,13 +26,14 @@ const DESIRED_FAILURE_TITLE: Record<SandboxDesired, string> = {
 
 /** Stop, resume, and delete, run on the environment that owns the sandbox. */
 export function useSandboxActions() {
+  const router = useRouter();
   const update = useAtomCommand(sandboxes.update, { reportFailure: false });
 
   const setDesired = useCallback(
     async (sandbox: SandboxRef, desired: SandboxDesired): Promise<boolean> => {
       const result = await update({
         environmentId: sandbox.ownerEnvironmentId,
-        input: { id: sandbox.sandboxId, desired },
+        input: { id: sandbox.view.id, desired },
       });
       if (result._tag === "Success") return true;
       if (!isAtomCommandInterrupted(result)) {
@@ -52,15 +54,24 @@ export function useSandboxActions() {
     async (sandbox: SandboxRef): Promise<boolean> => {
       const confirmed = await readLocalApi()?.dialogs.confirm(
         [
-          `Delete sandbox "${sandbox.title}"?`,
+          `Delete sandbox "${sandbox.view.title}"?`,
           "This destroys its machine and everything on it, including its threads.",
         ].join("\n"),
         { variant: "destructive" },
       );
       if (confirmed !== true) return false;
-      return setDesired(sandbox, "destroyed");
+      if (!(await setDesired(sandbox, "destroyed"))) return false;
+      // The sandbox's threads go with it, so leave one that is open.
+      const params = router.state.matches.at(-1)?.params as { environmentId?: string } | undefined;
+      if (
+        sandbox.view.environmentId !== null &&
+        params?.environmentId === sandbox.view.environmentId
+      ) {
+        await router.navigate({ to: "/", replace: true });
+      }
+      return true;
     },
-    [setDesired],
+    [router, setDesired],
   );
 
   return { setDesired, confirmAndDelete };

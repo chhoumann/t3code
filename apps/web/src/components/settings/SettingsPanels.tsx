@@ -3495,13 +3495,7 @@ export function ArchivedThreadsPanel() {
       );
 
       if (clicked === "delete-sandbox" && sandbox) {
-        if (
-          await confirmAndDeleteSandbox({
-            ownerEnvironmentId: sandbox.ownerEnvironmentId,
-            sandboxId: sandbox.sandboxId,
-            title: sandbox.view.title,
-          })
-        ) {
+        if (await confirmAndDeleteSandbox(sandbox)) {
           refreshArchivedThreads();
         }
         return;

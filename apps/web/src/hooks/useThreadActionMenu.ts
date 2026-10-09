@@ -317,11 +317,7 @@ export function useThreadActionMenu(input: {
           }
           case "delete-sandbox":
             if (sandbox === undefined) return;
-            await confirmAndDeleteSandbox({
-              ownerEnvironmentId: sandbox.ownerEnvironmentId,
-              sandboxId: sandbox.sandboxId,
-              title: sandbox.view.title,
-            });
+            await confirmAndDeleteSandbox(sandbox);
             return;
           case "delete": {
             if (confirmThreadDelete) {

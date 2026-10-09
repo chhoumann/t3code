@@ -118,11 +118,7 @@ function SandboxProgress(props: {
 }) {
   const { view } = props;
   const { setDesired, confirmAndDelete } = useSandboxActions();
-  const sandbox = {
-    ownerEnvironmentId: props.ownerEnvironmentId,
-    sandboxId: view.id,
-    title: view.title,
-  };
+  const sandbox = { ownerEnvironmentId: props.ownerEnvironmentId, view: view };
   const stage = sandboxLaunchStageIndex(view.status);
 
   if (view.status._tag === "failed") {
@@ -154,7 +150,9 @@ function SandboxProgress(props: {
 
   if (stage === null) {
     return (
-      <p className="text-muted-foreground text-sm">{SANDBOX_STATUS_LABEL[view.status._tag]}</p>
+      <p className="text-muted-foreground text-sm">
+        {view.status._tag === "ready" ? "Opening thread" : SANDBOX_STATUS_LABEL[view.status._tag]}
+      </p>
     );
   }
 

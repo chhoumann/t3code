@@ -45,11 +45,7 @@ function StoppedSandboxRow(props: {
   const { sandbox } = props;
   const navigate = useNavigate();
   const { setDesired, confirmAndDelete } = useSandboxActions();
-  const ref = {
-    ownerEnvironmentId: props.ownerEnvironmentId,
-    sandboxId: sandbox.id,
-    title: sandbox.title,
-  };
+  const ref = { ownerEnvironmentId: props.ownerEnvironmentId, view: sandbox };
   const resume = async () => {
     if (!(await setDesired(ref, "running"))) return;
     await navigate({
