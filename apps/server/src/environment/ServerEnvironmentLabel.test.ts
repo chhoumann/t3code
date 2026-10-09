@@ -35,15 +35,17 @@ const layerProcessRunnerTest = Layer.succeed(
 );
 const layerNoopFileSystem = FileSystem.layerNoop({});
 const layerTest = Layer.merge(layerNoopFileSystem, layerProcessRunnerTest);
-const layerLinuxMachineInfo = Layer.merge(
-  layerProcessRunnerTest,
-  FileSystem.layerNoop({
-    exists: (path) => Effect.succeed(path === "/etc/machine-info"),
-    readFileString: (path) =>
-      path === "/etc/machine-info"
-        ? Effect.succeed('PRETTY_HOSTNAME="Build Agent 01"\nICON_NAME="computer-vm"\n')
-        : Effect.succeed(""),
-  }),
+const layerMachineInfo = (machineInfo: string) =>
+  Layer.merge(
+    layerProcessRunnerTest,
+    FileSystem.layerNoop({
+      exists: (path) => Effect.succeed(path === "/etc/machine-info"),
+      readFileString: (path) =>
+        path === "/etc/machine-info" ? Effect.succeed(machineInfo) : Effect.succeed(""),
+    }),
+  );
+const layerLinuxMachineInfo = layerMachineInfo(
+  'PRETTY_HOSTNAME="Build Agent 01"\nICON_NAME="computer-vm"\n',
 );
 const withHostPlatform = <ROut, E, RIn>(
   layer: Layer.Layer<ROut, E, RIn>,
@@ -109,6 +111,18 @@ describe("resolveServerEnvironmentLabel", () => {
 
       expect(result).toBe("Build Agent 01");
       expect(runMock).not.toHaveBeenCalled();
+    }),
+  );
+
+  it.effect("reads a PRETTY_HOSTNAME that systemd escaped in machine-info", () =>
+    Effect.gen(function* () {
+      // As `hostnamectl set-hostname --pretty` writes it.
+      const machineInfo = String.raw`PRETTY_HOSTNAME="Add \"seed\" to C:\\tmp for \$5"` + "\n";
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+      }).pipe(Effect.provide(withHostPlatform(layerMachineInfo(machineInfo), "linux", "buildbox")));
+
+      expect(result).toBe(String.raw`Add "seed" to C:\tmp for $5`);
     }),
   );
 

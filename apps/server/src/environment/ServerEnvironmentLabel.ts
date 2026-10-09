@@ -48,20 +48,41 @@ function normalizeLabel(value: string | null | undefined): string | null {
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * An env-file value as systemd reads it: single quotes are literal, double
+ * quotes undo the backslash systemd puts before `"`, `\`, `` ` `` and `$`, and
+ * outside quotes a backslash escapes the next character.
+ */
+function unquoteEnvFileValue(value: string): string {
+  let result = "";
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < value.length; index++) {
+    const char = value.charAt(index);
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else result += char;
+    } else if (char === "\\" && index + 1 < value.length) {
+      const next = value.charAt(++index);
+      result += quote === '"' && !'"\\`$'.includes(next) ? char + next : next;
+    } else if (quote === '"') {
+      if (char === '"') quote = null;
+      else result += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else {
+      result += char;
+    }
+  }
+  return result;
+}
+
 function parseMachineInfoValue(raw: string, key: string): string | null {
   for (const line of raw.split(/\r?\n/g)) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#") || !trimmed.startsWith(`${key}=`)) {
       continue;
     }
-    const value = trimmed.slice(key.length + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      return normalizeLabel(value.slice(1, -1));
-    }
-    return normalizeLabel(value);
+    return normalizeLabel(unquoteEnvFileValue(trimmed.slice(key.length + 1).trim()));
   }
   return null;
 }
