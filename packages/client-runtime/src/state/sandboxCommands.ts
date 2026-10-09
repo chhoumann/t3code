@@ -20,6 +20,12 @@ import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
 import { type AtomCommand, createEnvironmentRpcCommand } from "./runtime.ts";
 
+/**
+ * How long a resume may take to be reported back. A resume takes a minute or
+ * two; past this the owner may be gone, and the thread's other commands wait
+ * behind this one.
+ */
+const RESUME_TIMEOUT = Duration.minutes(10);
 /** How long a device may take to reconnect to a sandbox once its owner reports it back. */
 const RECONNECT_TIMEOUT = Duration.minutes(2);
 
@@ -106,6 +112,15 @@ const awaitSandboxBack = (
     ),
     Stream.filter((tag) => !RESUMABLE.has(tag)),
     Stream.runHead,
+    Effect.timeoutOrElse({
+      duration: RESUME_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          notBack(
+            "The sandbox was not back within 10 minutes, so the thread stays archived. Unarchive it again once the sandbox runs.",
+          ),
+        ),
+    }),
     Effect.flatMap((tag) =>
       Option.getOrUndefined(tag) === "ready"
         ? Effect.void
