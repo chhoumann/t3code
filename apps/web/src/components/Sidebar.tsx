@@ -135,6 +135,9 @@ import {
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
+import { useSandboxActions } from "../hooks/useSandboxActions";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { sandboxes } from "../state/sandboxes";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -2389,6 +2392,7 @@ export default function Sidebar() {
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
+  const { confirmAndDelete: confirmAndDeleteSandbox } = useSandboxActions();
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -4602,6 +4606,7 @@ export default function Sidebar() {
         const isPinned = thread.pinnedAt != null;
         // Presets resolve at menu-open time (same as the popover).
         const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const sandbox = appAtomRegistry.get(sandboxes.indexAtom).get(threadRef.environmentId);
         const threadProjectGroup =
           projectGroupsRef.current.find((project) =>
             project.memberProjectRefs.some(
@@ -4631,6 +4636,7 @@ export default function Sidebar() {
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
+              isSandbox: sandbox !== undefined,
               supports: {
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -4797,6 +4803,14 @@ export default function Sidebar() {
             }
             return;
           }
+          case "delete-sandbox":
+            if (sandbox === undefined) return;
+            await confirmAndDeleteSandbox({
+              ownerEnvironmentId: sandbox.ownerEnvironmentId,
+              sandboxId: sandbox.sandboxId,
+              title: sandbox.view.title,
+            });
+            return;
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -4837,6 +4851,7 @@ export default function Sidebar() {
       attemptUnpin,
       attemptUnsettle,
       attemptUnsnooze,
+      confirmAndDeleteSandbox,
       confirmThreadArchive,
       confirmThreadDelete,
       copyBranchToClipboard,

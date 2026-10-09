@@ -88,6 +88,10 @@ import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import { useSandboxActions } from "../../hooks/useSandboxActions";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { sandboxes } from "../../state/sandboxes";
+import { StoppedSandboxesSection } from "./StoppedSandboxesSection";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
   getCustomModelOptionsByInstance,
@@ -3408,6 +3412,7 @@ export function GeneralSettingsPanel() {
 export function ArchivedThreadsPanel() {
   const { scope } = useSettingsScope();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
+  const { confirmAndDelete: confirmAndDeleteSandbox } = useSandboxActions();
   const {
     snapshots: archivedSnapshots,
     error: archiveError,
@@ -3467,13 +3472,30 @@ export function ArchivedThreadsPanel() {
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
       const api = readLocalApi();
       if (!api) return;
+      const sandbox = appAtomRegistry.get(sandboxes.indexAtom).get(threadRef.environmentId);
       const clicked = await api.contextMenu.show(
         [
           { id: "unarchive", label: "Unarchive" },
+          ...(sandbox
+            ? [{ id: "delete-sandbox" as const, label: "Delete sandbox", destructive: true }]
+            : []),
           { id: "delete", label: "Delete", destructive: true },
         ],
         position,
       );
+
+      if (clicked === "delete-sandbox" && sandbox) {
+        if (
+          await confirmAndDeleteSandbox({
+            ownerEnvironmentId: sandbox.ownerEnvironmentId,
+            sandboxId: sandbox.sandboxId,
+            title: sandbox.view.title,
+          })
+        ) {
+          refreshArchivedThreads();
+        }
+        return;
+      }
 
       if (clicked === "unarchive") {
         const result = await unarchiveThread(threadRef);
@@ -3508,7 +3530,7 @@ export function ArchivedThreadsPanel() {
         }
       }
     },
-    [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [confirmAndDeleteSandbox, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
   );
 
   return (
@@ -3622,6 +3644,7 @@ export function ArchivedThreadsPanel() {
           </SettingsSection>
         ))
       )}
+      <StoppedSandboxesSection ownerEnvironmentIds={scope.environmentIds} />
     </SettingsPageContainer>
   );
 }

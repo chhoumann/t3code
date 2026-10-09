@@ -17,6 +17,7 @@ const baseState: ThreadActionMenuState = {
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
+  isSandbox: false,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
@@ -214,6 +215,17 @@ describe("buildThreadActionMenuItems", () => {
         },
       }),
     ).toContain("archive");
+  });
+
+  it("offers deleting the sandbox only on a sandbox thread, between archive and delete", () => {
+    expect(ids(baseState)).not.toContain("delete-sandbox");
+    const items = buildThreadActionMenuItems({ ...baseState, isSandbox: true });
+    expect(items.slice(-3).map((item) => item.id)).toEqual(["archive", "delete-sandbox", "delete"]);
+    expect(items.at(-2)?.destructive).toBe(true);
+    expect(
+      buildThreadActionMenuItems({ ...baseState, isSandbox: true, canOperate: false }).at(-2)
+        ?.disabled,
+    ).toBe(true);
   });
 
   it("disables archive while the thread is running", () => {

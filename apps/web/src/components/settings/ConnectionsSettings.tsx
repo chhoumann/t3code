@@ -10,6 +10,7 @@ import {
   TerminalIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
+import { SANDBOX_STATUS_LABEL } from "@t3tools/client-runtime/state/sandboxes";
 import { Atom } from "effect/reactivity";
 import {
   type KeyboardEvent,
@@ -61,6 +62,8 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useSandboxActions } from "../../hooks/useSandboxActions";
+import { sandboxes } from "../../state/sandboxes";
 import { cn } from "../../lib/utils";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
@@ -1586,9 +1589,28 @@ function SavedBackendListRow({
       (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
   );
   const routeCount = connectionRoutes(environment.entry).length;
+  // A sandbox's owner switches its route on and off and removes it, so the
+  // row offers the sandbox's own lifecycle instead.
+  const sandbox = useAtomValue(sandboxes.indexAtom).get(environmentId) ?? null;
+  const sandboxStatus = sandbox?.view.status._tag ?? null;
+  const { setDesired: setSandboxDesired, confirmAndDelete: confirmAndDeleteSandbox } =
+    useSandboxActions();
+  const sandboxRef =
+    sandbox === null
+      ? null
+      : {
+          ownerEnvironmentId: sandbox.ownerEnvironmentId,
+          sandboxId: sandbox.sandboxId,
+          title: sandbox.view.title,
+        };
   const subtitleText = [
+    sandbox ? "Sandbox" : null,
     environmentTransportLabel(environment, connectedTarget),
-    resumingServerUpdate ? "Restarting" : status.text,
+    sandboxStatus !== null && sandboxStatus !== "ready"
+      ? SANDBOX_STATUS_LABEL[sandboxStatus]
+      : resumingServerUpdate
+        ? "Restarting"
+        : status.text,
     enabled && versionMismatch ? serverVersion : null,
   ]
     .filter((value): value is string => value !== null)
@@ -1737,22 +1759,36 @@ function SavedBackendListRow({
           appearance="icon"
         />
       ) : null}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Switch
-              size="sm"
-              checked={enabled}
-              disabled={isRemoving || unsupported}
-              aria-label={`${enabled ? "Switch off" : "Switch on"} ${environment.label}`}
-              onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
-            />
+      {sandboxRef !== null ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={sandboxStatus !== "ready" && sandboxStatus !== "stopped"}
+          onClick={() =>
+            void setSandboxDesired(sandboxRef, sandboxStatus === "stopped" ? "running" : "stopped")
           }
-        />
-        <TooltipPopup side="top">
-          {unsupported ? "Client not supported" : enabled ? "Switch off" : "Switch on"}
-        </TooltipPopup>
-      </Tooltip>
+        >
+          {sandboxStatus === "stopped" ? "Resume" : "Stop"}
+        </Button>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Switch
+                size="sm"
+                checked={enabled}
+                disabled={isRemoving || unsupported}
+                aria-label={`${enabled ? "Switch off" : "Switch on"} ${environment.label}`}
+                onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
+              />
+            }
+          />
+          <TooltipPopup side="top">
+            {unsupported ? "Client not supported" : enabled ? "Switch off" : "Switch on"}
+          </TooltipPopup>
+        </Tooltip>
+      )}
       <Menu>
         <MenuTrigger
           render={
@@ -1783,9 +1819,18 @@ function SavedBackendListRow({
             <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
           ) : null}
           <MenuSeparator />
-          <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
-            {isRemoving ? "Removing…" : "Remove from this device…"}
-          </MenuItem>
+          {sandboxRef !== null ? (
+            <MenuItem
+              variant="destructive"
+              onClick={() => void confirmAndDeleteSandbox(sandboxRef)}
+            >
+              Delete sandbox…
+            </MenuItem>
+          ) : (
+            <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
+              {isRemoving ? "Removing…" : "Remove from this device…"}
+            </MenuItem>
+          )}
         </MenuPopup>
       </Menu>
     </EnvironmentRow>

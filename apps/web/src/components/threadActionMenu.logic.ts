@@ -28,6 +28,7 @@ export type ThreadActionMenuId =
   | "copy-branch"
   | "copy-thread-id"
   | "archive"
+  | "delete-sandbox"
   | "delete";
 
 export type DraftActionMenuId =
@@ -90,6 +91,8 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
+  /** The thread lives in a sandbox, which its owner can delete outright. */
+  readonly isSandbox: boolean;
   readonly supports: {
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
@@ -242,6 +245,16 @@ export function buildThreadActionMenuItems(
       disabled: state.isRunning,
       separatorBefore: true,
     },
+    ...(state.isSandbox
+      ? [
+          {
+            id: "delete-sandbox" as const,
+            label: "Delete sandbox",
+            destructive: true,
+            icon: "trash",
+          },
+        ]
+      : []),
     {
       id: "delete",
       label: "Delete",

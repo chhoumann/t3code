@@ -43,7 +43,10 @@ import {
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { sandboxes } from "../state/sandboxes";
 import { useCopyToClipboard } from "./useCopyToClipboard";
+import { useSandboxActions } from "./useSandboxActions";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
@@ -104,6 +107,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const { confirmAndDelete: confirmAndDeleteSandbox } = useSandboxActions();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -147,6 +151,7 @@ export function useThreadActionMenu(input: {
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+        const sandbox = appAtomRegistry.get(sandboxes.indexAtom).get(threadRef.environmentId);
         const items = buildThreadActionMenuItems({
           canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
           branch: thread.branch ?? null,
@@ -158,6 +163,7 @@ export function useThreadActionMenu(input: {
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
           isRunning: !threadRuntimeCanArchive(thread.runtime),
+          isSandbox: sandbox !== undefined,
           supports,
           snoozePresets,
         });
@@ -309,6 +315,14 @@ export function useThreadActionMenu(input: {
             }
             return;
           }
+          case "delete-sandbox":
+            if (sandbox === undefined) return;
+            await confirmAndDeleteSandbox({
+              ownerEnvironmentId: sandbox.ownerEnvironmentId,
+              sandboxId: sandbox.sandboxId,
+              title: sandbox.view.title,
+            });
+            return;
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -342,6 +356,7 @@ export function useThreadActionMenu(input: {
     },
     [
       archiveThread,
+      confirmAndDeleteSandbox,
       confirmThreadArchive,
       confirmThreadDelete,
       confirmAndUnpinThread,

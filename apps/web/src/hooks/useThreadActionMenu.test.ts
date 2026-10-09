@@ -110,6 +110,11 @@ vi.mock("../components/Sidebar.snooze", () => ({
 vi.mock("./useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: () => recordEffect("copy") }),
 }));
+vi.mock("./useSandboxActions", () => ({
+  useSandboxActions: () => ({ confirmAndDelete: async () => recordEffect("delete-sandbox") }),
+}));
+vi.mock("../state/sandboxes", () => ({ sandboxes: { indexAtom: "sandbox-index" } }));
+vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: { get: () => new Map() } }));
 vi.mock("./useHandleNewThread", () => ({
   useNewThreadHandler: () => async () => recordEffect("draft"),
 }));
