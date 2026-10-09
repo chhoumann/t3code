@@ -40,8 +40,14 @@ import { RpcClient, RpcSerialization } from "effect/rpc";
 import { Socket } from "effect/socket";
 
 import {
+  type ManagedSandboxMarker,
+  SANDBOX_OWNER_SUBJECT,
+  encodeManagedSandboxMarker,
+} from "./ManagedSandbox.ts";
+import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
+  SANDBOX_MANAGED_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_STAGED_ENV_FILE,
   SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
@@ -208,7 +214,10 @@ export class SandboxGuest extends Context.Service<
     readonly writeBootInputs: (
       account: SandboxProviderAccount,
       machineId: ProviderMachineId,
-      inputs: SandboxMachineCredentials & { readonly tarball: Uint8Array | null },
+      inputs: SandboxMachineCredentials & {
+        readonly tarball: Uint8Array | null;
+        readonly managed: ManagedSandboxMarker;
+      },
     ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
     /** Rewrites the account credentials after a boot, restarting what they changed. */
     readonly refreshCredentials: (
@@ -304,6 +313,10 @@ const make = Effect.gen(function* () {
         path: SANDBOX_MACHINE_SETUP_SCRIPT,
         content: encode(inputs.machineSetupScript),
       });
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_MANAGED_FILE,
+        content: encode(encodeManagedSandboxMarker(inputs.managed)),
+      });
       const tarball = inputs.tarball;
       if (tarball !== null) {
         const parts = Math.ceil(tarball.length / UPLOAD_CHUNK_BYTES);
@@ -373,7 +386,7 @@ const make = Effect.gen(function* () {
       "mint-session",
       account,
       machineId,
-      `T3CODE_HOME=${shellQuote(SANDBOX_T3_HOME)} ${shellQuote(SANDBOX_T3_BIN)} auth session issue --json --label sandbox-owner`,
+      `T3CODE_HOME=${shellQuote(SANDBOX_T3_HOME)} ${shellQuote(SANDBOX_T3_BIN)} auth session issue --json --label sandbox-owner --subject ${SANDBOX_OWNER_SUBJECT}`,
       60,
     ).pipe(
       Effect.flatMap((stdout) =>

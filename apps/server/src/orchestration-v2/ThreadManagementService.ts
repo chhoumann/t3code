@@ -38,6 +38,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
@@ -443,6 +444,7 @@ const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const layerScope = yield* Effect.scope;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+  const managedSandbox = yield* ManagedSandbox.ManagedSandbox;
 
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
@@ -510,7 +512,16 @@ const make = Effect.gen(function* () {
     );
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(Effect.andThen(orchestrator.dispatch(command)));
+    (command.type === "thread.archive" || command.type === "thread.delete"
+      ? ManagedSandbox.guardManaged(managedSandbox, {
+          operation: command.type === "thread.archive" ? "archive-thread" : "delete-thread",
+          threadId: command.threadId,
+        })
+      : Effect.void
+    ).pipe(
+      Effect.andThen(ensureCommandTranscripts(command)),
+      Effect.andThen(orchestrator.dispatch(command)),
+    );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(

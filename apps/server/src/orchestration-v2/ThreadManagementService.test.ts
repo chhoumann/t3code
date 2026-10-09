@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   MessageId,
   NodeId,
   type OrchestrationV2Command,
@@ -10,6 +11,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  SandboxId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -21,6 +23,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -510,3 +513,61 @@ it.effect.each([
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
 );
+
+it.effect("a sandbox archives or deletes its seed thread only for its owner", () => {
+  const seed = ThreadId.make("thread:sandbox-seed");
+  const other = ThreadId.make("thread:sandbox-other");
+  const dispatched: Array<string> = [];
+  const layerTest = ThreadManagementService.layer.pipe(
+    Layer.provide(
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(`${command.type} ${"threadId" in command ? command.threadId : ""}`);
+            return { sequence: dispatched.length, storedEvents: [] };
+          }),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ManagedSandbox.ManagedSandbox, {
+        ownerEnvironmentId: EnvironmentId.make("environment:owner"),
+        sandboxId: SandboxId.make("sbx-seed"),
+        projectId: ProjectId.make("project:sandbox-seed"),
+        threadId: seed,
+      }),
+    ),
+  );
+  const command = (
+    type: "thread.archive" | "thread.unarchive" | "thread.delete",
+    threadId: ThreadId,
+  ) => ({ type, commandId: CommandId.make(`${type}:${threadId}`), threadId }) as const;
+
+  return Effect.gen(function* () {
+    const service = yield* ThreadManagementService.ThreadManagementService;
+    const asCaller = (subject: string | null) =>
+      Effect.provideService(ManagedSandbox.CommandCaller, subject === null ? null : { subject });
+
+    const archived = yield* Effect.flip(service.dispatch(command("thread.archive", seed)));
+    expect(archived).toMatchObject({
+      _tag: "SandboxManagedByOwnerError",
+      ownerEnvironmentId: "environment:owner",
+      sandboxId: "sbx-seed",
+      operation: "archive-thread",
+    });
+    const deleted = yield* Effect.flip(
+      service.dispatch(command("thread.delete", seed)).pipe(asCaller("mcp-client")),
+    );
+    expect(deleted).toMatchObject({ operation: "delete-thread" });
+
+    yield* service.dispatch(command("thread.archive", other));
+    yield* service.dispatch(command("thread.unarchive", seed));
+    yield* service
+      .dispatch(command("thread.archive", seed))
+      .pipe(asCaller(ManagedSandbox.SANDBOX_OWNER_SUBJECT));
+    expect(dispatched).toEqual([
+      `thread.archive ${other}`,
+      `thread.unarchive ${seed}`,
+      `thread.archive ${seed}`,
+    ]);
+  }).pipe(Effect.provide(layerTest));
+});

@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  type SandboxManagedByOwnerError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -15,12 +16,17 @@ import {
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import { projectMutationOperation } from "./ProjectMutation.ts";
 
 export const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
-  cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
+  cause:
+    | ProjectService.ProjectServiceError
+    | SandboxManagedByOwnerError
+    | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
   if (
+    cause._tag === "SandboxManagedByOwnerError" ||
     cause._tag === "ProjectNotFoundError" ||
     cause._tag === "ProjectConflictError" ||
     cause._tag === "ProjectNotEmptyError"
@@ -53,8 +59,10 @@ export const layer = HttpApiBuilder.group(
         "mutate",
         Effect.fn("environment.projects.mutate")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
-          const operation = projectMutationOperation(projects, args.payload);
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const operation = projectMutationOperation(projects, args.payload).pipe(
+            Effect.provideService(ManagedSandbox.CommandCaller, { subject: principal.subject }),
+          );
           return yield* startup
             .enqueueCommand(operation)
             .pipe(traceLocalHandlerWork, Effect.catch(failProjectMutation));

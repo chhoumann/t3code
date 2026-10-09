@@ -21,6 +21,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EnvironmentHttpApi,
+  EnvironmentId,
   MessageId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
@@ -50,6 +51,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import serverPackageJson from "../package.json" with { type: "json" };
 import { packSandboxServer } from "./pack-sandbox-server.ts";
 import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
 import { SANDBOX_ENV_FILE } from "../src/sandbox/sandboxBootScript.ts";
@@ -521,6 +523,12 @@ const program = Effect.gen(function* () {
         Layer.provideMerge(BoatSandboxProvider.layer),
         Layer.provideMerge(accountsLayer(apiKey, proxyEnv)),
         Layer.provideMerge(secretStoreLayer),
+        Layer.provideMerge(
+          Layer.succeed(ServerEnvironment.ServerEnvironment, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("sandbox-tracer-owner")),
+            getDescriptor: Effect.die("The tracer has no environment descriptor."),
+          }),
+        ),
         Layer.provideMerge(
           SqlitePersistence.layerFromPath(NodePath.join(databaseDir, "state.sqlite")),
         ),

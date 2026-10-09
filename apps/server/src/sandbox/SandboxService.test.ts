@@ -20,9 +20,11 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
+import type { ManagedSandboxMarker } from "./ManagedSandbox.ts";
 import {
   ProviderMachineId,
   SandboxProvider,
@@ -34,6 +36,7 @@ import * as SandboxService from "./SandboxService.ts";
 
 const ACCOUNT_ID = SandboxAccountId.make("boat-work");
 const GUEST_ENV = EnvironmentId.make("env-guest");
+const OWNER_ENV = EnvironmentId.make("env-owner");
 
 /** An in-memory provider and guest sharing one set of machines, kept across service restarts. */
 const makeWorld = () => {
@@ -44,6 +47,7 @@ const makeWorld = () => {
     createKeys: [] as Array<string>,
     resumes: 0,
     credentialRefreshes: 0,
+    managedMarkers: [] as Array<ManagedSandboxMarker>,
     launchedThreads: [] as Array<string>,
     pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
@@ -94,7 +98,8 @@ const makeWorld = () => {
   });
 
   const guest = SandboxGuest.SandboxGuest.of({
-    writeBootInputs: () => Effect.void,
+    writeBootInputs: (_account, _machineId, inputs) =>
+      Effect.sync(() => void world.managedMarkers.push(inputs.managed)),
     refreshCredentials: () => Effect.sync(() => void (world.credentialRefreshes += 1)),
     readEnvironmentId: (baseUrl) =>
       Effect.sync(() =>
@@ -145,6 +150,12 @@ const makeWorld = () => {
     Layer.provide(Layer.succeed(SandboxProvider, provider)),
     Layer.provide(Layer.succeed(SandboxGuest.SandboxGuest, guest)),
     Layer.provide(Layer.succeed(ServerSecretStore.ServerSecretStore, secretStore)),
+    Layer.provide(
+      Layer.succeed(ServerEnvironment.ServerEnvironment, {
+        getEnvironmentId: Effect.succeed(OWNER_ENV),
+        getDescriptor: Effect.die("unused"),
+      }),
+    ),
     Layer.provide(NodeCrypto.layer),
   );
 
@@ -231,6 +242,15 @@ describe("SandboxService", () => {
         assert.strictEqual((yield* sandboxes.list()).length, 1);
         assert.strictEqual(world.machines.size, 1);
         assert.strictEqual(world.launchedThreads.length, 1);
+        // The guest learns which owner manages it and which seed to guard.
+        assert.deepStrictEqual(world.managedMarkers, [
+          {
+            ownerEnvironmentId: OWNER_ENV,
+            sandboxId: first.id,
+            projectId: world.managedMarkers[0]?.projectId,
+            threadId: world.launchedThreads[0],
+          },
+        ]);
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

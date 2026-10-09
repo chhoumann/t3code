@@ -165,6 +165,25 @@ export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxErr
   missingActions: Schema.optionalKey(Schema.Array(Schema.String)),
 }) {}
 
+/**
+ * A sandbox refused to archive or delete the thread or project it was launched
+ * with, which would leave its machine running. The owner stops or destroys it.
+ */
+export class SandboxManagedByOwnerError extends Schema.TaggedError<SandboxManagedByOwnerError>()(
+  "SandboxManagedByOwnerError",
+  {
+    ownerEnvironmentId: EnvironmentId,
+    sandboxId: SandboxId,
+    operation: Schema.Literals(["archive-thread", "delete-thread", "delete-project"]),
+  },
+) {
+  override get message(): string {
+    return "The environment that owns this sandbox manages its thread and project. Stop or delete the sandbox there instead.";
+  }
+}
+
+export const isSandboxManagedByOwnerError = Schema.is(SandboxManagedByOwnerError);
+
 export const SandboxView = Schema.Struct({
   id: SandboxId,
   accountId: SandboxAccountId,

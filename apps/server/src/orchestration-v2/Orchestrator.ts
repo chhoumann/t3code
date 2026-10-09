@@ -55,6 +55,7 @@ import {
   type ProviderSessionId,
   RunId,
   RuntimeMode,
+  SandboxManagedByOwnerError,
   ThreadLinkedPullRequest,
   ThreadId,
   type TurnItemId,
@@ -262,6 +263,8 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
   OrchestratorThreadAboveModeLimitError,
+  // Raised before dispatch by ThreadManagementService, for a sandbox's seed thread.
+  SandboxManagedByOwnerError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 

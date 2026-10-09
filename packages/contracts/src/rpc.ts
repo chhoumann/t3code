@@ -29,6 +29,7 @@ import {
   SandboxConnectResult,
   SandboxError,
   SandboxLaunchInput,
+  SandboxManagedByOwnerError,
   SandboxUpdateInput,
   SandboxView,
 } from "./sandbox.ts";
@@ -1206,7 +1207,11 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
 const WsProjectsMutateRpc = Rpc.make(WS_METHODS.projectsMutate, {
   payload: ProjectMutation,
   success: Project,
-  error: Schema.Union([ProjectMutationError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectMutationError,
+    SandboxManagedByOwnerError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 // Finds or creates the Scratch project rooted at ServerConfig.scratchWorkspaceRoot.
@@ -1578,7 +1583,11 @@ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
-  error: Schema.Union([OrchestrationV2DispatchCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    OrchestrationV2DispatchCommandError,
+    SandboxManagedByOwnerError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsOrchestrationV2GetTurnDiffRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getTurnDiff, {

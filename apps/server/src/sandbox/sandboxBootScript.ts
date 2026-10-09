@@ -18,6 +18,9 @@ const SANDBOX_INPUTS_DIR = `${SANDBOX_T3_HOME}/sandbox`;
 export const SANDBOX_MACHINE_SETUP_SCRIPT = `${SANDBOX_INPUTS_DIR}/machine-setup.sh`;
 /** Where the owner uploads an unreleased server build. */
 export const SANDBOX_T3_TARBALL = `${SANDBOX_INPUTS_DIR}/t3.tgz`;
+/** Tells the guest server which owner manages it; see `ManagedSandbox`. Relative to T3 home. */
+export const MANAGED_SANDBOX_FILE = "sandbox/managed.json";
+export const SANDBOX_MANAGED_FILE = `${SANDBOX_T3_HOME}/${MANAGED_SANDBOX_FILE}`;
 /** Written by the owner last, once every input is in place. */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
 /** Everything the boot script prints, kept for diagnosing a failed boot. */

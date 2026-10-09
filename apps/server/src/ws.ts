@@ -102,6 +102,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  isSandboxManagedByOwnerError,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
@@ -125,6 +126,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
 import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
 import { toSandboxError } from "./sandbox/sandboxErrors.ts";
 import * as SandboxService from "./sandbox/SandboxService.ts";
@@ -1813,8 +1815,15 @@ const layerWsRpc = (
         return Stream.concat(rpcInitialItems([{ kind: "snapshot" as const, snapshot }]), live);
       });
 
+      // Lets a sandbox tell its owner's admin session apart from every other caller.
+      const withCommandCaller = Effect.provideService(ManagedSandbox.CommandCaller, {
+        subject: currentSession.subject,
+      });
+
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        const result = yield* projectMutationOperation(projectService, mutation);
+        const result = yield* projectMutationOperation(projectService, mutation).pipe(
+          withCommandCaller,
+        );
         if (mutation.type === "project.delete")
           yield* projectCloneTracker.discard(mutation.projectId);
         return result;
@@ -1852,12 +1861,13 @@ const layerWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(Effect.provide(intakeContext), withCommandCaller),
                 )
                 .pipe(
                   Effect.tap(() => recordClientCommandAnalytics(command)),
                   Effect.map((result) => ({ sequence: result.sequence })),
                   Effect.mapError((cause) => {
+                    if (isSandboxManagedByOwnerError(cause)) return cause;
                     const detail = userFacingDispatchErrorMessage(cause);
                     return new OrchestrationV2DispatchCommandError({
                       commandId: command.commandId,
@@ -2690,16 +2700,17 @@ const layerWsRpc = (
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
           startup.enqueueCommand(mutateProject(mutation)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectMutationError({
-                  commandId: mutation.commandId,
-                  message:
-                    cause._tag === "ProjectNotEmptyError"
-                      ? cause.message
-                      : "Failed to mutate project.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              isSandboxManagedByOwnerError(cause)
+                ? cause
+                : new ProjectMutationError({
+                    commandId: mutation.commandId,
+                    message:
+                      cause._tag === "ProjectNotEmptyError"
+                        ? cause.message
+                        : "Failed to mutate project.",
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),

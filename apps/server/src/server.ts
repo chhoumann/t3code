@@ -177,6 +177,7 @@ import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale"
 import * as ServerActivation from "./serverActivation.ts";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as BoatSandboxProvider from "./sandbox/BoatSandboxProvider.ts";
+import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
 import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "./sandbox/SandboxGuest.ts";
 import * as SandboxService from "./sandbox/SandboxService.ts";
@@ -1099,6 +1100,8 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(FetchHttpClient.layer),
       // PR reads, Git operations, and WebSocket discovery share one process limiter.
       Layer.provide(VcsProcess.layer),
+      // Read once at startup, before any service that guards a sandbox's seed is built.
+      Layer.provideMerge(ManagedSandbox.layer),
       Layer.provideMerge(layerPlatformServices),
     );
   }),

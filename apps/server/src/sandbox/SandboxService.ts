@@ -49,6 +49,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import {
   SANDBOX_T3_PORT,
   renderSandboxBootScript,
@@ -346,6 +347,7 @@ const make = Effect.gen(function* () {
   const accounts = yield* SandboxAccounts.SandboxAccounts;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const build = yield* SandboxT3Build;
+  const ownerEnvironmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
   const lifecycleLock = yield* Semaphore.make(1);
@@ -497,6 +499,12 @@ const make = Effect.gen(function* () {
           yield* guest.writeBootInputs(resolved, yield* machineId, {
             ...machineCredentials(resolved),
             tarball,
+            managed: {
+              ownerEnvironmentId,
+              sandboxId: record.id,
+              projectId: record.seed.projectId,
+              threadId: record.seed.threadId,
+            },
           });
           return yield* writeFacts(record, {
             status,
