@@ -639,7 +639,14 @@ const make = Effect.gen(function* () {
   const step = (id: SandboxId) =>
     Effect.gen(function* () {
       const found = yield* readRecord(id);
-      if (Option.isNone(found) || isParked(found.value)) return "park" as const;
+      // A destroyed sandbox only ever settles destroyed again, so its loop ends.
+      if (
+        Option.isNone(found) ||
+        (isParked(found.value) && found.value.status._tag === "destroyed")
+      ) {
+        return "done" as const;
+      }
+      if (isParked(found.value)) return "park" as const;
       const record = found.value;
       const observation = yield* observe(record).pipe(Effect.result);
       // A provider hiccup while looking changes nothing; look again later.
@@ -686,34 +693,40 @@ const make = Effect.gen(function* () {
         case "Watch":
           return "watch" as const;
         case "Settle":
-          return "park" as const;
+          return next.status._tag === "destroyed" ? ("done" as const) : ("park" as const);
         default:
           return "continue" as const;
       }
     });
 
   /**
-   * One sandbox's loop, for as long as the service lives. Between steps it
-   * waits on `wake`, which holds at most one pending request, so a request
-   * made during a step runs the next step at once. A failure restarts the loop.
+   * One sandbox's loop, until it is destroyed. Between steps it waits on
+   * `wake`, which holds at most one pending request, so a request made during
+   * a step runs the next step at once. A failure restarts the loop.
    */
   const reconcile = (id: SandboxId, wake: Queue.Queue<void>) => {
     const waitForWake = (duration: Duration.Duration) =>
       Queue.take(wake).pipe(Effect.timeoutOrElse({ duration, orElse: () => Effect.void }));
-    return step(id).pipe(
-      Effect.flatMap((outcome) => {
+    return Effect.gen(function* () {
+      while (true) {
+        const outcome = yield* step(id);
         switch (outcome) {
+          case "done":
+            return;
           case "continue":
-            return Effect.void;
+            break;
           case "wait":
-            return waitForWake(POLL_INTERVAL);
+            yield* waitForWake(POLL_INTERVAL);
+            break;
           case "watch":
-            return waitForWake(WATCH_INTERVAL);
+            yield* waitForWake(WATCH_INTERVAL);
+            break;
           case "park":
-            return Queue.take(wake);
+            yield* Queue.take(wake);
+            break;
         }
-      }),
-      Effect.forever,
+      }
+    }).pipe(
       Effect.sandbox,
       Effect.tapError((cause) =>
         Effect.logError("sandbox reconcile failed; restarting").pipe(
@@ -724,10 +737,15 @@ const make = Effect.gen(function* () {
         while: (cause) => !Cause.hasInterruptsOnly(cause),
         schedule: RESTART_BACKOFF,
       }),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (wakes.get(id) === wake) wakes.delete(id);
+        }),
+      ),
     );
   };
 
-  /** Each sandbox's wake signal; read and written only by the dispatcher below. */
+  /** The wake signal of each sandbox whose loop runs; a loop removes its own when it ends. */
   const wakes = new Map<SandboxId, Queue.Queue<void>>();
   const kicks = yield* Queue.unbounded<SandboxId>();
   yield* Queue.take(kicks).pipe(

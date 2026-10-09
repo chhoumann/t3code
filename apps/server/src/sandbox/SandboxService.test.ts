@@ -556,6 +556,28 @@ describe("SandboxService", () => {
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
+  it.effect("does nothing for a launch retried after its sandbox was destroyed", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-late-retry");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        yield* sandboxes.update({ id, desired: "destroyed" });
+        yield* awaitGone(id);
+
+        const retried = yield* sandboxes.launch(launchInput(id));
+        assert.strictEqual(retried.status._tag, "destroyed");
+        yield* TestClock.adjust(Duration.hours(1));
+        assert.strictEqual(world.createKeys.length, 1);
+        assert.deepStrictEqual(yield* sandboxes.list(), []);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
   it.effect("lets a refused delete be asked again", () =>
     Effect.gen(function* () {
       const { world, start } = makeWorld();
