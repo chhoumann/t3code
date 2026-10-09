@@ -322,7 +322,7 @@ const resolveStartupBrowserTarget = Effect.gen(function* () {
       ? `http://${formatHostForUrl(serverConfig.host)}:${serverConfig.port}`
       : localUrl;
   const baseTarget = serverConfig.devUrl?.toString() ?? bindUrl;
-  return serverConfig.mode === "desktop"
+  return serverConfig.mode === "desktop" || serverConfig.noStartupPairing
     ? baseTarget
     : yield* serverAuth.issueStartupPairingUrl(baseTarget);
 });
@@ -585,7 +585,9 @@ const make = (options?: StartupOptions) =>
             Effect.withSpan("server.startup.heartbeat.record"),
             Effect.ignoreCause({ log: true }),
           );
-          if (serverConfig.startupPresentation === "headless") {
+          if (serverConfig.startupPresentation === "headless" && serverConfig.noStartupPairing) {
+            yield* Console.log("T3 Code server is ready.");
+          } else if (serverConfig.startupPresentation === "headless") {
             yield* Effect.logDebug("startup phase: headless access info");
             const accessInfo = yield* issueHeadlessServeAccessInfo();
             yield* runStartupPhase(
@@ -595,7 +597,7 @@ const make = (options?: StartupOptions) =>
           } else {
             yield* Effect.logDebug("startup phase: browser open check");
             const startupBrowserTarget = yield* resolveStartupBrowserTarget;
-            if (serverConfig.mode !== "desktop") {
+            if (serverConfig.mode !== "desktop" && !serverConfig.noStartupPairing) {
               yield* Effect.logInfo(
                 "Authentication required. Open T3 Code using the pairing URL.",
               ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));
@@ -690,5 +692,3 @@ const make = (options?: StartupOptions) =>
 
 export const layerWithOptions = (options?: StartupOptions) =>
   Layer.effect(ServerRuntimeStartup, make(options));
-
-const layer = layerWithOptions();

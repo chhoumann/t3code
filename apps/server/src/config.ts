@@ -92,6 +92,12 @@ export class ServerConfig extends Context.Service<
     readonly devAuthToken?: Redacted.Redacted<string> | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
     readonly noBrowser: boolean;
+    /**
+     * Skips the pairing credential a server otherwise mints and prints at
+     * startup. Set where nobody reads the startup output but agents can read
+     * its log, as on a sandbox machine.
+     */
+    readonly noStartupPairing?: boolean | undefined;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;
     readonly desktopBootstrapSecret?: string | undefined;

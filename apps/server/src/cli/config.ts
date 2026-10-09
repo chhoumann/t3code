@@ -144,6 +144,7 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  noStartupPairing: Config.Boolean("T3CODE_NO_STARTUP_PAIRING").pipe(Config.withDefault(false)),
   bootstrapFd: Config.Int("T3CODE_BOOTSTRAP_FD").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -464,6 +465,7 @@ export const resolveServerConfig = (
       devUrl,
       ...(devAuthToken === undefined ? {} : { devAuthToken }),
       devAllowedOrigins: env.devAllowedOrigins,
+      ...(env.noStartupPairing ? { noStartupPairing: true } : {}),
       noBrowser,
       startupPresentation,
       desktopBootstrapToken,

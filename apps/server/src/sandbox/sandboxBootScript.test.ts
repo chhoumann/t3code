@@ -61,6 +61,7 @@ describe("renderSandboxBootScript", () => {
       "[Service]",
       "Environment=T3CODE_HOST=0.0.0.0",
       "Environment=T3CODE_PORT=3773",
+      "Environment=T3CODE_NO_STARTUP_PAIRING=true",
       `EnvironmentFile=${SANDBOX_ENV_FILE}`,
       "UnsetEnvironment=ASCII_TOKEN",
     ]);

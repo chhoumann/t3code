@@ -13,7 +13,7 @@ export const SANDBOX_T3_PORT = 3773;
 /** Account env, loaded by the T3 service and the machine setup unit. */
 export const SANDBOX_ENV_FILE = `${SANDBOX_T3_HOME}/sandbox.env`;
 /** Owner uploads (env, setup script, server tarball) land here. */
-export const SANDBOX_INPUTS_DIR = `${SANDBOX_T3_HOME}/sandbox`;
+const SANDBOX_INPUTS_DIR = `${SANDBOX_T3_HOME}/sandbox`;
 /** The account's machine setup script, run by a system unit on every boot. */
 export const SANDBOX_MACHINE_SETUP_SCRIPT = `${SANDBOX_INPUTS_DIR}/machine-setup.sh`;
 /** Where the owner uploads an unreleased server build. */
@@ -21,7 +21,7 @@ export const SANDBOX_T3_TARBALL = `${SANDBOX_INPUTS_DIR}/t3.tgz`;
 /** Written by the owner last, once every input is in place. */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
 /** Everything the boot script prints, kept for diagnosing a failed boot. */
-export const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
+const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
 /** Stable path to the installed `t3`, for exec calls such as minting sessions. */
 export const SANDBOX_T3_BIN = `${SANDBOX_T3_HOME}/bin/t3`;
 /** Staged by the owner, then swapped in by the refresh command. */
@@ -113,7 +113,8 @@ function renderMachineSetupUnit(): ReadonlyArray<string> {
     `ExecStart=/bin/bash ${SANDBOX_MACHINE_SETUP_SCRIPT}`,
     `StandardOutput=append:${MACHINE_SETUP_LOG}`,
     `StandardError=append:${MACHINE_SETUP_LOG}`,
-    "TimeoutStartSec=600",
+    // Leaves room in Boat's 600-second exec for the refresh command that restarts this unit.
+    "TimeoutStartSec=540",
     "",
     "[Install]",
     "WantedBy=multi-user.target",
@@ -153,6 +154,8 @@ export function renderSandboxBootScript(source: SandboxT3Source): string {
     "[Service]",
     "Environment=T3CODE_HOST=0.0.0.0",
     `Environment=T3CODE_PORT=${SANDBOX_T3_PORT}`,
+    // Agents in the sandbox read the service log; a live admin pairing token must not be in it.
+    "Environment=T3CODE_NO_STARTUP_PAIRING=true",
     `EnvironmentFile=${SANDBOX_ENV_FILE}`,
     // The machine's own Boat token must not reach agents running under T3.
     "UnsetEnvironment=ASCII_TOKEN",

@@ -323,8 +323,8 @@ const make = Effect.gen(function* () {
         account,
         machineId,
         renderRefreshCredentialsCommand(),
-        // Re-running the machine setup can take as long as its unit allows.
-        660,
+        // Boat's longest exec; the setup unit's own timeout is shorter.
+        600,
       );
       yield* Effect.logInfo("sandbox credentials refreshed").pipe(
         Effect.annotateLogs({ machineId, outcome: outcome.trim().split("\n").at(-1) ?? "" }),

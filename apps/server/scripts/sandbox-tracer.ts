@@ -1,13 +1,14 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - host-side live verifier that packs with Node's filesystem.
 /**
- * End-to-end tracer for sandbox environments against real Boat. Run from the
- * repository root with a Boat key in the environment:
+ * End-to-end tracer for sandbox environments against real Boat, through the
+ * durable SandboxService. Run from the repository root with a Boat key in the
+ * environment:
  *
  *   node --env-file=.env.local apps/server/scripts/sandbox-tracer.ts [--skip-build]
  *
- * Builds and packs this checkout's server, boots one Boat sandbox from it,
- * launches a seed thread twice, stops and resumes the machine, and destroys it
- * on every exit path. Tokens are never printed.
+ * Packs this checkout's server, launches one sandbox to ready, stops and
+ * resumes it twice (changing the account env between resumes), and destroys
+ * it on every exit path. Tokens are never printed.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -18,46 +19,41 @@ import * as NodeUtil from "node:util";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
-  CommandId,
   EnvironmentHttpApi,
-  MessageId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-  ProjectId,
   ProviderDriverKind,
-  ThreadId,
+  SandboxAccountId,
+  SandboxId,
+  type SandboxStatus,
+  type SandboxView,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { Socket } from "effect/socket";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import serverPackageJson from "../package.json" with { type: "json" };
 import { stageRuntimeExternals } from "../../../scripts/build-cli-archive.ts";
+import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
+import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
-import {
-  SANDBOX_BOOT_LOG,
-  SANDBOX_ENV_FILE,
-  SANDBOX_INPUTS_DIR,
-  SANDBOX_INPUTS_READY_FILE,
-  SANDBOX_MACHINE_SETUP_SCRIPT,
-  SANDBOX_T3_PORT,
-  renderSandboxBootScript,
-} from "../src/sandbox/sandboxBootScript.ts";
+import { SANDBOX_ENV_FILE } from "../src/sandbox/sandboxBootScript.ts";
+import * as SandboxAccounts from "../src/sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "../src/sandbox/SandboxGuest.ts";
-import {
-  SandboxProvider,
-  type ProviderMachineId,
-  type ProviderMachineState,
-} from "../src/sandbox/SandboxProvider.ts";
+import { ProviderMachineId, SandboxProvider } from "../src/sandbox/SandboxProvider.ts";
+import * as SandboxService from "../src/sandbox/SandboxService.ts";
 
 const { values: flags } = NodeUtil.parseArgs({
   options: {
@@ -68,15 +64,19 @@ const { values: flags } = NodeUtil.parseArgs({
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "../../..");
 const serverDir = NodePath.join(repoRoot, "apps/server");
-const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
-const TARBALL_PATH = `${SANDBOX_INPUTS_DIR}/t3.tgz`;
-const FIXTURE_REMOTE = "/home/user/fixtures/remote.git";
-const SETUP_PROOF_FILE = ".t3-setup-proof";
-const SETUP_FIXTURE_SCRIPT = {
-  name: "Setup",
-  command: `echo setup-ran > ${SETUP_PROOF_FILE}`,
-  runOnWorktreeCreate: true,
-};
+const ACCOUNT_ID = SandboxAccountId.make("tracer");
+const SETUP_RUNS_LOG = "/home/user/machine-setup-runs.log";
+/** Appends the boot's id and the account env's round on every run of the setup unit. */
+const MACHINE_SETUP_SCRIPT = [
+  "#!/usr/bin/env bash",
+  "set -euo pipefail",
+  `echo "$(cat /proc/sys/kernel/random/boot_id) round=$T3_TRACER_ROUND" >> ${SETUP_RUNS_LOG}`,
+  "",
+].join("\n");
+const STEP_TIMEOUT = "10 minutes";
+const decodeSeed = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ threadId: Schema.String })),
+);
 
 class TracerError extends Schema.TaggedError<TracerError>()("TracerError", {
   reason: Schema.String,
@@ -94,7 +94,7 @@ const step = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>) =>
     const startedAt = yield* Clock.currentTimeMillis;
     const result = yield* effect;
     const now = yield* Clock.currentTimeMillis;
-    yield* say(`${name.padEnd(44)} ${seconds(now - startedAt).padStart(6)}s`);
+    yield* say(`${name.padEnd(48)} ${seconds(now - startedAt).padStart(6)}s`);
     return result;
   });
 
@@ -133,181 +133,196 @@ const packServer = Effect.gen(function* () {
   });
   const tarball = NodePath.join(stage, "t3.tgz");
   yield* run("tar", ["--no-mac-metadata", "-czf", tarball, "-C", stage, "t3"], stage);
-  return { tarball, bytes: NodeFS.readFileSync(tarball) };
+  return new Uint8Array(NodeFS.readFileSync(tarball));
 });
 
-const program = Effect.gen(function* () {
-  const provider = yield* SandboxProvider;
-  const guest = yield* SandboxGuest.SandboxGuest;
-  const httpClient = yield* HttpClient.HttpClient;
-  const runStartedAt = yield* Clock.currentTimeMillis;
-  const account = { apiKey: yield* Config.Redacted("BOAT_DEV_API_KEY") };
-  const api = (baseUrl: string) =>
-    HttpApiClient.make(EnvironmentHttpApi, { baseUrl }).pipe(
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-    );
+/** The account env's round; bumped before a resume to prove the env file is rewritten. */
+let envRound = 1;
 
-  const packed = yield* step("pack server", packServer);
-  yield* say(`tarball ${(packed.bytes.length / 1024 / 1024).toFixed(1)} MiB`);
-
-  const idempotencyKey = `t3-sandbox-tracer-${NodeCrypto.randomUUID()}`;
-  yield* say(`create idempotency key ${idempotencyKey}`);
-  const machine = yield* step(
-    "create sandbox",
-    Effect.acquireRelease(
-      provider.create(account, {
-        idempotencyKey,
-        size: "small",
-        ttlSeconds: 3600,
-        env: {},
-        template: null,
-        providerEnvironment: null,
-        setupScript: renderSandboxBootScript({
-          kind: "tarball",
-          version: serverPackageJson.version,
-        }),
-      }),
-      (created) =>
-        step(
-          "destroy sandbox",
-          provider.destroy(account, created.id).pipe(
-            Effect.andThen(
-              provider.inspect(account, created.id).pipe(
-                Effect.flatMap((seen) =>
-                  seen === null
-                    ? Effect.void
-                    : Effect.fail(new TracerError({ reason: "still present" })),
-                ),
-                Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 60 }),
-              ),
-            ),
-          ),
-        ).pipe(
-          Effect.andThen(say(`destroyed ${created.id} (inspect -> 404)`)),
-          Effect.catch((error) =>
-            Console.error(`[tracer] DESTROY FAILED for ${created.id}: ${error.message}`),
-          ),
-        ),
-    ),
-  );
-  const id: ProviderMachineId = machine.id;
-  yield* say(`created Boat sandbox ${id}`);
-
-  const awaitState = (want: ProviderMachineState) =>
-    provider.inspect(account, id).pipe(
-      Effect.filterOrFail(
-        (seen) => seen?.state === want,
-        (seen) => new TracerError({ reason: `state ${seen?.state}` }),
-      ),
-      Effect.retry({ schedule: Schedule.spaced("1 second"), times: 180 }),
-    );
-  yield* step("machine running", awaitState("running"));
-
-  yield* step(
-    "upload inputs",
-    Effect.gen(function* () {
-      yield* provider.writeFile(account, id, {
-        path: SANDBOX_ENV_FILE,
-        content: new TextEncoder().encode("# The tracer passes no account env.\n"),
-      });
-      yield* provider.writeFile(account, id, {
-        path: SANDBOX_MACHINE_SETUP_SCRIPT,
-        content: new Uint8Array(),
-      });
-      const parts = Math.ceil(packed.bytes.length / UPLOAD_CHUNK_BYTES);
-      yield* Effect.forEach(
-        Array.from({ length: parts }, (_, index) => index),
-        (index) =>
-          provider.writeFile(account, id, {
-            path: `${TARBALL_PATH}.part-${String(index).padStart(3, "0")}`,
-            content: packed.bytes.subarray(
-              index * UPLOAD_CHUNK_BYTES,
-              (index + 1) * UPLOAD_CHUNK_BYTES,
-            ),
-          }),
-        { concurrency: 3 },
-      );
-      const joined = yield* provider.exec(account, id, {
-        command: `cat '${TARBALL_PATH}'.part-* > '${TARBALL_PATH}' && rm -f '${TARBALL_PATH}'.part-* && sha256sum '${TARBALL_PATH}'`,
-        timeoutSeconds: 60,
-      });
-      const expected = NodeCrypto.createHash("sha256").update(packed.bytes).digest("hex");
-      yield* check(
-        joined.stdout.startsWith(expected),
-        `tarball sha256 matches after ${parts} parts`,
-      );
-      yield* provider.writeFile(account, id, {
-        path: SANDBOX_INPUTS_READY_FILE,
-        content: new Uint8Array(),
-      });
+const accountsLayer = (apiKey: Redacted.Redacted<string>) =>
+  Layer.succeed(
+    SandboxAccounts.SandboxAccounts,
+    SandboxAccounts.SandboxAccounts.of({
+      get: (accountId) =>
+        accountId !== ACCOUNT_ID
+          ? Effect.fail(new SandboxAccounts.SandboxAccountNotFoundError({ accountId }))
+          : Effect.sync(() => ({
+              id: ACCOUNT_ID,
+              provider: "boat" as const,
+              apiKey,
+              env: [
+                { name: "ANTHROPIC_API_KEY", value: Redacted.make("") },
+                { name: "T3_TRACER_ROUND", value: Redacted.make(String(envRound)) },
+              ],
+              machineSetupScript: MACHINE_SETUP_SCRIPT,
+              template: null,
+              providerEnvironment: null,
+              size: "small" as const,
+              stopAfterHours: 1,
+            })),
     }),
   );
 
-  const baseUrl = yield* step(
-    "host port 3773 publicly",
-    provider.host(account, id, SANDBOX_T3_PORT),
-  );
-  yield* say(`guest ${baseUrl}`);
-  // Boat reports the setup script as failed after a resume, so only the first boot checks it.
-  const descriptor = (label: string, watchBootScript: boolean) =>
-    step(
-      label,
-      api(baseUrl).pipe(
-        Effect.flatMap((client) => client.metadata.descriptor()),
-        // Boat's edge can hold a request to a port with no listener yet for minutes.
-        Effect.timeout("5 seconds"),
-        Effect.tapError(() =>
-          provider.inspect(account, id).pipe(
-            Effect.tap((seen) =>
-              watchBootScript
-                ? Effect.void
-                : say(`  waiting: machine ${seen?.state}, setup ${seen?.setup}`),
-            ),
-            Effect.flatMap((seen) =>
-              watchBootScript && seen?.setup === "failed"
-                ? provider
-                    .exec(account, id, {
-                      command: `tail -n 40 '${SANDBOX_BOOT_LOG}'`,
-                      timeoutSeconds: 10,
-                    })
-                    .pipe(
-                      Effect.flatMap((log) =>
-                        Effect.die(
-                          new TracerError({ reason: `the boot script failed:\n${log.stdout}` }),
-                        ),
-                      ),
-                    )
-                : Effect.void,
-            ),
+const secrets = new Map<string, Uint8Array>();
+const secretStoreLayer = Layer.succeed(
+  ServerSecretStore.ServerSecretStore,
+  ServerSecretStore.ServerSecretStore.of({
+    get: (name) => Effect.sync(() => Option.fromUndefinedOr(secrets.get(name))),
+    set: (name, value) => Effect.sync(() => void secrets.set(name, value)),
+    create: (name, value) => Effect.sync(() => void secrets.set(name, value)),
+    getOrCreateRandom: () => Effect.die("unused"),
+    remove: (name) => Effect.sync(() => void secrets.delete(name)),
+  }),
+);
+
+const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
+  Effect.gen(function* () {
+    const sandboxes = yield* SandboxService.SandboxService;
+    const provider = yield* SandboxProvider;
+    const guest = yield* SandboxGuest.SandboxGuest;
+    const sql = yield* SqlClient.SqlClient;
+    const httpClient = yield* HttpClient.HttpClient;
+    const account = { apiKey };
+    const api = (baseUrl: string) =>
+      HttpApiClient.make(EnvironmentHttpApi, { baseUrl }).pipe(
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
+    const id = SandboxId.make(`tracer-${NodeCrypto.randomUUID().slice(0, 8)}`);
+    yield* say(`sandbox ${id}`);
+
+    const storedColumn = (column: "machine_id" | "seed_json") =>
+      sql<Record<string, string | null>>`
+        SELECT ${sql(column)} AS value FROM sandboxes WHERE sandbox_id = ${id}`.pipe(
+        Effect.map((rows) => rows[0]?.["value"] ?? null),
+      );
+    const machineId = storedColumn("machine_id");
+
+    /** Resolves when the sandbox shows `tag`; fails as soon as it shows failed instead, unless told to wait past it. */
+    const awaitStatus = (tag: SandboxStatus["_tag"], options = { failFast: true }) =>
+      Effect.gen(function* () {
+        const seen = yield* sandboxes.subscribe().pipe(
+          Stream.filter(
+            (view: SandboxView) =>
+              view.id === id &&
+              (view.status._tag === tag || (options.failFast && view.status._tag === "failed")),
+          ),
+          Stream.runHead,
+          Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
+        );
+        if (Option.isNone(seen)) {
+          return yield* new TracerError({ reason: `timed out waiting for ${tag}` });
+        }
+        if (seen.value.status._tag !== tag) {
+          return yield* new TracerError({
+            reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
+          });
+        }
+        return seen.value;
+      });
+
+    yield* sandboxes.subscribe().pipe(
+      Stream.filter((view: SandboxView) => view.id === id),
+      Stream.changesWith((a, b) => JSON.stringify(a.status) === JSON.stringify(b.status)),
+      Stream.runForEach((view) =>
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) =>
+            say(`  status ${JSON.stringify(view.status)} at +${seconds(now - runStartedAt)}s`),
           ),
         ),
-        Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 450 }),
       ),
+      Effect.forkScoped,
     );
-  const environment = yield* descriptor("T3 serves /.well-known/t3/environment", true);
-  yield* say(
-    `environment ${environment.environmentId} server ${environment.serverVersion} on ${environment.platform.os}`,
-  );
 
-  const dumpServerLog = provider
-    .exec(account, id, {
-      // The startup banner carries a pairing token and its QR code.
-      command:
-        "grep -avE 'Token:|Pairing URL|pair#token|[█▀▄]' /home/user/.t3/userdata/logs/boot-service.log | tail -n 40",
-      timeoutSeconds: 10,
-    })
-    .pipe(
-      Effect.flatMap((log) => Console.error(`[tracer] guest server log tail:\n${log.stdout}`)),
-      Effect.ignore,
+    const exec = (command: string) =>
+      Effect.gen(function* () {
+        const machine = yield* machineId;
+        if (machine === null) return yield* new TracerError({ reason: "no machine id" });
+        const result = yield* provider.exec(account, ProviderMachineId.make(machine), {
+          command,
+          timeoutSeconds: 30,
+        });
+        return result.stdout.trim();
+      });
+
+    const confirmGone = Effect.gen(function* () {
+      const machine = yield* machineId;
+      if (machine === null) return yield* say(`no machine was stored for ${id}`);
+      const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
+      yield* check(seen === null, `Boat still has ${machine}`);
+      yield* say(`destroyed ${machine} (inspect -> 404)`);
+    });
+    const cleanUp = Effect.gen(function* () {
+      yield* say("cleaning up after a failure");
+      yield* sandboxes.update({ id, desired: "destroyed" }).pipe(Effect.ignore);
+      yield* awaitStatus("destroyed", { failFast: false });
+      yield* confirmGone;
+    }).pipe(
+      Effect.catch((error) =>
+        Console.error(`[tracer] cleanup through the service failed: ${error.message}`).pipe(
+          Effect.andThen(machineId),
+          Effect.flatMap((machine) =>
+            machine === null
+              ? Effect.void
+              : provider.destroy(account, ProviderMachineId.make(machine)).pipe(
+                  Effect.andThen(
+                    provider.inspect(account, ProviderMachineId.make(machine)).pipe(
+                      Effect.filterOrFail(
+                        (found) => found === null,
+                        () => new TracerError({ reason: "still present" }),
+                      ),
+                      Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 60 }),
+                    ),
+                  ),
+                  Effect.andThen(say(`destroyed ${machine} directly (inspect -> 404)`)),
+                ),
+          ),
+        ),
+      ),
+      Effect.catch((error) => Console.error(`[tracer] DESTROY FAILED for ${id}: ${error.message}`)),
     );
-  yield* Effect.gen(function* () {
-    const token = yield* step("mint admin session (exec)", guest.mintAdminSession(account, id));
-    const target = { baseUrl, token };
+    yield* Effect.addFinalizer((exit) => (exit._tag === "Success" ? Effect.void : cleanUp));
+
+    yield* sandboxes.launch({
+      id,
+      accountId: ACCOUNT_ID,
+      title: "Sandbox tracer",
+      message: "Add hello.txt containing 'hello from a sandbox'.",
+      repository: { remoteUrl: flags.repo, commit: null },
+      driver: ProviderDriverKind.make("claudeAgent"),
+      model: "claude-sonnet-4-6",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    const ready = yield* step("launch -> ready", awaitStatus("ready"));
+    const baseUrl = ready.httpBaseUrl ?? "";
+    yield* say(`Boat sandbox ${yield* machineId}, environment ${ready.environmentId}`);
+
+    const token = Redacted.make(new TextDecoder().decode(secrets.get(`sandbox-${id}-admin`)));
+    const seed = yield* decodeSeed((yield* storedColumn("seed_json")) ?? "");
+    const readBack = (label: string) =>
+      step(
+        label,
+        Effect.gen(function* () {
+          const client = yield* api(baseUrl);
+          const shell = yield* client.orchestration.shellSnapshot({
+            headers: {
+              authorization: `Bearer ${Redacted.value(token)}`,
+              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+            },
+          });
+          yield* check(shell.projects.length === 1, `one project (saw ${shell.projects.length})`);
+          yield* check(
+            shell.threads.length === 1 && shell.threads[0]?.id === seed.threadId,
+            `exactly the seed thread (saw ${shell.threads.length})`,
+          );
+        }),
+      );
+    yield* readBack("read back: 1 project, the seed thread once");
 
     yield* step(
       "pairing grant exchanges for a session",
       Effect.gen(function* () {
-        const credential = yield* guest.issuePairingCredential(target, "sandbox tracer client");
+        const credential = yield* guest.issuePairingCredential({ baseUrl, token }, "tracer");
         const client = yield* api(baseUrl);
         const issued = yield* client.auth.token({
           headers: {},
@@ -325,162 +340,81 @@ const program = Effect.gen(function* () {
       }),
     );
 
-    // The project clones from a copy of the public repo that adds a t3.json,
-    // so the run proves the clone's own setup script runs in the guest.
-    yield* step(
-      "prepare remote: public repo + t3.json commit",
-      provider.exec(account, id, {
-        command: [
-          "set -euo pipefail",
-          "rm -rf /home/user/fixtures && mkdir -p /home/user/fixtures && cd /home/user/fixtures",
-          `git clone --quiet '${flags.repo}' work`,
-          `printf '%s' '${JSON.stringify({ scripts: [SETUP_FIXTURE_SCRIPT] })}' > work/t3.json`,
-          "git -C work add t3.json",
-          "git -C work -c user.name=tracer -c user.email=tracer@example.invalid commit --quiet -m 'Add t3.json'",
-          `git clone --quiet --bare work '${FIXTURE_REMOTE}'`,
-        ].join("\n"),
-        timeoutSeconds: 120,
-      }),
+    const pairingLines = yield* exec(
+      "grep -c 'Token:\\|pair#token' /home/user/.t3/userdata/logs/boot-service.log || true",
     );
-    const checkout = {
-      remoteUrl: FIXTURE_REMOTE,
-      commit: null,
-      path: `/home/user/projects/${flags.repo.split("/").at(-1)}`,
-    };
-    const scripts = yield* step(
-      "clone checkout (exec)",
-      guest.cloneCheckout(account, id, checkout),
-    );
-    yield* step("clone checkout again (no-op)", guest.cloneCheckout(account, id, checkout));
-    yield* say(`t3.json scripts imported: ${scripts.length}`);
+    yield* say(`startup pairing lines in the guest service log: ${pairingLines}`);
+    yield* check(pairingLines === "0", "the guest logs no startup pairing token");
 
-    const seed = {
-      projectId: ProjectId.make(NodeCrypto.randomUUID()),
-      threadId: ThreadId.make(NodeCrypto.randomUUID()),
-      commandId: CommandId.make(NodeCrypto.randomUUID()),
-      messageId: MessageId.make(NodeCrypto.randomUUID()),
-      title: "Sandbox tracer",
-      message: "Add hello.txt containing 'hello from a sandbox'.",
-      driver: ProviderDriverKind.make("claudeAgent"),
-      model: "claude-sonnet-4-6",
-      runtimeMode: "full-access" as const,
-      interactionMode: "default" as const,
-    };
-    const first = yield* step(
-      "launch seed thread",
-      guest.launchSeedThread(target, { checkout, scripts, seed }),
+    const distinctBoots = exec(`cut -d' ' -f1 ${SETUP_RUNS_LOG} | sort -u | wc -l`).pipe(
+      Effect.map(Number),
     );
-    const second = yield* step(
-      "launch seed thread again (retry)",
-      guest.launchSeedThread(target, { checkout, scripts, seed }),
-    );
-    yield* check(!first.resumed && second.resumed, "the retry replayed the first launch");
+    yield* check((yield* distinctBoots) === 1, "the machine setup ran on the first boot");
 
-    const orchestrationHeaders = {
-      authorization: `Bearer ${Redacted.value(token)}`,
-      [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-    } as const;
-    const threadSnapshot = api(baseUrl).pipe(
-      Effect.flatMap((client) =>
-        client.orchestration.threadSnapshot({
-          headers: orchestrationHeaders,
-          params: { threadId: seed.threadId },
-        }),
-      ),
-    );
-    const readBack = (label: string) =>
-      step(
-        label,
-        Effect.gen(function* () {
-          const client = yield* api(baseUrl);
-          const shell = yield* client.orchestration.shellSnapshot({
-            headers: orchestrationHeaders,
-          });
-          const { projection } = yield* threadSnapshot;
-          const userMessages = projection.messages.filter((message) => message.role === "user");
-          yield* check(shell.projects.length === 1, `one project (saw ${shell.projects.length})`);
-          yield* check(
-            shell.threads.length === 1 && shell.threads[0]?.id === seed.threadId,
-            `one thread with the chosen id (saw ${shell.threads.length})`,
-          );
-          yield* check(
-            userMessages.length === 1 && userMessages[0]?.id === seed.messageId,
-            `one initial message with the chosen id (saw ${userMessages.length})`,
-          );
-        }),
+    for (const round of [1, 2]) {
+      yield* sandboxes.update({ id, desired: "stopped" });
+      const stopped = yield* step(`round ${round}: stopped`, awaitStatus("stopped"));
+      yield* check(
+        stopped.status._tag === "stopped" && stopped.status.reason === "requested",
+        "stopped as requested",
       );
-    yield* readBack("read back: 1 project, 1 thread, 1 message");
-    yield* check(
-      scripts.length === 1,
-      `the t3.json setup script was imported (saw ${scripts.length})`,
-    );
-    yield* step(
-      "clone's t3.json setup script ran",
-      provider
-        .exec(account, id, {
-          command: `cat '${checkout.path}/${SETUP_PROOF_FILE}'`,
-          timeoutSeconds: 10,
-        })
-        .pipe(
-          Effect.filterOrFail(
-            (result) => result.stdout.trim() === "setup-ran",
-            () => new TracerError({ reason: "no setup proof yet" }),
-          ),
-          Effect.retry({ schedule: Schedule.spaced("1 second"), times: 60 }),
-        ),
-    );
-
-    const terminalRuns = new Set(["completed", "failed", "interrupted", "cancelled"]);
-    const settled = yield* step(
-      "first run reaches a terminal state",
-      threadSnapshot.pipe(
-        Effect.flatMap(({ projection }) =>
-          terminalRuns.has(projection.runs[0]?.status ?? "")
-            ? Effect.succeed(projection)
-            : Effect.fail(new TracerError({ reason: `run ${projection.runs[0]?.status}` })),
-        ),
-        Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 90 }),
-      ),
-    );
-    yield* say(
-      `run ${settled.runs[0]?.status}; instance ${settled.runs[0]?.providerInstanceId}; attempts ${settled.attempts.map((attempt) => attempt.status).join(",")}`,
-    );
-    for (const message of settled.messages.filter((entry) => entry.role !== "user")) {
-      yield* say(`  ${message.role}: ${message.text.slice(0, 300).replaceAll("\n", " ")}`);
+      envRound = round + 1;
+      yield* sandboxes.update({ id, desired: "running" });
+      const resumed = yield* step(`round ${round}: resumed to ready`, awaitStatus("ready"));
+      yield* check(
+        resumed.environmentId === ready.environmentId,
+        "the environment id survived stop and resume",
+      );
+      yield* readBack(`round ${round}: read back: the same seed thread`);
+      const boots = yield* distinctBoots;
+      const lastRun = yield* exec(`tail -n 1 ${SETUP_RUNS_LOG}`);
+      const envFileRound = yield* exec(
+        `grep -c '^T3_TRACER_ROUND="${envRound}"$' ${SANDBOX_ENV_FILE} || true`,
+      );
+      yield* say(
+        `round ${round}: setup ran on ${boots} boots; last run ${lastRun.split(" ").at(-1)}; sandbox.env round ${envRound}: ${envFileRound === "1" ? "yes" : "no"}`,
+      );
+      yield* check(boots === round + 1, `the machine setup ran on boot ${round + 1}`);
+      yield* check(envFileRound === "1", `sandbox.env carries round ${envRound}`);
+      yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
     }
 
-    yield* step(
-      "stop sandbox",
-      provider.stop(account, id).pipe(Effect.andThen(awaitState("stopped"))),
-    );
-    yield* step(
-      "resume sandbox",
-      provider.resume(account, id).pipe(Effect.andThen(awaitState("running"))),
-    );
-    const resumed = yield* descriptor("T3 back on its own after resume", false);
-    yield* check(
-      resumed.environmentId === environment.environmentId,
-      "the environment id survived stop and resume",
-    );
-    yield* readBack("read back after resume: thread still there");
-    const bootRuns = yield* provider.exec(account, id, {
-      command: `grep -c '^+ touch ' '${SANDBOX_BOOT_LOG}'`,
-      timeoutSeconds: 10,
-    });
-    yield* say(`boot script runs recorded in the boot log: ${bootRuns.stdout.trim()}`);
-    yield* say(`OK in ${seconds((yield* Clock.currentTimeMillis) - runStartedAt)}s`);
-  }).pipe(Effect.tapError(() => dumpServerLog));
+    yield* sandboxes.update({ id, desired: "destroyed" });
+    yield* step("destroyed", awaitStatus("destroyed"));
+    yield* confirmGone;
+  });
+
+const program = Effect.gen(function* () {
+  const runStartedAt = yield* Clock.currentTimeMillis;
+  const apiKey = yield* Config.Redacted("BOAT_DEV_API_KEY");
+  const tarball = yield* step("pack server", packServer);
+  yield* say(`tarball ${(tarball.length / 1024 / 1024).toFixed(1)} MiB`);
+  const databaseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-tracer-"));
+
+  yield* trace(apiKey, runStartedAt).pipe(
+    Effect.scoped,
+    Effect.provide(
+      SandboxService.layer.pipe(
+        Layer.provide(
+          Layer.succeed(SandboxService.SandboxT3Build, {
+            kind: "tarball",
+            version: serverPackageJson.version,
+            bytes: tarball,
+          }),
+        ),
+        Layer.provideMerge(SandboxGuest.layer),
+        Layer.provideMerge(BoatSandboxProvider.layer),
+        Layer.provideMerge(accountsLayer(apiKey)),
+        Layer.provideMerge(secretStoreLayer),
+        Layer.provideMerge(
+          SqlitePersistence.layerFromPath(NodePath.join(databaseDir, "state.sqlite")),
+        ),
+        Layer.provideMerge(FetchHttpClient.layer),
+        Layer.provideMerge(Socket.layerWebSocketConstructorGlobal),
+      ),
+    ),
+  );
+  yield* say(`OK in ${seconds((yield* Clock.currentTimeMillis) - runStartedAt)}s`);
 });
 
-program.pipe(
-  Effect.scoped,
-  Effect.provide(
-    SandboxGuest.layer.pipe(
-      Layer.provideMerge(BoatSandboxProvider.layer),
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provideMerge(Socket.layerWebSocketConstructorGlobal),
-      Layer.provideMerge(NodeServices.layer),
-    ),
-  ),
-  NodeRuntime.runMain,
-);
+program.pipe(Effect.scoped, Effect.provide(NodeServices.layer), NodeRuntime.runMain);

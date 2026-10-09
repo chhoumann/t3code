@@ -25,6 +25,7 @@ import {
   type SandboxLaunchInput,
   type SandboxView,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -301,6 +302,7 @@ const make = Effect.gen(function* () {
   const guest = yield* SandboxGuest.SandboxGuest;
   const accounts = yield* SandboxAccounts.SandboxAccounts;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const build = yield* SandboxT3Build;
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
   const lifecycleLock = yield* Semaphore.make(1);
@@ -323,8 +325,13 @@ const make = Effect.gen(function* () {
   const writeFacts = (record: SandboxRecord, facts: ReconcilerFacts) =>
     Effect.gen(function* () {
       const next: SandboxRecord = { ...record, ...facts };
+      const columns = reconcilerColumnsOf(next);
+      const unchanged = Object.entries(columns).every(
+        ([column, value]) => reconcilerColumnsOf(record)[column as keyof typeof columns] === value,
+      );
+      if (unchanged) return next;
       const updatedAt = yield* Clock.currentTimeMillis;
-      yield* sql`UPDATE sandboxes SET ${sql.update({ ...reconcilerColumnsOf(next), updated_at: updatedAt })} WHERE sandbox_id = ${record.id}`.pipe(
+      yield* sql`UPDATE sandboxes SET ${sql.update({ ...columns, updated_at: updatedAt })} WHERE sandbox_id = ${record.id}`.pipe(
         persistence,
       );
       if (
@@ -438,7 +445,6 @@ const make = Effect.gen(function* () {
         }
         case "WriteInputs": {
           const resolved = yield* account();
-          const build = yield* SandboxT3Build;
           const tarball =
             record.spec.t3.kind === "npm"
               ? null
@@ -547,6 +553,14 @@ const make = Effect.gen(function* () {
       if (Option.isNone(found) || isParked(found.value)) return "exit" as const;
       const record = found.value;
       const observation = yield* observe(record).pipe(Effect.result);
+      // A provider hiccup while looking changes nothing; look again later.
+      if (
+        observation._tag === "Failure" &&
+        isProviderError(observation.failure) &&
+        observation.failure.kind === "transient"
+      ) {
+        return record.status._tag === "ready" ? ("watch" as const) : ("wait" as const);
+      }
       const next =
         observation._tag === "Failure"
           ? {
@@ -586,36 +600,38 @@ const make = Effect.gen(function* () {
 
   const reconcile = (id: SandboxId) => {
     let wake: Deferred.Deferred<void> | undefined;
-    const loop: Effect.Effect<void, SandboxPersistenceError> = Effect.gen(function* () {
-      const current = yield* Deferred.make<void>();
-      wake = current;
-      yield* lifecycleLock.withPermits(1)(Effect.sync(() => wakers.set(id, current)));
-      const outcome = yield* step(id);
-      if (outcome === "continue") return yield* loop;
-      if (outcome === "wait" || outcome === "watch") {
-        yield* Deferred.await(current).pipe(
-          Effect.timeoutOrElse({
-            duration: outcome === "wait" ? POLL_INTERVAL : WATCH_INTERVAL,
-            orElse: () => Effect.void,
-          }),
-        );
-        return yield* loop;
+    return Effect.gen(function* () {
+      while (true) {
+        const current = yield* Deferred.make<void>();
+        wake = current;
+        yield* lifecycleLock.withPermits(1)(Effect.sync(() => wakers.set(id, current)));
+        const outcome = yield* step(id);
+        if (outcome === "wait" || outcome === "watch") {
+          yield* Deferred.await(current).pipe(
+            Effect.timeoutOrElse({
+              duration: outcome === "wait" ? POLL_INTERVAL : WATCH_INTERVAL,
+              orElse: () => Effect.void,
+            }),
+          );
+        } else if (outcome === "exit") {
+          // A request that arrived during this step is picked up here rather than lost.
+          const requested = yield* lifecycleLock.withPermits(1)(
+            Effect.gen(function* () {
+              if (yield* Deferred.isDone(current)) return true;
+              wakers.delete(id);
+              return false;
+            }),
+          );
+          if (!requested) return;
+        }
       }
-      // A request that arrived during this step is picked up here rather than lost.
-      const requested = yield* lifecycleLock.withPermits(1)(
-        Effect.gen(function* () {
-          if (yield* Deferred.isDone(current)) return true;
-          wakers.delete(id);
-          return false;
-        }),
-      );
-      if (requested) return yield* loop;
-    });
-    return loop.pipe(
+    }).pipe(
       Effect.tapCause((cause) =>
-        Effect.logError("sandbox reconcile stopped").pipe(
-          Effect.annotateLogs({ sandboxId: id, cause }),
-        ),
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logError("sandbox reconcile stopped").pipe(
+              Effect.annotateLogs({ sandboxId: id, cause }),
+            ),
       ),
       Effect.ensuring(
         lifecycleLock.withPermits(1)(
@@ -646,7 +662,6 @@ const make = Effect.gen(function* () {
         return toView(existing.value);
       }
       const account = yield* accounts.get(input.accountId);
-      const build = yield* SandboxT3Build;
       const now = yield* Clock.currentTimeMillis;
       const record: SandboxRecord = {
         id: input.id,
