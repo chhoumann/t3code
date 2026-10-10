@@ -31,6 +31,7 @@ import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
 import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
@@ -69,6 +70,12 @@ import {
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
+
+// Registration asks for every service the thread tools declare; these cases call none that use them.
+const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+);
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
   const names = new Set<string>();
@@ -154,7 +161,7 @@ it.effect("checks capability through the production registration", () =>
     expect(result.structuredContent).toBeUndefined();
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
@@ -195,7 +202,7 @@ it.effect("returns a bounded public failure without serializing storage causes",
     expect(validate({ sequence: "invalid" }).valid).toBe(false);
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
@@ -310,7 +317,7 @@ it.effect("returns invalid parameter errors through the production registration"
     expect(error._tag).toBe("InvalidParams");
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -335,7 +342,7 @@ it.effect("keeps unexpected handler defects private through the production regis
     ]);
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
@@ -453,7 +460,7 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
     expect(declaredFailure(forked)).toMatchObject({ code: "target_required" });
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
@@ -513,7 +520,7 @@ it.effect("a read-only client reads threads and is refused every write before it
     expect(dispatched).toEqual([]);
   }).pipe(
     Effect.provide(
-      McpHttpServer.layerThreadToolkit.pipe(
+      layerThreadToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(

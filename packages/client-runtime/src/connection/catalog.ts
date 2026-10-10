@@ -39,6 +39,11 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * removed; routes the user paired to the same environment stay.
      */
     managedBy: Schema.optionalKey(EnvironmentId),
+    /**
+     * "tailscale" on a learned route the server found on its Tailscale
+     * interface. A bare 100.64.0.0/10 address could belong to any VPN.
+     */
+    network: Schema.optionalKey(Schema.Literal("tailscale")),
   },
 ) {}
 
