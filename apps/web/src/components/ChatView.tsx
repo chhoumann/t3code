@@ -8823,6 +8823,7 @@ export default function ChatView(props: ChatViewProps) {
       }));
     },
     run: (work) => {
+      if (work.kind === "resume" ? resumeBlocked() : sendBlocked()) return false;
       switch (work.kind) {
         case "send":
           void onComposerSend(
@@ -8831,32 +8832,43 @@ export default function ChatView(props: ChatViewProps) {
             work.submissionIntent,
             work.directAnnotation,
           );
-          return;
+          return true;
         // The composer still edits that run; the hold checked it.
         case "edit-queued":
           void onComposerSend();
-          return;
+          return true;
         case "resume":
           void onComposerResume();
-          return;
+          return true;
       }
     },
   });
+  /** Whether a send can't start now, so `onSend` does nothing. */
+  const sendBlocked = () =>
+    !readCanSendWork(environmentId) ||
+    (isSendBusy && !sendQueuesBehindSetup) ||
+    isConnecting ||
+    isRevertingCheckpoint ||
+    !clientSettingsHydrated ||
+    threadLoadBlocksWork ||
+    environmentChangeRef.current !== null ||
+    sendInFlightRef.current ||
+    feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+    heldSandboxWork.isHolding();
+  /** Whether a resume can't start now, so `onResume` does nothing. */
+  const resumeBlocked = () =>
+    (resumableRunId === null && !hasHeldQueuedRuns) ||
+    isSendBusy ||
+    isResuming ||
+    isConnecting ||
+    isRevertingCheckpoint ||
+    threadDetailLoading ||
+    sendDelivery === "offline" ||
+    sendInFlightRef.current ||
+    heldSandboxWork.isHolding();
 
   const onResume = async () => {
-    if (
-      !activeThread ||
-      (resumableRunId === null && !hasHeldQueuedRuns) ||
-      isSendBusy ||
-      isResuming ||
-      isConnecting ||
-      isRevertingCheckpoint ||
-      threadDetailLoading ||
-      sendDelivery === "offline" ||
-      sendInFlightRef.current
-    ) {
-      return;
-    }
+    if (!activeThread || resumeBlocked()) return;
     if (sendDelivery === "after-wake") {
       heldSandboxWork.hold({ kind: "resume" });
       return;
@@ -9001,18 +9013,7 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     };
-    if (
-      !readCanSendWork(environmentId) ||
-      !activeThread ||
-      (isSendBusy && !sendQueuesBehindSetup) ||
-      isConnecting ||
-      isRevertingCheckpoint ||
-      !clientSettingsHydrated ||
-      threadLoadBlocksWork ||
-      environmentChangeRef.current !== null ||
-      sendInFlightRef.current ||
-      feedbackUploadsInFlightRef.current.has(routeThreadKey)
-    ) {
+    if (!activeThread || sendBlocked()) {
       notifyDirectAnnotationAttached();
       return;
     }

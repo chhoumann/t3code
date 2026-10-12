@@ -35,8 +35,8 @@ interface HeldSandboxWorkInput {
   readonly threadLoading: boolean;
   /** Shows on a thread why its held work did not go, or clears that. */
   readonly setError: (threadKey: string, message: string | null) => void;
-  /** Sends the work again, now that its sandbox is awake. */
-  readonly run: (work: HeldWork) => void;
+  /** Sends the work again, now that its sandbox is awake; false when the thread is busy. */
+  readonly run: (work: HeldWork) => boolean;
 }
 
 /**
@@ -69,8 +69,12 @@ export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
   const settle = useEffectEvent(
     (operation: HeldOperation, step: Exclude<HeldWorkStep, { _tag: "wait" }>) => {
       if (!replaceHeld(operation, null)) return;
-      if (step._tag === "run") input.run(operation.work);
-      else if (step.message !== null) input.setError(operation.threadKey, step.message);
+      if (step._tag === "drop") {
+        if (step.message !== null) input.setError(operation.threadKey, step.message);
+      } else if (!input.run(operation.work)) {
+        const busy = heldWorkFailure(operation.work, "the thread was busy once the sandbox woke.");
+        input.setError(operation.threadKey, busy);
+      }
     },
   );
 
@@ -129,6 +133,8 @@ export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
   return {
     /** Whether the thread on screen holds work, for the composer to show busy. */
     holding: held !== null && held.threadKey === threadKey,
+    /** Whether work is held right now, which turns other sends and resumes away. */
+    isHolding: () => heldRef.current !== null,
     hold,
   };
 }
