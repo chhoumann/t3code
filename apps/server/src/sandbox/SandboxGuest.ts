@@ -207,6 +207,17 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
     } ${CLOSE_EXEC_LOCK}`,
     `  mv ${partial} ${path}`,
+    // A template's clone, which an earlier sandbox made: it moves to this
+    // launch's commit. Once the task branch exists the clone is this
+    // sandbox's own, and an agent's work on it is never reset.
+    `elif ! git -C ${path} rev-parse --verify --quiet ${shellQuote(`refs/heads/${checkout.branch}`)} >/dev/null; then`,
+    `  git -C ${path} remote set-url origin ${origin}`,
+    `  git -C ${path} remote remove upstream 2>/dev/null || true`,
+    ...(forked ? [`  git -C ${path} remote add upstream ${upstream}`] : []),
+    `  git -C ${path} fetch --quiet origin ${
+      checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
+    } ${CLOSE_EXEC_LOCK}`,
+    `  git -C ${path} checkout --quiet --force -b ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
     `cat ${path}/t3.json 2>/dev/null || true`,

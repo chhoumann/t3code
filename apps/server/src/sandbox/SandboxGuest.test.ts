@@ -22,7 +22,7 @@ import { ProviderMachineId, SandboxProvider } from "./SandboxProvider.ts";
 const git = (cwd: string, ...args: ReadonlyArray<string>) =>
   NodeChildProcess.execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 
-const commit = (cwd: string, message: string) =>
+const commit = (cwd: string, message: string, ...args: ReadonlyArray<string>) =>
   git(
     cwd,
     "-c",
@@ -32,6 +32,7 @@ const commit = (cwd: string, message: string) =>
     "commit",
     "--quiet",
     "--allow-empty",
+    ...args,
     "-m",
     message,
   );
@@ -49,12 +50,14 @@ const guestFixture = () => {
   commit(origin, "pinned");
   const pinned = git(origin, "rev-parse", "HEAD");
   const checkout = NodePath.join(root, "project");
-  const script = (checkoutInput: Omit<SandboxGuest.SandboxCheckout, "branch" | "path">) =>
-    `${FLOCK_SHIM}\n${renderCloneCommand({
-      ...checkoutInput,
-      branch: "t3/sandbox-0a1b2c3d",
-      path: checkout,
-    }).replaceAll("/home/user", root)}`;
+  const script = (
+    checkoutInput: Omit<SandboxGuest.SandboxCheckout, "branch" | "path">,
+    branch = "t3/sandbox-0a1b2c3d",
+  ) =>
+    `${FLOCK_SHIM}\n${renderCloneCommand({ ...checkoutInput, branch, path: checkout }).replaceAll(
+      "/home/user",
+      root,
+    )}`;
   return { root, origin, pinned, checkout, script };
 };
 
@@ -102,6 +105,73 @@ describe("renderCloneCommand", () => {
       expect(git(checkout, "remote"), run).toBe("origin");
     }
     NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("moves a template's clone to the launch's commit, then never resets the work on it", () => {
+    const { root, origin: project, checkout, script } = guestFixture();
+    const run = (command: string) =>
+      NodeChildProcess.spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    const hello = NodePath.join(checkout, "hello.txt");
+    NodeFS.writeFileSync(NodePath.join(project, "hello.txt"), "v1\n");
+    git(project, "add", "hello.txt");
+    commit(project, "v1");
+    const earlier = run(
+      script(
+        {
+          remoteUrl: project,
+          projectRemoteUrl: project,
+          commit: git(project, "rev-parse", "HEAD"),
+        },
+        "t3/sandbox-earlier",
+      ),
+    );
+    // What the template's snapshot holds besides the earlier sandbox's commit.
+    NodeFS.writeFileSync(hello, "the earlier agent's edit\n");
+    NodeFS.mkdirSync(NodePath.join(checkout, "node_modules"));
+    NodeFS.writeFileSync(NodePath.join(checkout, "node_modules", "cache"), "");
+    const fork = NodePath.join(root, "fork");
+    NodeChildProcess.execFileSync("git", ["clone", "--quiet", project, fork]);
+    NodeFS.writeFileSync(NodePath.join(fork, "hello.txt"), "v2\n");
+    commit(fork, "v2", "--all");
+    const v2 = git(fork, "rev-parse", "HEAD");
+    const launch = script({ remoteUrl: fork, projectRemoteUrl: project, commit: v2 });
+
+    const first = run(launch);
+    const moved = {
+      branch: git(checkout, "symbolic-ref", "--short", "HEAD"),
+      head: git(checkout, "rev-parse", "HEAD"),
+      hello: NodeFS.readFileSync(hello, "utf8"),
+      cacheKept: NodeFS.existsSync(NodePath.join(checkout, "node_modules", "cache")),
+      remotes: git(checkout, "remote", "-v"),
+    };
+    NodeFS.writeFileSync(hello, "this agent's edit\n");
+    const replay = run(launch);
+    const afterReplay = NodeFS.readFileSync(hello, "utf8");
+    git(checkout, "checkout", "--quiet", "-b", "agent/fix");
+    const replayOnAgentBranch = run(launch);
+    const agentBranch = git(checkout, "symbolic-ref", "--short", "HEAD");
+    const afterAgentBranch = NodeFS.readFileSync(hello, "utf8");
+    NodeFS.rmSync(root, { recursive: true, force: true });
+
+    for (const result of [earlier, first, replay, replayOnAgentBranch]) {
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    }
+    expect(moved).toEqual({
+      branch: "t3/sandbox-0a1b2c3d",
+      head: v2,
+      hello: "v2\n",
+      cacheKept: true,
+      remotes: [
+        `origin\t${fork} (fetch)`,
+        `origin\t${fork} (push)`,
+        `upstream\t${project} (fetch)`,
+        `upstream\t${project} (push)`,
+      ].join("\n"),
+    });
+    expect(afterReplay).toBe("this agent's edit\n");
+    expect(agentBranch).toBe("agent/fix");
+    expect(afterAgentBranch).toBe("this agent's edit\n");
   });
 
   it.effect(
