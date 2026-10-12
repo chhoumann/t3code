@@ -216,8 +216,9 @@ export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boo
  * Wakes the sandbox an environment belongs to when work sent to it needs that
  * (`wakesForWork`): asks the sandbox's owner to run it, unless a resume is
  * already on its way, then waits for the owner to report it running and for
- * this device's socket to it. Succeeds with whether it had to wake; any other
- * environment is left alone.
+ * this device's socket to it. A sandbox its owner already reports running
+ * still waits for that socket, which a wake that timed out on it never got.
+ * Succeeds with whether it had to wake; any other environment is left alone.
  */
 export const wakeSandbox = <E, R>(input: {
   readonly environmentId: EnvironmentId;
@@ -230,7 +231,12 @@ export const wakeSandbox = <E, R>(input: {
     const sandbox = SandboxRegistrations.sandboxIndex(
       yield* SubscriptionRef.get(registrations.value.owners),
     ).get(input.environmentId);
-    if (sandbox === undefined || !wakesForWork(sandbox.view)) return false;
+    if (sandbox === undefined) return false;
+    if (SandboxRegistrations.sandboxPresence(sandbox.view) === "running") {
+      yield* onceConnected(input.environmentId, Effect.void);
+      return false;
+    }
+    if (!wakesForWork(sandbox.view)) return false;
     const { status } = sandbox.view;
     if (status._tag === "failed" && !status.retryable) {
       return yield* notAwake(`The sandbox could not wake. ${status.message}`);

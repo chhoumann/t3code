@@ -243,12 +243,42 @@ describe("wakeSandbox", () => {
     }),
   );
 
-  it.effect("leaves a running sandbox alone", () =>
+  it.effect("leaves a running sandbox this device reaches alone", () =>
     Effect.gen(function* () {
       const device = yield* makeDevice(sandboxView(ready));
+      yield* device.connect;
       expect(yield* device.wake).toBe(false);
       expect(device.changes).toEqual([]);
     }),
+  );
+
+  it.effect(
+    "asked again after this device could not reconnect, waits for that connection alone",
+    () =>
+      Effect.gen(function* () {
+        const device = yield* makeDevice(sandboxView(stopped));
+        const first = yield* Effect.forkChild(Effect.flip(device.wake));
+        yield* Effect.yieldNow;
+        yield* showStatus(device.owners, ready);
+        yield* TestClock.adjust("2 minutes");
+        const couldNotReconnect = {
+          _tag: "SandboxError",
+          message: "The sandbox is awake, but this device could not reconnect to it.",
+        };
+        expect(yield* Fiber.join(first)).toMatchObject(couldNotReconnect);
+
+        const again = yield* Effect.forkChild(Effect.flip(device.wake));
+        yield* TestClock.adjust("1 minute");
+        expect(again.pollUnsafe()).toBeUndefined();
+        yield* TestClock.adjust("1 minute");
+        expect(yield* Fiber.join(again)).toMatchObject(couldNotReconnect);
+
+        const last = yield* Effect.forkChild(device.wake);
+        yield* Effect.yieldNow;
+        yield* device.connect;
+        expect(yield* Fiber.join(last)).toBe(false);
+        expect(device.changes).toEqual(ownerChange("running"));
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("fails at once, without asking, when the owner is offline", () =>
