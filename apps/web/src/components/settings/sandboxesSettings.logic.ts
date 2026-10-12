@@ -77,7 +77,10 @@ export function sandboxAccountSaveInput(
   const hours = draft.stopAfterHours.trim();
   const stopAfterHours = hours.length === 0 ? null : Number(hours);
   if (stopAfterHours !== null && !(Number.isFinite(stopAfterHours) && stopAfterHours > 0)) {
-    return { _tag: "Invalid", message: "Stop after must be a number of hours above zero." };
+    return {
+      _tag: "Invalid",
+      message: "Stop after inactivity must be a number of hours above zero.",
+    };
   }
   const badName = draft.env.find((entry) => !isEnvName(entry.name.trim()));
   if (badName !== undefined) {

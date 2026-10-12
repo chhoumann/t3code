@@ -129,7 +129,7 @@ function ProjectSandboxForm({
     if (!reset && stop === "custom" && !(Number.isFinite(stopAfterHours) && stopAfterHours > 0)) {
       toastManager.add({
         type: "error",
-        title: "Stop after must be a number of hours above zero.",
+        title: "Stop after inactivity must be a number of hours above zero.",
       });
       return;
     }
@@ -242,7 +242,7 @@ function ProjectSandboxForm({
         }
       />
       <SettingsRow
-        title="Stop after"
+        title="Stop after inactivity"
         control={
           <div className="flex items-center gap-2">
             <Select
@@ -251,7 +251,7 @@ function ProjectSandboxForm({
                 if (value !== null) setStop(value);
               }}
             >
-              <SelectTrigger size="sm" aria-label="Sandbox stop after">
+              <SelectTrigger size="sm" aria-label="Sandbox stop after inactivity">
                 <SelectValue>
                   {stop === "account"
                     ? `Account default · ${account.stopAfterHours === null ? "Never" : `${account.stopAfterHours}h`}`
@@ -272,7 +272,7 @@ function ProjectSandboxForm({
                 type="number"
                 min="0"
                 step="any"
-                aria-label="Sandbox stop after hours"
+                aria-label="Sandbox stop after inactivity, in hours"
                 value={hours}
                 onChange={(event) => setHours(event.target.value)}
               />
