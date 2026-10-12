@@ -17,6 +17,7 @@ import {
   EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
   type EnvironmentId,
+  type GitRemote,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -29,6 +30,7 @@ import {
   type ProviderDriverKind,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type SandboxRepository,
   type ThreadId,
 } from "@t3tools/contracts";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
@@ -62,6 +64,7 @@ import {
   SANDBOX_T3_BIN,
   SANDBOX_T3_HOME,
   SANDBOX_T3_TARBALL,
+  renderInputsReadyTest,
   renderRefreshCredentialsCommand,
   shellQuote,
 } from "./sandboxBootScript.ts";
@@ -79,10 +82,7 @@ export interface SandboxGuestTarget {
   readonly token: Redacted.Redacted<string>;
 }
 
-export interface SandboxCheckout {
-  readonly remoteUrl: string;
-  /** Checked out after cloning; null starts from the remote's default branch. */
-  readonly commit: string | null;
+export interface SandboxCheckout extends SandboxRepository {
   /** The task branch the clone starts on, created at `commit`. */
   readonly branch: string;
   /** Absolute path in the guest. */
@@ -192,6 +192,20 @@ const stderrTail = (stderr: string) => {
 export function renderCloneCommand(checkout: SandboxCheckout): string {
   const path = shellQuote(checkout.path);
   const partial = shellQuote(`${checkout.path}.partial`);
+  const branch = shellQuote(checkout.branch);
+  const tracked = shellQuote(checkout.trackedRemote);
+  // SandboxRepository's schema keeps the tracked remote among the remotes.
+  const trackedUrl = shellQuote(
+    checkout.remotes.find((remote) => remote.name === checkout.trackedRemote)!.url,
+  );
+  const addRemotes = (repository: string, remotes: ReadonlyArray<GitRemote>) =>
+    remotes.map(
+      (remote) =>
+        `  git -C ${repository} remote add -- ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
+    );
+  // A configured upstream would be one the remote does not have yet, which reads as pushed.
+  const pushToTracked = (repository: string) =>
+    `  git -C ${repository} config -- ${shellQuote(`branch.${checkout.branch}.pushRemote`)} ${tracked}`;
   return [
     "set -euo pipefail",
     // A replay must not delete the partial clone of a run still going.
@@ -200,11 +214,27 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
     `set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a`,
     `if [ ! -d ${path}/.git ]; then`,
     `  rm -rf ${partial}`,
-    `  git clone --quiet -- ${shellQuote(checkout.remoteUrl)} ${partial} ${CLOSE_EXEC_LOCK}`,
-    `  git -C ${partial} checkout --quiet -b ${shellQuote(checkout.branch)}${
+    `  git clone --quiet --origin ${tracked} -- ${trackedUrl} ${partial} ${CLOSE_EXEC_LOCK}`,
+    ...addRemotes(
+      partial,
+      checkout.remotes.filter((remote) => remote.name !== checkout.trackedRemote),
+    ),
+    `  git -C ${partial} checkout --quiet -b ${branch}${
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
     } ${CLOSE_EXEC_LOCK}`,
+    pushToTracked(partial),
     `  mv ${partial} ${path}`,
+    // A template's clone, which an earlier sandbox made: it takes this launch's
+    // remotes and moves to its commit. Once the task branch exists the clone is
+    // this sandbox's own, and an agent's work on it is never reset.
+    `elif ! git -C ${path} rev-parse --verify --quiet ${shellQuote(`refs/heads/${checkout.branch}`)} >/dev/null; then`,
+    `  for remote in $(git -C ${path} remote); do git -C ${path} remote remove "$remote"; done`,
+    ...addRemotes(path, checkout.remotes),
+    `  git -C ${path} fetch --quiet -- ${tracked} ${
+      checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
+    } ${CLOSE_EXEC_LOCK}`,
+    `  git -C ${path} checkout --quiet --force -b ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
+    pushToTracked(path),
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
     `cat ${path}/t3.json 2>/dev/null || true`,
@@ -257,7 +287,8 @@ export class SandboxGuest extends Context.Service<
   {
     /**
      * Uploads what the creation script waits for, the ready marker last. A
-     * no-op once the marker exists, so a retry never re-uploads the build.
+     * no-op once the marker names this sandbox, so a retry never re-uploads
+     * the build.
      */
     readonly writeBootInputs: (
       account: SandboxProviderAccount,
@@ -357,7 +388,7 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const marker = yield* provider.exec(account, machineId, {
-        command: `test -e ${shellQuote(SANDBOX_INPUTS_READY_FILE)} && echo present || true`,
+        command: `${renderInputsReadyTest(inputs.managed.sandboxId)} && echo present || true`,
         timeoutSeconds: 10,
       });
       if (marker.stdout.trim() === "present") return;
@@ -402,7 +433,7 @@ const make = Effect.gen(function* () {
       }
       yield* provider.writeFile(account, machineId, {
         path: SANDBOX_INPUTS_READY_FILE,
-        content: new Uint8Array(),
+        content: encode(inputs.managed.sandboxId),
       });
     });
 

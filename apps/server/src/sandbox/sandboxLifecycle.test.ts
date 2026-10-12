@@ -42,7 +42,11 @@ const fresh: SandboxRecord = {
   spec: {
     title: "Fix the bug",
     message: "Fix the bug",
-    repository: { remoteUrl: "https://github.com/octocat/Hello-World", commit: null },
+    repository: {
+      remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World" }],
+      trackedRemote: "origin",
+      commit: null,
+    },
     driver: ProviderDriverKind.make("claudeAgent"),
     model: "claude-sonnet-4-6",
     runtimeMode: "full-access",
@@ -119,7 +123,7 @@ const resumed: SandboxRecord = {
 
 const machine = (
   state: ProviderMachineState,
-  setup: ProviderMachineSetup = null,
+  setup: ProviderMachineSetup = "done",
   archiveAfter: number | null = null,
 ) => ({
   id: ProviderMachineId.make("bx_test"),
@@ -259,10 +263,28 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
   ],
   [
-    "T3 answering records the environment",
+    "T3 answering once the creation script finished records the environment",
     booting,
     answering,
     { status: { _tag: "launching" }, action: { _tag: "RecordEnvironment", environmentId: ENV } },
+  ],
+  [
+    "a T3 answering while the creation script runs, as one from a template does, is not recorded",
+    booting,
+    observed({ machine: machine("running", "running"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a T3 answering before the creation script started is not recorded",
+    booting,
+    observed({ machine: machine("running", "pending"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a failed creation script fails the boot though a T3 answers",
+    booting,
+    observed({ machine: machine("running", "failed"), environmentId: ENV }),
+    failed("boot", false),
   ],
   [
     "launches the seed thread once T3 answers",

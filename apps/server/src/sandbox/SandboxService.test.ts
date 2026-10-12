@@ -5,6 +5,8 @@ import {
   ProviderDriverKind,
   SandboxAccountId,
   SandboxId,
+  ServerSettingsError,
+  type SandboxRepository,
   type SandboxStatus,
   type SandboxView,
 } from "@t3tools/contracts";
@@ -50,7 +52,7 @@ const deadline = (ttlSeconds: number | null) =>
   );
 
 /** An in-memory provider and guest sharing one set of machines, kept across service restarts. */
-const makeWorld = () => {
+const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
   const machines = new Map<string, { state: ProviderMachineState; archiveAfter: number | null }>();
   const machineByKey = new Map<string, ProviderMachineId>();
   const world = {
@@ -69,6 +71,7 @@ const makeWorld = () => {
     managedMarkers: [] as Array<ManagedSandboxMarker>,
     bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
     launchedThreads: [] as Array<string>,
+    checkouts: [] as Array<SandboxGuest.SandboxCheckout>,
     pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
     /** Admin sessions the guest accepts. */
@@ -204,7 +207,11 @@ const makeWorld = () => {
         world.adminTokens.add(token);
         return Redacted.make(token);
       }),
-    cloneCheckout: () => Effect.succeed([]),
+    cloneCheckout: (_account, _machineId, checkout) =>
+      Effect.sync(() => {
+        world.checkouts.push(checkout);
+        return [];
+      }),
     launchSeedThread: (_target, input) =>
       Effect.sync(() => void world.launchedThreads.push(input.seed.threadId)),
     readActivity: () =>
@@ -268,7 +275,7 @@ const makeWorld = () => {
       }),
     ),
     Layer.provide(NodeCrypto.layer),
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(settingsLayer),
   );
 
   /** Starts the service in its own scope over the test's database; closing the scope is a crash. */
@@ -286,7 +293,11 @@ const launchInput = (id: string) => ({
   accountId: ACCOUNT_ID,
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
-  repository: { remoteUrl: "https://github.com/octocat/Hello-World.git", commit: null },
+  repository: {
+    remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
+    trackedRemote: "origin",
+    commit: null,
+  } satisfies SandboxRepository,
   driver: ProviderDriverKind.make("claudeAgent"),
   model: "claude-sonnet-4-6",
   runtimeMode: "full-access" as const,
@@ -356,14 +367,15 @@ describe("SandboxService", () => {
   );
 
   it.effect(
-    "uses different project templates with one shared account and freezes each launch",
+    "uses a project's defaults for every branch's launch, on a fork too, and freezes each launch",
     () =>
       Effect.gen(function* () {
         const { world, start } = makeWorld();
         const started = yield* start;
         yield* Effect.gen(function* () {
           const settings = yield* ServerSettings.ServerSettingsService;
-          const key = sandboxProjectKey(ACCOUNT_ID, launchInput("project-a").repository.remoteUrl);
+          // What the project's settings page writes: its repository identity's canonical key.
+          const key = sandboxProjectKey(ACCOUNT_ID, "github.com/octocat/hello-world");
           yield* settings.updateSettings({
             sandboxProjectDefaults: {
               [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 0.25 },
@@ -375,11 +387,36 @@ describe("SandboxService", () => {
           yield* sandboxes.launch({
             ...launchInput("project-b"),
             repository: {
-              remoteUrl: "https://github.com/octocat/website.git",
+              remotes: [{ name: "origin", url: "https://github.com/octocat/website.git" }],
+              trackedRemote: "origin",
               commit: null,
             },
           });
           yield* awaitStatus("project-b", "ready");
+          // A branch on a fork, from a checkout whose origin is the project, spelled over SSH.
+          const onFork = {
+            remotes: [
+              { name: "fork", url: "https://github.com/hubot/Hello-World.git" },
+              { name: "origin", url: "git@github.com:octocat/Hello-World.git" },
+            ],
+            trackedRemote: "fork",
+            commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+          } as const;
+          yield* sandboxes.launch({ ...launchInput("project-a-fork"), repository: onFork });
+          yield* awaitStatus("project-a-fork", "ready");
+          // A branch on a fork that is the checkout's origin, with the project as upstream.
+          yield* sandboxes.launch({
+            ...launchInput("project-a-fork-origin"),
+            repository: {
+              remotes: [
+                { name: "origin", url: "https://github.com/hubot/Hello-World.git" },
+                { name: "upstream", url: "git@github.com:octocat/Hello-World.git" },
+              ],
+              trackedRemote: "origin",
+              commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+            },
+          });
+          yield* awaitStatus("project-a-fork-origin", "ready");
           assert.strictEqual(world.createInputs[0]?.template, "quickadd-dev");
           assert.strictEqual(world.createInputs[0]?.size, "large");
           // Boat's own stop leaves T3 its 30 minutes to answer, plus the 10 minute grace.
@@ -388,15 +425,54 @@ describe("SandboxService", () => {
           assert.strictEqual(world.createInputs[1]?.size, "small");
           // The account's hour without activity, plus the grace.
           assert.strictEqual(world.createInputs[1]?.ttlSeconds, 4200);
+          assert.strictEqual(world.createInputs[2]?.template, "quickadd-dev");
+          assert.strictEqual(world.createInputs[3]?.template, "quickadd-dev");
           assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
+          assert.deepStrictEqual(world.checkouts[2], {
+            ...onFork,
+            branch: "t3/sandbox-project-",
+            path: "/home/user/projects/Hello-World",
+          });
           yield* settings.updateSettings({
             sandboxProjectDefaults: { [key]: { template: "updated" } },
           });
           yield* sandboxes.launch(launchInput("project-a"));
-          assert.strictEqual(world.createInputs.length, 2);
+          assert.strictEqual(world.createInputs.length, 4);
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("fails a launch whose project defaults cannot be read, creating nothing", () =>
+    Effect.gen(function* () {
+      const unreadable = Layer.effect(
+        ServerSettings.ServerSettingsService,
+        ServerSettings.ServerSettingsService.pipe(
+          Effect.map((settings) => ({
+            ...settings,
+            getSettings: Effect.fail(
+              new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+            ),
+          })),
+        ),
+      ).pipe(Layer.provide(ServerSettings.layerTest()));
+      const { world, start } = makeWorld(unreadable);
+      const started = yield* start;
+      const error = yield* service.pipe(
+        Effect.flatMap((sandboxes) => sandboxes.launch(launchInput("sbx-unreadable"))),
+        Effect.flip,
+        Effect.provide(started.context),
+      );
+      const listed = yield* service.pipe(
+        Effect.flatMap((sandboxes) => sandboxes.list()),
+        Effect.provide(started.context),
+      );
+      yield* Scope.close(started.scope, Exit.void);
+
+      assert.strictEqual(error._tag, "SandboxPersistenceError");
+      assert.deepStrictEqual(listed, []);
+      assert.deepStrictEqual(world.createKeys, []);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   it.effect(

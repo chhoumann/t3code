@@ -11,6 +11,7 @@ import {
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   parseOriginUrlFromGitConfig,
+  pickPrimaryRemote,
   resolveAutoFeatureBranchName,
   sanitizeFeatureBranchName,
   WORKTREE_BRANCH_PREFIX,
@@ -86,6 +87,18 @@ describe("normalizeGitRemoteUrl", () => {
     expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v3/T3Tools/T3Code")).toBe(
       "ssh.dev.azure.com/v3/t3tools/t3code",
     );
+  });
+});
+
+describe("pickPrimaryRemote", () => {
+  const remote = (name: string) => ({ name, url: `https://github.com/${name}/t3code.git` });
+
+  it("names upstream, then origin, then the first remote by name", () => {
+    expect(pickPrimaryRemote([remote("origin"), remote("fork"), remote("upstream")]).name).toBe(
+      "upstream",
+    );
+    expect(pickPrimaryRemote([remote("fork"), remote("origin")]).name).toBe("origin");
+    expect(pickPrimaryRemote([remote("mirror"), remote("fork"), remote("work")]).name).toBe("fork");
   });
 });
 
@@ -265,6 +278,8 @@ describe("applyGitStatusStreamEvent", () => {
         baseUrl: "https://github.com",
       },
       hasPrimaryRemote: true,
+      remotes: [{ name: "origin", url: "git@github.com:octocat/demo.git" }],
+      trackedRemote: "origin",
       isDefaultRef: false,
       refName: "feature/demo",
       headCommit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",

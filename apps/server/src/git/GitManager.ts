@@ -25,6 +25,7 @@ import {
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitPullRequestRefInput,
+  type GitRemote,
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
@@ -1093,14 +1094,22 @@ export const make = Effect.gen(function* () {
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
+    const { remotes, trackedRemote } = details.isRepo
+      ? yield* readRemotes(cwd, details.branch)
+      : { remotes: [], trackedRemote: undefined };
     const hostingProvider = details.isRepo
-      ? yield* resolveHostingProvider(cwd, details.branch)
+      ? yield* resolveHostingProvider(
+          cwd,
+          trackedRemote ?? remotes.find((remote) => remote.name === "origin"),
+        )
       : null;
 
     return {
       isRepo: details.isRepo,
       ...(hostingProvider ? { sourceControlProvider: hostingProvider } : {}),
       hasPrimaryRemote: details.hasOriginRemote,
+      remotes,
+      ...(trackedRemote ? { trackedRemote: trackedRemote.name } : {}),
       isDefaultRef: details.isDefaultBranch,
       refName: details.branch,
       ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
@@ -1422,24 +1431,32 @@ export const make = Effect.gen(function* () {
   const readConfigValueNullable = (cwd: string, key: string) =>
     gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
 
+  const readRemotes = Effect.fn("readRemotes")(function* (cwd: string, branch: string | null) {
+    const [remotes, trackedRemoteName] = yield* Effect.all(
+      [
+        gitCore.listRemoteFetchUrls(cwd).pipe(Effect.orElseSucceed((): GitRemote[] => [])),
+        branch === null
+          ? Effect.succeed(null)
+          : readConfigValueNullable(cwd, `branch.${branch}.remote`),
+      ],
+      { concurrency: "unbounded" },
+    );
+    return {
+      remotes,
+      trackedRemote: remotes.find((remote) => remote.name === trackedRemoteName),
+    };
+  });
+
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
-    branch: string | null,
+    remote: GitRemote | undefined,
   ) {
-    const preferredRemoteName =
-      branch === null
-        ? "origin"
-        : ((yield* readConfigValueNullable(cwd, `branch.${branch}.remote`)) ?? "origin");
-    const remoteUrl =
-      (yield* readConfigValueNullable(cwd, `remote.${preferredRemoteName}.url`)) ??
-      (yield* readConfigValueNullable(cwd, "remote.origin.url"));
-
-    const provider = remoteUrl ? detectSourceControlProviderFromGitRemoteUrl(remoteUrl) : null;
-    if (!remoteUrl || provider?.kind !== "unknown") return provider;
+    const provider = remote ? detectSourceControlProviderFromGitRemoteUrl(remote.url) : null;
+    if (!remote || provider?.kind !== "unknown") return provider;
     const handle = yield* sourceControlProviders
       .resolveHandle({
         cwd,
-        context: { provider, remoteName: preferredRemoteName, remoteUrl },
+        context: { provider, remoteName: remote.name, remoteUrl: remote.url },
       })
       .pipe(Effect.orElseSucceed(() => null));
     return handle?.context?.provider ?? provider;

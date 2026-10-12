@@ -37,7 +37,11 @@ const sandboxView = (
   accountId: SandboxAccountId.make("work"),
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
-  repository: { remoteUrl: "https://example.test/repo.git", commit: null },
+  repository: {
+    remotes: [{ name: "origin", url: "https://example.test/repo.git" }],
+    trackedRemote: "origin",
+    commit: null,
+  },
   threadId: ThreadId.make("thread-seed"),
   desired,
   status,

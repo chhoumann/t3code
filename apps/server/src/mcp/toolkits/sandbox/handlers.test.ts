@@ -84,7 +84,11 @@ it.effect("launches a sandbox within the calling thread's modes", () =>
             accountId,
             title: "Fix the bug",
             message: "Fix the bug in hello.txt",
-            repository: { remoteUrl: "https://github.com/octocat/Hello-World", commit: null },
+            repository: {
+              remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World" }],
+              trackedRemote: "origin",
+              commit: null,
+            },
             driver: ProviderDriverKind.make("claudeAgent"),
             model: "claude-sonnet-4-6",
             ...modes,

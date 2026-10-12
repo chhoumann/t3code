@@ -28,7 +28,11 @@ import {
   type ReviewDiffPreviewSource,
   type VcsRef,
 } from "@t3tools/contracts";
-import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import {
+  dedupeRemoteBranchesWithLocalMatches,
+  normalizeGitRemoteUrl,
+  parseRemoteFetchUrls,
+} from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
@@ -343,22 +347,6 @@ function sanitizeRemoteName(value: string): string {
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return sanitized.length > 0 ? sanitized : "fork";
-}
-
-function parseRemoteFetchUrls(stdout: string): Map<string, string> {
-  const remotes = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
-    if (!match) continue;
-    const [, remoteName = "", remoteUrl = "", direction = ""] = match;
-    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
-      continue;
-    }
-    remotes.set(remoteName, remoteUrl);
-  }
-  return remotes;
 }
 
 function parseUpstreamRefWithRemoteNames(
@@ -1618,26 +1606,28 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null));
   });
 
+  const listRemoteFetchUrls: GitVcsDriver.GitVcsDriver["Service"]["listRemoteFetchUrls"] = (cwd) =>
+    runGitStdout("GitVcsDriver.listRemoteFetchUrls", cwd, ["remote", "-v"]).pipe(
+      Effect.map(parseRemoteFetchUrls),
+    );
+
   const ensureRemote: GitVcsDriver.GitVcsDriver["Service"]["ensureRemote"] = Effect.fn(
     "ensureRemote",
   )(function* (input) {
     const preferredName = sanitizeRemoteName(input.preferredName);
     const normalizedTargetUrl = normalizeGitRemoteUrl(input.url);
-    const remoteFetchUrls = yield* runGitStdout(
-      "GitVcsDriver.ensureRemote.listRemoteUrls",
-      input.cwd,
-      ["remote", "-v"],
-    ).pipe(Effect.map((stdout) => parseRemoteFetchUrls(stdout)));
+    const remotes = yield* listRemoteFetchUrls(input.cwd);
 
-    for (const [remoteName, remoteUrl] of remoteFetchUrls.entries()) {
-      if (normalizeGitRemoteUrl(remoteUrl) === normalizedTargetUrl) {
-        return remoteName;
-      }
+    const existing = remotes.find(
+      (remote) => normalizeGitRemoteUrl(remote.url) === normalizedTargetUrl,
+    );
+    if (existing) {
+      return existing.name;
     }
 
     let remoteName = preferredName;
     let suffix = 1;
-    while (remoteFetchUrls.has(remoteName)) {
+    while (remotes.some((remote) => remote.name === remoteName)) {
       remoteName = `${preferredName}-${suffix}`;
       suffix += 1;
     }
@@ -4098,6 +4088,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     refreshCheckedOutBranch: (input) =>
       withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input)),
     ensureRemote: (input) => withListRefsInvalidation(input.cwd, ensureRemote(input)),
+    listRemoteFetchUrls,
     resolvePrimaryRemoteName,
     resolveDefaultBranchName,
     fetchRemote: (input) => withListRefsInvalidation(input.cwd, fetchRemote(input)),

@@ -27,7 +27,11 @@ export const SANDBOX_T3_TARBALL = `${SANDBOX_INPUTS_DIR}/t3.tgz`;
 /** Tells the guest server which owner manages it; see `ManagedSandbox`. Relative to T3 home. */
 export const MANAGED_SANDBOX_FILE = "sandbox/managed.json";
 export const SANDBOX_MANAGED_FILE = `${SANDBOX_T3_HOME}/${MANAGED_SANDBOX_FILE}`;
-/** Written by the owner last, once every input is in place. */
+/**
+ * Written by the owner last, once every input is in place. It holds the
+ * sandbox id, since a machine made from a template snapshot of an earlier
+ * sandbox already has that sandbox's.
+ */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
 /**
  * Held by the clone and the credential refresh, so one replayed while its
@@ -149,15 +153,22 @@ function renderMachineSetupUnit(): ReadonlyArray<string> {
     "EOF",
     "sudo systemctl daemon-reload",
     `sudo systemctl enable ${MACHINE_SETUP_UNIT}`,
-    `sudo systemctl start ${MACHINE_SETUP_UNIT}`,
+    // A template snapshot's unit already ran at boot, with the earlier sandbox's inputs.
+    `sudo systemctl restart ${MACHINE_SETUP_UNIT}`,
   ];
 }
 
+/** Whether the owner has written this sandbox's inputs. */
+export const renderInputsReadyTest = (sandboxId: string) =>
+  `[ "$(cat ${shellQuote(SANDBOX_INPUTS_READY_FILE)} 2>/dev/null)" = ${shellQuote(sandboxId)} ]`;
+
 export function renderSandboxBootScript(input: {
   readonly t3: SandboxT3Source;
+  readonly sandboxId: string;
   /** What every client calls this environment; T3 reads it from the pretty hostname. */
   readonly label: string;
 }): string {
+  const inputsReady = renderInputsReadyTest(input.sandboxId);
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -167,8 +178,14 @@ export function renderSandboxBootScript(input: {
     `exec > >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)}) 2> >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)} >&2)`,
     "set -x",
     "",
-    `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do [ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] && break; sleep 1; done`,
-    `[ -f ${shellQuote(SANDBOX_INPUTS_READY_FILE)} ] || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
+    // A template snapshot of an earlier sandbox carries that sandbox's T3 data, environment id
+    // and sessions included, and starts its T3 at boot. This sandbox starts T3 afresh on the
+    // installed runtime, which the snapshot keeps to save the install.
+    'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user stop t3code.service 2>/dev/null || true',
+    'rm -rf "$T3CODE_HOME/userdata"',
+    "",
+    `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do ${inputsReady} && break; sleep 1; done`,
+    `${inputsReady} || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
     `chmod 600 ${shellQuote(SANDBOX_ENV_FILE)} ${shellQuote(SANDBOX_SETUP_ENV_FILE)}`,
     "",
     // Dev servers and T3's own file watching exhaust the stock inotify limits,

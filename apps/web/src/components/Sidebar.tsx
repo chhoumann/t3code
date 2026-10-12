@@ -11,6 +11,7 @@ import {
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { sandboxProject } from "@t3tools/shared/sandboxProject";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -42,7 +43,6 @@ import {
 import {
   type PendingSandboxThread,
   pendingSandboxThreads,
-  sandboxProject,
 } from "@t3tools/client-runtime/state/sandboxes";
 import {
   threadSearchMatchKey,

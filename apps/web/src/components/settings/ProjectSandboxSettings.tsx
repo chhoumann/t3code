@@ -271,9 +271,7 @@ function ProjectSandboxForm({
             {stop === "custom" ? (
               <Input
                 size="sm"
-                type="number"
-                min="0"
-                step="any"
+                inputMode="decimal"
                 aria-label="Sandbox stop after inactivity, in hours"
                 value={hours}
                 onChange={(event) => setHours(event.target.value)}

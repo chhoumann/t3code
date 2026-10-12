@@ -1148,9 +1148,11 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(status).toEqual({
         isRepo: false,
         hasPrimaryRemote: false,
+        remotes: [],
         isDefaultRef: false,
         refName: null,
         hasWorkingTreeChanges: false,
+        hasTrackedChanges: false,
         workingTree: {
           files: [],
           insertions: 0,
@@ -1178,9 +1180,11 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(status).toEqual({
         isRepo: false,
         hasPrimaryRemote: false,
+        remotes: [],
         isDefaultRef: false,
         refName: null,
         hasWorkingTreeChanges: false,
+        hasTrackedChanges: false,
         workingTree: {
           files: [],
           insertions: 0,
@@ -1247,6 +1251,38 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           key === "branch.feature/status-identity-cache.remote" || key === "remote.origin.url",
       );
       expect(identityReads).toHaveLength(0);
+    }),
+  );
+
+  it.effect("local status lists the remotes and names the one the branch tracks", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const originDir = yield* createBareRemote();
+      const forkDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+      yield* runGit(repoDir, ["remote", "add", "fork/mirror", forkDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/on-fork"]);
+      yield* runGit(repoDir, ["push", "-u", "fork/mirror", "feature/on-fork"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/never-pushed"]);
+
+      const gitConfigReads: string[] = [];
+      const { manager } = yield* makeManager({ gitConfigReads });
+
+      const unpushed = yield* manager.localStatus({ cwd: repoDir });
+      yield* runGit(repoDir, ["checkout", "feature/on-fork"]);
+      yield* manager.invalidateLocalStatus(repoDir);
+      gitConfigReads.length = 0;
+      const onFork = yield* manager.localStatus({ cwd: repoDir });
+
+      expect(unpushed.trackedRemote).toBeUndefined();
+      expect(onFork.trackedRemote).toBe("fork/mirror");
+      expect(onFork.remotes).toEqual([
+        { name: "fork/mirror", url: forkDir },
+        { name: "origin", url: originDir },
+      ]);
+      expect(gitConfigReads).toEqual(["branch.feature/on-fork.remote"]);
     }),
   );
 

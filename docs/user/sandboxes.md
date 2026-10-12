@@ -9,14 +9,18 @@ branch there, and starts a thread with your message. Sandboxes run on
 
 Open **Settings → Sandboxes** and choose **Add account**. Paste a Boat API key.
 T3 Code checks that the key can create, read, stop, resume, and delete
-sandboxes, run commands, write files, and host ports before it saves the
-account. The key must also be allowed to update sandboxes, so T3 Code can push
-back Boat's own stop time while agents work. The key and any environment
-variable values stay in that environment's secret store, not in its settings.
-You can add more than one account, such as a personal and a work account.
+sandboxes, run commands, write files, host ports, and read snapshots before it
+saves the account. The key must also be allowed to update sandboxes, so T3 Code
+can push back Boat's own stop time while agents work. The key and any
+environment variable values stay in that environment's secret store, not in its
+settings. You can add more than one account, such as a personal and a work
+account.
 
 In the project's settings, use **Sandboxes** to choose a template for each
 account. The template menu lists the selected account's ready Boat snapshots.
+A snapshot of another sandbox keeps its files and installed tools, but the new
+sandbox starts T3 Code without that sandbox's threads and moves the project's
+clone to your commit.
 You can also override the account's machine size and stop time there.
 These defaults apply to new sandboxes for every checkout of that repository.
 Reset them to use the account defaults and start without a template.
@@ -35,10 +39,10 @@ script. An SSH remote needs a key set up the same way.
 ## Start a sandbox
 
 In a new thread in a project, open the environment picker and choose
-**New sandbox · _account_**, then send your message. The sandbox starts from
-the commit your branch has pushed, so commit and push first: uncommitted or
-unpushed work is not included. The first message cannot carry attachments or
-context.
+**New sandbox · _account_**, then send your message. The sandbox clones the
+remote your branch tracks, such as your fork, and starts from the commit your
+branch has pushed there, so commit and push first: uncommitted or unpushed
+work is not included. The first message cannot carry attachments or context.
 
 Every device connected to the environment that owns the sandbox pairs with it
 automatically.

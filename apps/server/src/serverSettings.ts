@@ -185,6 +185,17 @@ function ensureProviderInstanceMutationAllowed(
   return Effect.void;
 }
 
+/** The sandbox accounts and the project defaults kept for each of them. */
+export type SandboxAccountSettings = Pick<
+  ServerSettings,
+  "sandboxAccounts" | "sandboxProjectDefaults"
+>;
+
+const sandboxAccountSettingsOf = (settings: ServerSettings): SandboxAccountSettings => ({
+  sandboxAccounts: settings.sandboxAccounts,
+  sandboxProjectDefaults: settings.sandboxProjectDefaults,
+});
+
 export class ServerSettingsService extends Context.Service<
   ServerSettingsService,
   {
@@ -209,14 +220,12 @@ export class ServerSettingsService extends Context.Service<
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     /**
-     * Replace the sandbox accounts, which the settings patch cannot change.
-     * `update` runs while settings writes are paused, so it sees the accounts
-     * it replaces.
+     * Replace the sandbox accounts, which the settings patch cannot change,
+     * along with the project defaults kept for them. `update` runs while
+     * settings writes are paused, so it sees the values it replaces.
      */
     readonly updateSandboxAccounts: <E, R>(
-      update: (
-        accounts: ServerSettings["sandboxAccounts"],
-      ) => Effect.Effect<ServerSettings["sandboxAccounts"], E, R>,
+      update: (current: SandboxAccountSettings) => Effect.Effect<SandboxAccountSettings, E, R>,
     ) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>;
 
     /** Run an effect against a settings snapshot while settings writes are paused. */
@@ -293,8 +302,8 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         ),
       updateSandboxAccounts: (update) =>
         updateTestSettings((currentSettings) =>
-          update(currentSettings.sandboxAccounts).pipe(
-            Effect.map((sandboxAccounts) => ({ ...currentSettings, sandboxAccounts })),
+          update(sandboxAccountSettingsOf(currentSettings)).pipe(
+            Effect.map((next) => ({ ...currentSettings, ...next })),
           ),
         ),
       withSettingsSnapshot: (use) =>
@@ -1249,8 +1258,8 @@ const make = Effect.gen(function* () {
       ),
     updateSandboxAccounts: (update) =>
       updateAndPersistSettings((current) =>
-        update(current.sandboxAccounts).pipe(
-          Effect.map((sandboxAccounts) => ({ ...current, sandboxAccounts })),
+        update(sandboxAccountSettingsOf(current)).pipe(
+          Effect.map((next) => ({ ...current, ...next })),
         ),
       ),
     withSettingsSnapshot,

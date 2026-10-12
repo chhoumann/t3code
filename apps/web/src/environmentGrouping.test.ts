@@ -1,4 +1,4 @@
-import { sandboxProject } from "@t3tools/client-runtime/state/sandboxes";
+import { sandboxProject } from "@t3tools/shared/sandboxProject";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -605,7 +605,8 @@ describe("environment grouping", () => {
 describe("resolveSandboxProjectGroup", () => {
   const sandboxEnvironmentId = EnvironmentId.make("env-sandbox");
   const cloned = sandboxProject({
-    remoteUrl: "https://github.com/Example/Shared-Repo.git",
+    remotes: [{ name: "origin", url: "https://github.com/Example/Shared-Repo.git" }],
+    trackedRemote: "origin",
     commit: null,
   });
   const snapshots = (projects: Project[], mode: "repository" | "separate") =>

@@ -28,7 +28,11 @@ import {
   type SandboxLaunchInput,
   type SandboxView,
 } from "@t3tools/contracts";
-import { resolveSandboxProjectDefaults, sandboxProjectKey } from "@t3tools/shared/sandboxProject";
+import {
+  resolveSandboxProjectDefaults,
+  sandboxProject,
+  sandboxProjectKey,
+} from "@t3tools/shared/sandboxProject";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -310,15 +314,6 @@ const toView = (record: SandboxRecord): SandboxView => ({
 
 const adminSecretName = (id: SandboxId) => `sandbox-${id}-admin`;
 
-const checkoutPath = (remoteUrl: string) =>
-  `${SANDBOX_HOME_PROJECTS}/${
-    remoteUrl
-      .replace(/\/+$/, "")
-      .split(/[/:]/)
-      .at(-1)
-      ?.replace(/\.git$/, "") || "project"
-  }`;
-
 const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   Create: "create",
   WriteInputs: "boot",
@@ -591,11 +586,11 @@ const make = Effect.gen(function* () {
           const baseUrl =
             record.httpBaseUrl ??
             (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
+          const { repository } = record.spec;
           const checkout = {
-            remoteUrl: record.spec.repository.remoteUrl,
-            commit: record.spec.repository.commit,
+            ...repository,
             branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-            path: checkoutPath(record.spec.repository.remoteUrl),
+            path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
           };
           const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
           yield* asOwner(record, resolved, yield* machineId, (token) =>
@@ -827,8 +822,11 @@ const make = Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const defaults = resolveSandboxProjectDefaults(
             account,
-            (yield* settings.getSettings.pipe(Effect.orDie)).sandboxProjectDefaults[
-              sandboxProjectKey(input.accountId, input.repository.remoteUrl)
+            (yield* settings.getSettings.pipe(persistence)).sandboxProjectDefaults[
+              sandboxProjectKey(
+                input.accountId,
+                sandboxProject(input.repository).repositoryIdentity.canonicalKey,
+              )
             ],
           );
           const stopAfterSeconds =
@@ -853,6 +851,7 @@ const make = Effect.gen(function* () {
                 providerEnvironment: account.providerEnvironment,
                 setupScript: renderSandboxBootScript({
                   t3: { kind: build.kind, version: build.version },
+                  sandboxId: input.id,
                   label: input.title,
                 }),
               },
