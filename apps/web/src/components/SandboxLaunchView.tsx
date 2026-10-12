@@ -145,7 +145,7 @@ function useWakeOnArrival(action: SandboxLaunchAction | null): SandboxWake {
   const run = async (environmentId: EnvironmentId) => {
     asked.current = true;
     setFailure(null);
-    const result = await wake({ environmentId, input: undefined });
+    const result = await wake({ environmentId });
     setFailure(sandboxCommandFailure(result));
   };
   const wakeOnArrival = useEffectEvent((environmentId: EnvironmentId) => {

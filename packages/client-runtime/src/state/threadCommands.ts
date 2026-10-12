@@ -187,10 +187,7 @@ export function createThreadEnvironmentAtoms<R, E>(
   // it runs, so one that never saw it awake has no connection to it until the wake ends.
   const wake = createRuntimeCommand(runtime, {
     label: "environment-data:commands:thread:wake",
-    execute: (
-      { environmentId }: { readonly environmentId: EnvironmentId; readonly input: void },
-      registry,
-    ) =>
+    execute: ({ environmentId }: { readonly environmentId: EnvironmentId }, registry) =>
       wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }).pipe(
         Effect.tap((woke) => (woke ? readSession(registry, environmentId) : Effect.void)),
       ),
@@ -200,7 +197,7 @@ export function createThreadEnvironmentAtoms<R, E>(
   });
   /** Wakes the environment's sandbox when it sleeps; succeeds with whether it had to. */
   const wakeFirst = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) =>
-    runAtomCommand(wake, registry, { environmentId, input: undefined });
+    runAtomCommand(wake, registry, { environmentId });
   const commands = {
     wake,
     create: createEnvironmentCommand(runtime, {

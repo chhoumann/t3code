@@ -203,10 +203,7 @@ describe("thread commands in a sandbox", () => {
         sandboxView({ _tag: "stopped", reason: "external" }, "running"),
         { paired: false },
       );
-      const result = h.commands.wake.run(h.registry, {
-        environmentId: SANDBOX_ENV,
-        input: undefined,
-      });
+      const result = h.commands.wake.run(h.registry, { environmentId: SANDBOX_ENV });
       yield* Effect.yieldNow;
       expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
 

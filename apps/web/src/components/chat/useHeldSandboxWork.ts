@@ -106,7 +106,7 @@ export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
     if (!replaceHeld(null, operation)) return;
     input.setError(threadKey, null);
     const wakeSandbox = async (): Promise<HeldWake> => {
-      const woke = await wake({ environmentId, input: undefined });
+      const woke = await wake({ environmentId });
       if (woke._tag === "Failure") return { _tag: "failed", message: sandboxCommandFailure(woke) };
       if (isServerThread && !(await waitForThreadDetail(threadRef, THREAD_LOAD_AFTER_WAKE_MS))) {
         return {
