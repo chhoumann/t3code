@@ -2711,6 +2711,8 @@ export default function ChatView(props: ChatViewProps) {
     sandbox: activeSandbox?.view,
     connected: !activeEnvironmentUnavailable,
   });
+  // Work that wakes the sandbox waits for the thread to load from it instead.
+  const threadLoadBlocksWork = threadDetailLoading && sendDelivery !== "after-wake";
   const activeSandboxView = activeSandbox?.view;
   const activeSandboxWakeStatus = useMemo(
     () =>
@@ -8838,7 +8840,7 @@ export default function ChatView(props: ChatViewProps) {
       isResuming ||
       isConnecting ||
       isRevertingCheckpoint ||
-      threadDetailLoading ||
+      threadLoadBlocksWork ||
       sendDelivery === "offline" ||
       sendInFlightRef.current
     ) {
@@ -8995,8 +8997,7 @@ export default function ChatView(props: ChatViewProps) {
       isConnecting ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
-      // A send that wakes the sandbox waits for the thread to load from it.
-      (threadDetailLoading && sendDelivery !== "after-wake") ||
+      threadLoadBlocksWork ||
       environmentChangeRef.current !== null ||
       sendInFlightRef.current ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -11932,7 +11933,7 @@ export default function ChatView(props: ChatViewProps) {
                                       ? "Rewinding conversation"
                                       : feedbackUploading
                                         ? "Sending feedback"
-                                        : threadDetailLoading && sendDelivery !== "after-wake"
+                                        : threadLoadBlocksWork
                                           ? "Messages loading"
                                           : worktreeSetupBlocksSend
                                             ? "Preparing worktree"
