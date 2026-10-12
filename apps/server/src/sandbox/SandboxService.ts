@@ -589,6 +589,7 @@ const make = Effect.gen(function* () {
           const { repository } = record.spec;
           const checkout = {
             ...repository,
+            sandboxId: record.id,
             branch: `t3/sandbox-${record.id.slice(0, 8)}`,
             path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
           };

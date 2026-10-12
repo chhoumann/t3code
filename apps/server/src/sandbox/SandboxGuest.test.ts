@@ -52,6 +52,8 @@ const commit = (cwd: string, message: string, ...args: ReadonlyArray<string>) =>
     message,
   );
 
+const SANDBOX_ID = "0a1b2c3d-0000-4000-8000-000000000001";
+
 /** A temp dir standing in for the guest's home, and a repository in it with one commit. */
 const guestFixture = () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-clone-"));
@@ -66,13 +68,15 @@ const guestFixture = () => {
   const pinned = git(origin, "rev-parse", "HEAD");
   const checkout = NodePath.join(root, "project");
   const script = (
-    checkoutInput: Omit<SandboxGuest.SandboxCheckout, "branch" | "path">,
-    branch = "t3/sandbox-0a1b2c3d",
+    checkoutInput: Omit<SandboxGuest.SandboxCheckout, "sandboxId" | "branch" | "path">,
+    sandboxId = SANDBOX_ID,
   ) =>
-    `${FLOCK_SHIM}\n${renderCloneCommand({ ...checkoutInput, branch, path: checkout }).replaceAll(
-      "/home/user",
-      root,
-    )}`;
+    `${FLOCK_SHIM}\n${renderCloneCommand({
+      ...checkoutInput,
+      sandboxId,
+      branch: `t3/sandbox-${sandboxId.slice(0, 8)}`,
+      path: checkout,
+    }).replaceAll("/home/user", root)}`;
   return { root, origin, pinned, checkout, script };
 };
 
@@ -138,7 +142,7 @@ describe("renderCloneCommand", () => {
           trackedRemote: "origin",
           commit: git(project, "rev-parse", "HEAD"),
         },
-        "t3/sandbox-earlier",
+        "9e8d7c6b-0000-4000-8000-000000000002",
       ),
     );
     // What the template's snapshot holds besides the earlier sandbox's commit.
@@ -198,6 +202,53 @@ describe("renderCloneCommand", () => {
     expect(afterReplay).toBe("this agent's edit\n");
     expect(agentBranch).toBe("agent/fix");
     expect(afterAgentBranch).toBe("this agent's edit\n");
+  });
+
+  it("takes the clone of a sandbox whose id starts the same for a template's, not its own", () => {
+    const { root, origin: project, checkout, script } = guestFixture();
+    const run = (command: string) =>
+      NodeChildProcess.spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    const hello = NodePath.join(checkout, "hello.txt");
+    NodeFS.writeFileSync(NodePath.join(project, "hello.txt"), "v1\n");
+    git(project, "add", "hello.txt");
+    commit(project, "v1");
+    const remotes = [{ name: "origin", url: project }] as const;
+    const earlier = run(
+      script(
+        { remotes, trackedRemote: "origin", commit: git(project, "rev-parse", "HEAD") },
+        "0a1b2c3d-0000-4000-8000-0000000000ee",
+      ),
+    );
+    commit(checkout, "the earlier agent's work");
+    NodeFS.writeFileSync(hello, "the earlier agent's edit\n");
+    NodeFS.writeFileSync(NodePath.join(project, "hello.txt"), "v2\n");
+    commit(project, "v2", "--all");
+    const v2 = git(project, "rev-parse", "HEAD");
+    const launch = script({ remotes, trackedRemote: "origin", commit: v2 });
+
+    const first = run(launch);
+    const moved = {
+      branch: git(checkout, "symbolic-ref", "--short", "HEAD"),
+      head: git(checkout, "rev-parse", "HEAD"),
+      hello: NodeFS.readFileSync(hello, "utf8"),
+      sandboxId: git(checkout, "config", "t3.sandboxId"),
+    };
+    NodeFS.writeFileSync(hello, "this agent's edit\n");
+    const replay = run(launch);
+    const afterReplay = NodeFS.readFileSync(hello, "utf8");
+    NodeFS.rmSync(root, { recursive: true, force: true });
+
+    for (const result of [earlier, first, replay]) {
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    }
+    expect(moved).toEqual({
+      branch: "t3/sandbox-0a1b2c3d",
+      head: v2,
+      hello: "v2\n",
+      sandboxId: SANDBOX_ID,
+    });
+    expect(afterReplay).toBe("this agent's edit\n");
   });
 
   const PROJECT_URL = "https://github.com/pingdotgg/t3code.git";
@@ -377,6 +428,7 @@ describe("SandboxGuest", () => {
           remotes: [{ name: "origin", url: "https://github.com/acme/app.git" }],
           trackedRemote: "origin",
           commit: null,
+          sandboxId: SANDBOX_ID,
           branch: "t3/sandbox-0a1b2c3d",
           path: "/home/user/projects/app",
         })

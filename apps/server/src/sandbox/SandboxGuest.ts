@@ -83,6 +83,8 @@ export interface SandboxGuestTarget {
 }
 
 export interface SandboxCheckout extends SandboxRepository {
+  /** The sandbox the clone is for, which the clone's config names once it is its own. */
+  readonly sandboxId: string;
   /** The task branch the clone starts on, created at `commit`. */
   readonly branch: string;
   /** Absolute path in the guest. */
@@ -198,6 +200,8 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
   const trackedUrl = shellQuote(
     checkout.remotes.find((remote) => remote.name === checkout.trackedRemote)!.url,
   );
+  const sandboxId = shellQuote(checkout.sandboxId);
+  const others = checkout.remotes.filter((remote) => remote.name !== checkout.trackedRemote);
   const addRemotes = (repository: string, remotes: ReadonlyArray<GitRemote>) =>
     remotes.map(
       (remote) =>
@@ -206,6 +210,9 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
   // A configured upstream would be one the remote does not have yet, which reads as pushed.
   const pushToTracked = (repository: string) =>
     `  git -C ${repository} config -- ${shellQuote(`branch.${checkout.branch}.pushRemote`)} ${tracked}`;
+  // Written last, since a clone that names this sandbox is never moved again.
+  const markOwn = (repository: string) =>
+    `  git -C ${repository} config -- t3.sandboxId ${sandboxId}`;
   return [
     "set -euo pipefail",
     // A replay must not delete the partial clone of a run still going.
@@ -215,26 +222,26 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
     `if [ ! -d ${path}/.git ]; then`,
     `  rm -rf ${partial}`,
     `  git clone --quiet --origin ${tracked} -- ${trackedUrl} ${partial} ${CLOSE_EXEC_LOCK}`,
-    ...addRemotes(
-      partial,
-      checkout.remotes.filter((remote) => remote.name !== checkout.trackedRemote),
-    ),
+    ...addRemotes(partial, others),
     `  git -C ${partial} checkout --quiet -b ${branch}${
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
     } ${CLOSE_EXEC_LOCK}`,
     pushToTracked(partial),
+    markOwn(partial),
     `  mv ${partial} ${path}`,
     // A template's clone, which an earlier sandbox made: it takes this launch's
-    // remotes and moves to its commit. Once the task branch exists the clone is
-    // this sandbox's own, and an agent's work on it is never reset.
-    `elif ! git -C ${path} rev-parse --verify --quiet ${shellQuote(`refs/heads/${checkout.branch}`)} >/dev/null; then`,
+    // remotes and moves to its commit. Once the clone names this sandbox it is
+    // its own, and an agent's work on it is never reset. The task branch cannot
+    // tell, since another sandbox's id may start the same way.
+    `elif [ "$(git -C ${path} config --get t3.sandboxId || true)" != ${sandboxId} ]; then`,
     `  for remote in $(git -C ${path} remote); do git -C ${path} remote remove "$remote"; done`,
     ...addRemotes(path, checkout.remotes),
     `  git -C ${path} fetch --quiet -- ${tracked} ${
       checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
     } ${CLOSE_EXEC_LOCK}`,
-    `  git -C ${path} checkout --quiet --force -b ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
+    `  git -C ${path} checkout --quiet --force -B ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
     pushToTracked(path),
+    markOwn(path),
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
     `cat ${path}/t3.json 2>/dev/null || true`,

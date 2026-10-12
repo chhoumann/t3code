@@ -438,6 +438,7 @@ describe("SandboxService", () => {
           assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
           assert.deepStrictEqual(world.checkouts[2], {
             ...onFork,
+            sandboxId: "project-a-fork",
             branch: "t3/sandbox-project-",
             path: "/home/user/projects/Hello-World",
           });
