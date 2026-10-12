@@ -23,9 +23,9 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { vi } from "vite-plus/test";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
-import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
+import { type FakeEntries, fakeEnvironmentRegistry } from "./sandboxTestFixtures.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 
 // The owner grants this device `operate`, so its `sandboxes.update` may wake the sandbox.
@@ -79,10 +79,12 @@ const sandboxView = (
 /**
  * One device's thread commands against a sandbox whose owner it is connected
  * to. The owner records every change it is asked for; the sandbox records
- * every command once the test opens this device's socket to it.
+ * every command once the test opens this device's socket to it. The device is
+ * paired with the sandbox unless `paired` is false, until the test calls `pair`.
  */
 const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function* (
   initial: SandboxView,
+  options?: { readonly paired?: boolean },
 ) {
   const owners = yield* SubscriptionRef.make<
     ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>
@@ -119,21 +121,15 @@ const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function*
     [OWNER, yield* SubscriptionRef.make(Option.some(ownerSession))],
     [SANDBOX_ENV, yield* SubscriptionRef.make(Option.none<RpcSession>())],
   ]);
-  const run: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] = (environmentId, effect) =>
-    Effect.provideService(
-      effect,
-      EnvironmentSupervisor.EnvironmentSupervisor,
-      EnvironmentSupervisor.EnvironmentSupervisor.of({
-        target: { environmentId },
-        session: sessions.get(environmentId)!,
-      } as EnvironmentSupervisor.EnvironmentSupervisor["Service"]),
-    );
+  const owner: FakeEntries = new Map([[OWNER, { target: { label: "Work laptop" } }]]);
+  const paired: FakeEntries = new Map([...owner, [SANDBOX_ENV, { target: { label: "Sandbox" } }]]);
+  const entries = yield* SubscriptionRef.make(options?.paired === false ? owner : paired);
   const runtime = Atom.runtime(
     Layer.mergeAll(
-      Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
-        entries: yield* SubscriptionRef.make(new Map()),
-        run,
-      } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]),
+      Layer.succeed(
+        EnvironmentRegistry.EnvironmentRegistry,
+        fakeEnvironmentRegistry(entries, sessions),
+      ),
       Layer.succeed(
         SandboxRegistrations.SandboxRegistrations,
         SandboxRegistrations.SandboxRegistrations.of({ owners, start: Effect.void }),
@@ -156,6 +152,7 @@ const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function*
     asked,
     dispatched,
     showStatus,
+    pair: SubscriptionRef.set(entries, paired),
     connect: SubscriptionRef.set(sessions.get(SANDBOX_ENV)!, Option.some(sandboxSession)),
   };
 });
@@ -197,6 +194,27 @@ describe("thread commands in a sandbox", () => {
         ["message.dispatch", "thread-a"],
         ["message.dispatch", "thread-b"],
       ]);
+    }),
+  );
+
+  it.effect("wakes an asleep sandbox this device has yet to pair with", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness(
+        sandboxView({ _tag: "stopped", reason: "external" }, "running"),
+        { paired: false },
+      );
+      const result = h.commands.wake.run(h.registry, {
+        environmentId: SANDBOX_ENV,
+        input: undefined,
+      });
+      yield* Effect.yieldNow;
+      expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
+
+      yield* h.showStatus({ _tag: "ready" });
+      yield* h.pair;
+      yield* h.connect;
+      const woke = yield* Effect.promise(() => result);
+      expect(AsyncResult.isSuccess(woke) && woke.value).toBe(true);
     }),
   );
 

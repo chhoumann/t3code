@@ -24,6 +24,7 @@ import {
   createAtomCommandScheduler,
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
+  createRuntimeCommand,
 } from "./runtime.ts";
 import {
   type ThreadCommandInput,
@@ -182,9 +183,14 @@ export function createThreadEnvironmentAtoms<R, E>(
       ),
     );
   };
-  const wake = createEnvironmentCommand(runtime, {
+  // Runs beside the sandbox's environment, not in it: a device pairs with a sandbox only once
+  // it runs, so one that never saw it awake has no connection to it until the wake ends.
+  const wake = createRuntimeCommand(runtime, {
     label: "environment-data:commands:thread:wake",
-    execute: (_input: void, registry, environmentId) =>
+    execute: (
+      { environmentId }: { readonly environmentId: EnvironmentId; readonly input: void },
+      registry,
+    ) =>
       wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }).pipe(
         Effect.tap((woke) => (woke ? readSession(registry, environmentId) : Effect.void)),
       ),

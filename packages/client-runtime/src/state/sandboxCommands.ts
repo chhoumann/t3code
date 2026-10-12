@@ -144,7 +144,8 @@ const awaitSandboxBack = (
 
 /**
  * Runs `effect` in the environment once it has a session again, as it does
- * shortly after its sandbox wakes.
+ * shortly after its sandbox wakes. A device that never saw the sandbox awake
+ * pairs with it only then, so the environment may register while this waits.
  */
 export const onceConnected = <A, E, R>(
   environmentId: EnvironmentId,
@@ -152,26 +153,27 @@ export const onceConnected = <A, E, R>(
 ) =>
   Effect.gen(function* () {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    return yield* registry.run(
-      environmentId,
-      Effect.gen(function* () {
-        const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-        const session = yield* SubscriptionRef.changes(supervisor.session).pipe(
-          Stream.filter(Option.isSome),
-          Stream.runHead,
-          Effect.timeoutOrElse({
-            duration: SANDBOX_RECONNECT_TIMEOUT,
-            orElse: () => Effect.succeedNone,
-          }),
-        );
-        if (Option.isNone(session)) {
-          return yield* notAwake(
-            "The sandbox is awake, but this device could not reconnect to it.",
-          );
-        }
-        return yield* effect;
-      }),
-    );
+    const session = yield* registry
+      .followStream(
+        environmentId,
+        Stream.unwrap(
+          EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+            Effect.map((supervisor) => SubscriptionRef.changes(supervisor.session)),
+          ),
+        ),
+      )
+      .pipe(
+        Stream.filter(Option.isSome),
+        Stream.runHead,
+        Effect.timeoutOrElse({
+          duration: SANDBOX_RECONNECT_TIMEOUT,
+          orElse: () => Effect.succeedNone,
+        }),
+      );
+    if (Option.isNone(session)) {
+      return yield* notAwake("The sandbox is awake, but this device could not reconnect to it.");
+    }
+    return yield* registry.run(environmentId, effect);
   });
 
 /** Fails at once when the sandbox's owner cannot be asked, since only it can wake the sandbox. */
