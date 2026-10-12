@@ -65,6 +65,8 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     deadlines: [] as Array<number>,
     /** Every deadline move fails like this; null lets them through. */
     refuseDeadlines: null as SandboxProviderErrorKind | null,
+    /** Deadline moves refused by `refuseDeadlines`. */
+    refusedDeadlines: 0,
     /** Every inspect fails like this; null lets them through. */
     failInspects: null as SandboxProviderErrorKind | null,
     /** Stops the owner asked for; the provider's own deadline is not one. */
@@ -164,6 +166,7 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     setDeadline: (_account, id, ttlSeconds) =>
       Effect.gen(function* () {
         if (world.refuseDeadlines !== null) {
+          world.refusedDeadlines += 1;
           return yield* new SandboxProviderError({
             operation: "set-deadline",
             kind: world.refuseDeadlines,
@@ -670,6 +673,7 @@ describe("SandboxService", () => {
         const [machine] = [...world.machines.values()];
         assert.strictEqual(machine?.state, "running");
         assert.deepStrictEqual((yield* sandboxes.list())[0]?.status, { _tag: "ready" });
+        assert.isAbove(world.refusedDeadlines, 0);
         assert.deepStrictEqual(world.deadlines, []);
         assert.strictEqual(world.stops, 0);
       }).pipe(Effect.provide(started.context));
