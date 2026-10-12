@@ -40,7 +40,7 @@ export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
  */
 const SANDBOX_EXEC_LOCK = `${SANDBOX_INPUTS_DIR}/exec.lock`;
 /** Everything the boot script prints, kept for diagnosing a failed boot. */
-const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
+export const SANDBOX_BOOT_LOG = `${SANDBOX_INPUTS_DIR}/boot.log`;
 /** Stable path to the installed `t3`, for exec calls such as minting sessions. */
 export const SANDBOX_T3_BIN = `${SANDBOX_T3_HOME}/bin/t3`;
 /** Staged by the owner, then swapped in by the refresh command. */

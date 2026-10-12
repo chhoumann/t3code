@@ -56,7 +56,11 @@ import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
-import { SANDBOX_ENV_FILE, SANDBOX_SETUP_ENV_FILE } from "../src/sandbox/sandboxBootScript.ts";
+import {
+  SANDBOX_BOOT_LOG,
+  SANDBOX_ENV_FILE,
+  SANDBOX_SETUP_ENV_FILE,
+} from "../src/sandbox/sandboxBootScript.ts";
 import * as SandboxAccounts from "../src/sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "../src/sandbox/SandboxGuest.ts";
 import { ProviderMachineId, SandboxProvider } from "../src/sandbox/SandboxProvider.ts";
@@ -73,6 +77,13 @@ const { values: flags } = NodeUtil.parseArgs({
      */
     "agent-proxy": { type: "boolean", default: false },
     repo: { type: "string", default: "https://github.com/octocat/Hello-World" },
+    /**
+     * Gives the account a three-minute stop time, then checks that a busy turn
+     * outlives it, that the idle sandbox goes to sleep with desired still
+     * running, that Boat's deadline moves on request, and that a wake brings
+     * the same thread back. Skips the stop/resume rounds.
+     */
+    idle: { type: "boolean", default: false },
   },
 });
 
@@ -107,6 +118,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus> = new Set([
 ]);
 const LOGIN_FAILURE = /not logged in|\/login|invalid api key|authentication_error/i;
 const STEP_TIMEOUT = "10 minutes";
+const IDLE_STOP_AFTER_HOURS = 0.05;
 const decodeSeed = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ threadId: Schema.String, projectId: Schema.String })),
 );
@@ -197,7 +209,7 @@ const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv |
           template: null,
           providerEnvironment: null,
           size: "small" as const,
-          stopAfterHours: 1,
+          stopAfterHours: flags.idle ? IDLE_STOP_AFTER_HOURS : 1,
         }));
   return Layer.succeed(
     SandboxAccounts.SandboxAccounts,
@@ -351,6 +363,13 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
     });
     const cleanUp = Effect.gen(function* () {
       yield* say("cleaning up after a failure");
+      // Lines that could carry a credential are dropped before printing.
+      yield* exec(
+        `tail -n 40 ${SANDBOX_BOOT_LOG} | grep -viE 'key|token|secret|auth' || true`,
+      ).pipe(
+        Effect.tap((tail) => say(`boot log tail:\n${tail}`)),
+        Effect.ignore,
+      );
       yield* sandboxes.update({ id, desired: "destroyed" }).pipe(Effect.ignore);
       yield* awaitGone({ failFast: false });
       yield* confirmGone;
@@ -498,6 +517,70 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
         });
         followUps += 1;
       }).pipe(Effect.scoped);
+
+    if (flags.idle) {
+      const deadlineNow = Effect.gen(function* () {
+        const machine = yield* machineId;
+        if (machine === null) return yield* new TracerError({ reason: "no machine id" });
+        const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
+        return seen?.archiveAfter ?? null;
+      });
+      const created = yield* deadlineNow;
+      const launchedAt = yield* Clock.currentTimeMillis;
+      yield* say(
+        `Boat deadline after launch: ${created === null ? "none" : `+${seconds(created - launchedAt)}s`}`,
+      );
+      yield* check(created !== null, "Boat reports an auto-stop deadline");
+      yield* step(
+        "Boat moves the deadline on request",
+        Effect.gen(function* () {
+          const machine = ProviderMachineId.make((yield* machineId) ?? "");
+          yield* provider.setDeadline(account, machine, 3 * 3600);
+          const moved = yield* deadlineNow;
+          const now = yield* Clock.currentTimeMillis;
+          yield* say(`Boat deadline after PATCH: +${seconds((moved ?? 0) - now)}s`);
+          yield* check(
+            moved !== null && Math.abs(moved - (now + 3 * 3600 * 1000)) < 120_000,
+            "the deadline is three hours out",
+          );
+        }),
+      );
+      if (flags["agent-proxy"]) {
+        yield* sendFollowUp(
+          "Run `sleep 240 && echo DONE` in a shell, wait for it to finish, and answer with its output only.",
+        );
+        const outcome = yield* step(
+          "busy turn longer than the stop time",
+          awaitReply(1 + followUps),
+        );
+        yield* checkReply("busy turn", outcome);
+        const afterBusy = (yield* sandboxes.list()).find((view) => view.id === id);
+        yield* check(
+          afterBusy?.status._tag === "ready",
+          `the sandbox stayed up through a 4-minute turn (saw ${afterBusy?.status._tag})`,
+        );
+      }
+      const asleep = yield* step("idle -> asleep", awaitStatus("stopped"));
+      yield* check(
+        asleep.status._tag === "stopped" && asleep.status.reason === "idle",
+        `stopped for inactivity (saw ${JSON.stringify(asleep.status)})`,
+      );
+      yield* check(asleep.desired === "running", "desired is still running while asleep");
+      yield* sandboxes.update({ id, desired: "running" });
+      const awake = yield* step("wake -> ready", awaitStatus("ready"));
+      yield* check(awake.environmentId === ready.environmentId, "the same environment woke");
+      yield* readBack("after wake: the same seed thread");
+      if (flags["agent-proxy"]) {
+        yield* sendFollowUp("Answer with the single word AWAKE.");
+        yield* checkReply(
+          "after wake",
+          yield* step("after wake: follow-up -> reply", awaitReply(1 + followUps)),
+        );
+      }
+      yield* sandboxes.update({ id, desired: "destroyed" });
+      yield* step("destroyed", awaitGone());
+      return yield* confirmGone;
+    }
 
     const clientToken = yield* step(
       "pairing grant exchanges for a session",
