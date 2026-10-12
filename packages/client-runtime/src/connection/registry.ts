@@ -180,6 +180,15 @@ export class EnvironmentRegistry extends Context.Service<
       | Persistence.ConnectionPersistenceError
       | ConnectionBlockedError
     >;
+    /**
+     * Marks an environment dormant (see `ConnectionCatalogEntry.dormant`) or
+     * lets it dial again. A dormant environment stays enabled, with its cache,
+     * but drops its socket and stops retrying.
+     */
+    readonly setDormant: (
+      environmentId: EnvironmentId,
+      dormant: boolean,
+    ) => Effect.Effect<void, EnvironmentNotRegisteredError>;
     readonly setCompatibility: (
       environmentId: EnvironmentId,
       error: ConnectionBlockedError | null,
@@ -224,6 +233,9 @@ function contributedRouteIds(
       : [];
   });
 }
+
+/** Whether an environment's supervisor should hold a connection. */
+const dials = (entry: ConnectionCatalogEntry) => entry.enabled && entry.dormant !== true;
 
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
@@ -401,7 +413,7 @@ export const make = Effect.gen(function* () {
             Scope.provide(scope),
             Effect.onError(() => Scope.close(scope, Exit.void)),
           );
-          if (entry.enabled) {
+          if (dials(entry)) {
             yield* supervisor.connect;
           }
           yield* SubscriptionRef.update(serviceScopes, (current) => {
@@ -1090,6 +1102,43 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  /**
+   * Installs an entry whose switches changed and applies them to its
+   * supervisor in place, so it keeps its generation and durable streams;
+   * `installEntryLocked` would tear it down instead.
+   */
+  const switchLocked = Effect.fn("EnvironmentRegistry.switchLocked")(function* (
+    next: ConnectionCatalogEntry,
+  ) {
+    const environmentId = next.target.environmentId;
+    const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+    if (lease !== undefined) {
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(environmentId, { ...lease, entry: next }),
+      );
+    }
+    yield* SubscriptionRef.update(entries, (current) => new Map(current).set(environmentId, next));
+    if (lease !== undefined) {
+      yield* dials(next) ? lease.supervisor.connect : lease.supervisor.disconnect;
+    } else if (dials(next)) {
+      yield* createServiceScope(next);
+    }
+  });
+
+  const setDormant = Effect.fn("EnvironmentRegistry.setDormant")(function* (
+    environmentId: EnvironmentId,
+    dormant: boolean,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const { dormant: previous, ...entry } = yield* getEntry(environmentId);
+        if ((previous === true) === dormant) return;
+        yield* switchLocked(dormant ? { ...entry, dormant: true } : entry);
+      }),
+    );
+  });
+
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1112,27 +1161,7 @@ export const make = Effect.gen(function* () {
         if (!(yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
           yield* registrations.setEnabled(environmentId, enabled);
         }
-        const next: ConnectionCatalogEntry = { ...entry, enabled };
-        // Update the lease in place so the supervisor keeps its generation and
-        // durable streams; `installEntryLocked` would tear it down instead.
-        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
-        if (lease !== undefined) {
-          yield* SubscriptionRef.update(serviceScopes, (current) => {
-            const nextScopes = new Map(current);
-            nextScopes.set(environmentId, { ...lease, entry: next });
-            return nextScopes;
-          });
-        }
-        yield* SubscriptionRef.update(entries, (current) => {
-          const nextEntries = new Map(current);
-          nextEntries.set(environmentId, next);
-          return nextEntries;
-        });
-        if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
-        } else if (enabled) {
-          yield* createServiceScope(next);
-        }
+        yield* switchLocked({ ...entry, enabled });
         // The supervisor only owns the RPC session. A managed SSH backend and
         // its tunnel outlive it, so switching off tears those down as well.
         if (!enabled) {
@@ -1239,6 +1268,7 @@ export const make = Effect.gen(function* () {
     removeRelayEnvironments,
     retryNow,
     setEnabled,
+    setDormant,
     setCompatibility,
     state,
     stateChanges,

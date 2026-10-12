@@ -1158,6 +1158,53 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("a dormant environment stays switched on and cached, and dials only once woken", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+
+        yield* registry.setDormant(TARGET.environmentId, true);
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "available",
+        );
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId);
+        expect({ enabled: entry?.enabled, dormant: entry?.dormant }).toEqual({
+          enabled: true,
+          dormant: true,
+        });
+        expect((yield* Ref.get(harness.shellCache)).get(TARGET.environmentId)).toEqual(
+          CACHED_SNAPSHOT,
+        );
+        expect((yield* Ref.get(harness.storedDisabled)).has(TARGET.environmentId)).toBe(false);
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+
+        // Switching it off and on, as Settings may, keeps it dormant.
+        yield* registry.setEnabled(TARGET.environmentId, false);
+        yield* registry.setEnabled(TARGET.environmentId, true);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId),
+        ).toMatchObject({ enabled: true, dormant: true });
+
+        yield* registry.setDormant(TARGET.environmentId, false);
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
   it.effect("moves durable streams to a replacement supervisor", () =>
     Effect.gen(function* () {
       const replacement = new RelayConnectionTarget({
