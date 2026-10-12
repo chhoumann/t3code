@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { SandboxAccountId, ServerSettingsError } from "@t3tools/contracts";
+import { sandboxProjectKey } from "@t3tools/shared/sandboxProject";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -70,8 +71,8 @@ const makeWorld = () => {
       return ServerSettings.ServerSettingsService.of({
         ...settings,
         updateSandboxAccounts: (update) =>
-          settings.updateSandboxAccounts((accounts) =>
-            update(accounts).pipe(
+          settings.updateSandboxAccounts((current) =>
+            update(current).pipe(
               Effect.tap(() => {
                 if (!world.failSettingsWrite) return Effect.void;
                 world.failSettingsWrite = false;
@@ -247,6 +248,30 @@ describe("SandboxAccounts", () => {
       assert.strictEqual(gone._tag, "SandboxAccountNotFoundError");
       assert.strictEqual(world.secrets.size, 0);
       yield* accounts.remove(ID);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("drops a removed account's project defaults and keeps every other account's", () => {
+    const { layer } = makeWorld();
+    return Effect.gen(function* () {
+      const accounts = yield* SandboxAccounts.SandboxAccounts;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const personal = SandboxAccountId.make("boat-personal");
+      yield* accounts.save({ ...input, apiKey: "key", env: [] });
+      yield* accounts.save({ ...input, id: personal, label: "Personal", apiKey: "key", env: [] });
+      yield* settings.updateSettings({
+        sandboxProjectDefaults: {
+          [sandboxProjectKey(ID, "github.com/octocat/hello-world")]: { template: "work" },
+          [sandboxProjectKey(ID, "github.com/octocat/website")]: { template: null },
+          [sandboxProjectKey(personal, "github.com/octocat/hello-world")]: { template: "mine" },
+        },
+      });
+
+      yield* accounts.remove(ID);
+
+      assert.deepStrictEqual((yield* settings.getSettings).sandboxProjectDefaults, {
+        '["boat-personal","github.com/octocat/hello-world"]': { template: "mine" },
+      });
     }).pipe(Effect.provide(layer));
   });
 

@@ -15,6 +15,7 @@ import type {
   SandboxMachineSize,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import { isSandboxProjectKeyOf } from "@t3tools/shared/sandboxProject";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -246,16 +247,16 @@ const make = Effect.gen(function* () {
         };
         let dropped: ReadonlyArray<string> = [];
         yield* settings
-          .updateSandboxAccounts((accounts) =>
+          .updateSandboxAccounts((current) =>
             Effect.gen(function* () {
               yield* secrets.set(apiKeySecretName(id), textEncoder.encode(apiKey));
               for (const entry of env) {
                 yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
               }
-              dropped = (accounts[id]?.env ?? [])
+              dropped = (current.sandboxAccounts[id]?.env ?? [])
                 .map(({ name }) => name)
                 .filter((name) => !env.some((entry) => entry.name === name));
-              return { ...accounts, [id]: config };
+              return { ...current, sandboxAccounts: { ...current.sandboxAccounts, [id]: config } };
             }),
           )
           .pipe(store);
@@ -274,10 +275,10 @@ const make = Effect.gen(function* () {
     return Effect.gen(function* () {
       let removed: SandboxAccountConfig | undefined;
       yield* settings
-        .updateSandboxAccounts((accounts) =>
+        .updateSandboxAccounts((current) =>
           Effect.gen(function* () {
-            const config = accounts[accountId];
-            if (config === undefined) return accounts;
+            const config = current.sandboxAccounts[accountId];
+            if (config === undefined) return current;
             // A sandbox still being destroyed needs its account's key to finish.
             const [row] = yield* sql<{ readonly live: number }>`
               SELECT COUNT(*) AS live FROM sandboxes
@@ -288,8 +289,15 @@ const make = Effect.gen(function* () {
             if (live > 0)
               return yield* new SandboxAccountInUseError({ accountId, sandboxes: live });
             removed = config;
-            const { [accountId]: _removed, ...rest } = accounts;
-            return rest;
+            const { [accountId]: _removed, ...sandboxAccounts } = current.sandboxAccounts;
+            return {
+              sandboxAccounts,
+              sandboxProjectDefaults: Object.fromEntries(
+                Object.entries(current.sandboxProjectDefaults).filter(
+                  ([key]) => !isSandboxProjectKeyOf(key, accountId),
+                ),
+              ),
+            };
           }),
         )
         .pipe(

@@ -10,6 +10,11 @@ export function sandboxProjectKey(accountId: SandboxAccountId, remoteUrl: string
   return JSON.stringify([accountId, normalizeGitRemoteUrl(remoteUrl)]);
 }
 
+/** Whether `key` is one of the account's `sandboxProjectKey` bindings. */
+export function isSandboxProjectKeyOf(key: string, accountId: SandboxAccountId): boolean {
+  return key.startsWith(`${JSON.stringify([accountId]).slice(0, -1)},`);
+}
+
 export function resolveSandboxProjectDefaults(
   account: { readonly size: SandboxMachineSize; readonly stopAfterHours: number | null },
   project: SandboxProjectDefaults | undefined,
