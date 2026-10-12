@@ -2,7 +2,7 @@ import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Atom, type AtomRegistry } from "effect/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
@@ -16,6 +16,7 @@ import {
   runAtomCommand,
   wakeSandbox,
 } from "./sandboxCommands.ts";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
 
@@ -146,6 +147,9 @@ export type {
   WatchThreadPullRequestInput,
 } from "../operations/commands.ts";
 
+/** How long a woken sandbox may take to answer for this device's session. */
+const SESSION_READ_TIMEOUT = "10 seconds";
+
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
@@ -163,10 +167,27 @@ export function createThreadEnvironmentAtoms<R, E>(
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
       JSON.stringify([environmentId, input.threadId]),
   };
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  /**
+   * Reads a sandbox's own session once it is awake, so this device's
+   * up-front checks (permissions, uploads) answer from it again.
+   */
+  const readSession = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) => {
+    const atom = sessions.sessionStateAtom(environmentId);
+    return Effect.scoped(
+      AtomRegistry.mount(registry, atom).pipe(
+        Effect.andThen(AtomRegistry.getResult(registry, atom, { suspendOnWaiting: true })),
+        Effect.timeoutOption(SESSION_READ_TIMEOUT),
+        Effect.ignore,
+      ),
+    );
+  };
   const wake = createEnvironmentCommand(runtime, {
     label: "environment-data:commands:thread:wake",
     execute: (_input: void, registry, environmentId) =>
-      wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }),
+      wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }).pipe(
+        Effect.tap((woke) => (woke ? readSession(registry, environmentId) : Effect.void)),
+      ),
     scheduler,
     // Everything one device sends while a sandbox wakes shares one wake, so its owner is asked once.
     concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },

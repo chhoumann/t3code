@@ -1,4 +1,5 @@
 import {
+  AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
   type OrchestrationV2ThreadShell,
@@ -10,6 +11,7 @@ import {
   type ServerSettings,
   type ThreadId,
   type VcsStatusResult,
+  sessionGrantsScope,
 } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import * as DateTime from "effect/DateTime";
@@ -30,7 +32,8 @@ import {
   sandboxIndex,
   sandboxPresence,
 } from "../sandbox/sandboxRegistrations.ts";
-import { createSandboxEnvironmentAtoms } from "./sandboxCommands.ts";
+import { createSandboxEnvironmentAtoms, wakesForWork } from "./sandboxCommands.ts";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 
 export { sandboxPresence };
 export type { SandboxIndexEntry, SandboxPresence };
@@ -66,7 +69,47 @@ export function createSandboxAtoms<R, E>(
       Atom.withLabel(`sandboxes:owner:${owner}`),
     ),
   );
-  return { ownersAtom, indexAtom, ownerSandboxesAtom, ...createSandboxEnvironmentAtoms(runtime) };
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  /**
+   * Whether this client may send work to an environment's threads, read up
+   * front, from the grant `workGrantEnvironmentId` names.
+   */
+  const canSendWorkAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      const result = get(
+        sessions.sessionStateAtom(workGrantEnvironmentId(get(indexAtom), environmentId)),
+      );
+      const session = Option.getOrNull(AsyncResult.value(result));
+      return (
+        result._tag !== "Failure" &&
+        session !== null &&
+        sessionGrantsScope(session, AuthOrchestrationOperateScope)
+      );
+    }).pipe(Atom.withLabel(`sandboxes:can-send-work:${environmentId}`)),
+  );
+  return {
+    ownersAtom,
+    indexAtom,
+    ownerSandboxesAtom,
+    canSendWorkAtom,
+    ...createSandboxEnvironmentAtoms(runtime),
+  };
+}
+
+/**
+ * The environment whose session says up front whether this client may send
+ * work to `environmentId`. A sandbox that sleeps cannot answer for its
+ * session, so its owner answers until it is back: the owner is what wakes
+ * it, and the sandbox checks the work itself once it runs.
+ */
+export function workGrantEnvironmentId(
+  index: ReadonlyMap<EnvironmentId, SandboxIndexEntry>,
+  environmentId: EnvironmentId,
+): EnvironmentId {
+  const sandbox = index.get(environmentId);
+  return sandbox !== undefined && wakesForWork(sandbox.view)
+    ? sandbox.ownerEnvironmentId
+    : environmentId;
 }
 
 export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {

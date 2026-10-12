@@ -191,12 +191,27 @@ const requireOwner = (ownerEnvironmentId: EnvironmentId) =>
   });
 
 /**
- * Wakes the sandbox an environment belongs to when its machine sleeps or was
- * put away: asks the sandbox's owner to run it, unless a resume is already on
- * its way, then waits for the owner to report it running and for this
- * device's socket to it. Succeeds with whether it had to wake; an environment
- * that is not such a sandbox is left alone. A sandbox being deleted never
- * wakes.
+ * Whether work sent to a sandbox's environment wakes the sandbox first: it
+ * sleeps, was put away, failed on its way to running, or is already waking.
+ * A sandbox being deleted never wakes.
+ */
+export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boolean {
+  if (view.desired === "destroyed") return false;
+  const presence = SandboxRegistrations.sandboxPresence(view);
+  return (
+    presence === "asleep" ||
+    presence === "put-away" ||
+    presence === "failed" ||
+    presence === "waking"
+  );
+}
+
+/**
+ * Wakes the sandbox an environment belongs to when work sent to it needs that
+ * (`wakesForWork`): asks the sandbox's owner to run it, unless a resume is
+ * already on its way, then waits for the owner to report it running and for
+ * this device's socket to it. Succeeds with whether it had to wake; any other
+ * environment is left alone.
  */
 export const wakeSandbox = <B, E, R>(input: {
   readonly environmentId: EnvironmentId;
@@ -208,22 +223,14 @@ export const wakeSandbox = <B, E, R>(input: {
     const sandbox = SandboxRegistrations.sandboxIndex(
       yield* SubscriptionRef.get(registrations.value.owners),
     ).get(input.environmentId);
-    if (sandbox === undefined || sandbox.view.desired === "destroyed") return false;
-    switch (SandboxRegistrations.sandboxPresence(sandbox.view)) {
-      case "asleep":
-      case "put-away":
-      case "failed":
-        yield* requireOwner(sandbox.ownerEnvironmentId);
-        yield* input.toOwner({
-          ownerEnvironmentId: sandbox.ownerEnvironmentId,
-          sandboxId: sandbox.sandboxId,
-          desired: "running",
-        });
-        break;
-      case "waking":
-        break;
-      default:
-        return false;
+    if (sandbox === undefined || !wakesForWork(sandbox.view)) return false;
+    if (SandboxRegistrations.sandboxPresence(sandbox.view) !== "waking") {
+      yield* requireOwner(sandbox.ownerEnvironmentId);
+      yield* input.toOwner({
+        ownerEnvironmentId: sandbox.ownerEnvironmentId,
+        sandboxId: sandbox.sandboxId,
+        desired: "running",
+      });
     }
     yield* awaitSandboxBack(registrations.value, sandbox);
     yield* onceConnected(input.environmentId, Effect.void);

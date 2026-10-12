@@ -10,15 +10,19 @@ import { assert, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   allowed: new Set<string>(),
+  canSendWork: new Set<string>(),
   readScope: vi.fn(),
   run: vi.fn(),
 }));
 
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
 vi.mock("./session", () => ({ readEnvironmentScope: state.readScope }));
+vi.mock("./sandboxes", () => ({
+  readCanSendWork: (environmentId: string) => state.canSendWork.has(environmentId),
+}));
 vi.mock("./use-atom-command", () => ({ useAtomCommand: () => state.run }));
 
-import { useOrchestrationCommand } from "./use-orchestration-command";
+import { useOrchestrationCommand, useWorkCommand } from "./use-orchestration-command";
 
 const first = EnvironmentId.make("primary");
 const second = EnvironmentId.make("secondary");
@@ -31,6 +35,7 @@ const target = (environmentId: EnvironmentId): Target => ({
 
 beforeEach(() => {
   state.allowed.clear();
+  state.canSendWork.clear();
   state.run.mockReset().mockResolvedValue(AsyncResult.success("receipt"));
   state.readScope
     .mockReset()
@@ -81,5 +86,20 @@ it("does not dispatch a later mutation after access changes while awaiting a rec
   finish!();
   expect((await pending)._tag).toBe("Success");
   expect((await mutate(target(second)))._tag).toBe("Failure");
+  expect(state.run).toHaveBeenCalledTimes(1);
+});
+
+it("lets work through to a sandbox that sleeps on the grant that wakes it", async () => {
+  // The sandbox cannot answer for its own session while it sleeps; its owner can.
+  state.canSendWork.add(second);
+  expect((await useOrchestrationCommand(command)(target(second)))._tag).toBe("Failure");
+  expect(await useWorkCommand(command)(target(second))).toMatchObject({
+    _tag: "Success",
+    value: "receipt",
+  });
+  expect(state.run).toHaveBeenCalledTimes(1);
+
+  state.canSendWork.delete(second);
+  expect((await useWorkCommand(command)(target(second)))._tag).toBe("Failure");
   expect(state.run).toHaveBeenCalledTimes(1);
 });

@@ -22,7 +22,9 @@ import {
   sandboxProject,
   sandboxRepositoryFor,
   sandboxWakeLabel,
+  workGrantEnvironmentId,
 } from "./sandboxes.ts";
+import { sandboxIndex } from "../sandbox/sandboxRegistrations.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const REMOTE = "https://github.com/octocat/Hello-World.git";
@@ -132,6 +134,65 @@ describe("sandboxWakeLabel", () => {
     ["failed", "available", null],
   ] as const)("shows %s while %s as %s", (presence, phase, label) => {
     expect(sandboxWakeLabel(presence, phase)).toBe(label);
+  });
+});
+
+describe("workGrantEnvironmentId", () => {
+  const SANDBOX_ENVIRONMENT = EnvironmentId.make("environment-sandbox");
+  const index = (desired: SandboxView["desired"], status: SandboxStatus) =>
+    sandboxIndex(
+      new Map([
+        [
+          OWNER,
+          [
+            {
+              id: SandboxId.make("sbx-1"),
+              accountId: SandboxAccountId.make("work"),
+              title: "Fix the flaky test",
+              message: "Fix the flaky test",
+              repository: { remoteUrl: REMOTE, commit: HEAD },
+              threadId: ThreadId.make("thread-seed"),
+              desired,
+              status,
+              environmentId: SANDBOX_ENVIRONMENT,
+              httpBaseUrl: "https://sbx-1.boat.test",
+              createdAt: "2026-10-09T12:00:00.000Z",
+            },
+          ],
+        ],
+      ]),
+    );
+
+  it.each([
+    ["its owner's", "asleep", "running", { _tag: "stopped", reason: "external" }, OWNER],
+    ["its owner's", "waking", "running", { _tag: "resuming" }, OWNER],
+    [
+      "its owner's",
+      "failed on its way back",
+      "running",
+      { _tag: "failed", step: "resume", message: "Boat refused", retryable: true },
+      OWNER,
+    ],
+    ["its own", "running", "running", { _tag: "ready" }, SANDBOX_ENVIRONMENT],
+    [
+      "its own",
+      "being deleted",
+      "destroyed",
+      { _tag: "failed", step: "destroy", message: "Boat refused", retryable: true },
+      SANDBOX_ENVIRONMENT,
+    ],
+  ] as const)(
+    "reads %s grant for work sent to a sandbox that is %s",
+    (_grant, _state, desired, status, expected) => {
+      expect(workGrantEnvironmentId(index(desired, status), SANDBOX_ENVIRONMENT)).toBe(expected);
+    },
+  );
+
+  it("reads an environment's own grant when it is not a sandbox", () => {
+    const remote = EnvironmentId.make("environment-remote");
+    expect(
+      workGrantEnvironmentId(index("running", { _tag: "stopped", reason: "external" }), remote),
+    ).toBe(remote);
   });
 });
 
