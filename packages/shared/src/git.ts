@@ -392,6 +392,7 @@ function toLocalStatusPart(status: VcsStatusResult): VcsStatusLocalResult {
       ? { sourceControlProvider: status.sourceControlProvider }
       : {}),
     hasPrimaryRemote: status.hasPrimaryRemote,
+    ...(status.trackedRemoteUrl === undefined ? {} : { trackedRemoteUrl: status.trackedRemoteUrl }),
     isDefaultRef: status.isDefaultRef,
     refName: status.refName,
     ...(status.headCommit === undefined ? {} : { headCommit: status.headCommit }),

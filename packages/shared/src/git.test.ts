@@ -265,6 +265,7 @@ describe("applyGitStatusStreamEvent", () => {
         baseUrl: "https://github.com",
       },
       hasPrimaryRemote: true,
+      trackedRemoteUrl: "git@github.com:octocat/demo.git",
       isDefaultRef: false,
       refName: "feature/demo",
       headCommit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",

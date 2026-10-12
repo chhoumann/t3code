@@ -1093,14 +1093,16 @@ export const make = Effect.gen(function* () {
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
+    const trackedRemote = details.isRepo ? yield* readTrackedRemote(cwd, details.branch) : null;
     const hostingProvider = details.isRepo
-      ? yield* resolveHostingProvider(cwd, details.branch)
+      ? yield* resolveHostingProvider(cwd, trackedRemote)
       : null;
 
     return {
       isRepo: details.isRepo,
       ...(hostingProvider ? { sourceControlProvider: hostingProvider } : {}),
       hasPrimaryRemote: details.hasOriginRemote,
+      ...(trackedRemote ? { trackedRemoteUrl: trackedRemote.remoteUrl } : {}),
       isDefaultRef: details.isDefaultBranch,
       refName: details.branch,
       ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
@@ -1422,17 +1424,24 @@ export const make = Effect.gen(function* () {
   const readConfigValueNullable = (cwd: string, key: string) =>
     gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
 
-  const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
+  const readTrackedRemote = Effect.fn("readTrackedRemote")(function* (
     cwd: string,
     branch: string | null,
   ) {
-    const preferredRemoteName =
-      branch === null
-        ? "origin"
-        : ((yield* readConfigValueNullable(cwd, `branch.${branch}.remote`)) ?? "origin");
+    const remoteName =
+      branch === null ? null : yield* readConfigValueNullable(cwd, `branch.${branch}.remote`);
     const remoteUrl =
-      (yield* readConfigValueNullable(cwd, `remote.${preferredRemoteName}.url`)) ??
-      (yield* readConfigValueNullable(cwd, "remote.origin.url"));
+      remoteName === null ? null : yield* readConfigValueNullable(cwd, `remote.${remoteName}.url`);
+    return remoteName === null || remoteUrl === null ? null : { remoteName, remoteUrl };
+  });
+
+  const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
+    cwd: string,
+    trackedRemote: { readonly remoteName: string; readonly remoteUrl: string } | null,
+  ) {
+    const preferredRemoteName = trackedRemote?.remoteName ?? "origin";
+    const remoteUrl =
+      trackedRemote?.remoteUrl ?? (yield* readConfigValueNullable(cwd, "remote.origin.url"));
 
     const provider = remoteUrl ? detectSourceControlProviderFromGitRemoteUrl(remoteUrl) : null;
     if (!remoteUrl || provider?.kind !== "unknown") return provider;
