@@ -13,14 +13,15 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
-  isSandboxStopped,
   pendingSandboxThreads,
   sandboxAccountChoices,
   sandboxFailureMessage,
   sandboxLandingThreadId,
   sandboxLaunchStageIndex,
+  sandboxPresence,
   sandboxProject,
   sandboxRepositoryFor,
+  sandboxWakeLabel,
 } from "./sandboxes.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
@@ -92,16 +93,45 @@ describe("sandboxRepositoryFor", () => {
   });
 });
 
-describe("isSandboxStopped", () => {
-  it("counts a sandbox stopped at its TTL or by the provider, not only one asked to stop", () => {
-    expect(
-      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "expired" } }),
-    ).toBe(true);
-    expect(
-      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "external" } }),
-    ).toBe(true);
-    expect(isSandboxStopped({ desired: "stopped", status: { _tag: "stopping" } })).toBe(true);
-    expect(isSandboxStopped({ desired: "running", status: { _tag: "ready" } })).toBe(false);
+describe("sandboxPresence", () => {
+  it.each([
+    ["running", "running", { _tag: "ready" }],
+    ["asleep", "running", { _tag: "stopped", reason: "external" }],
+    ["asleep", "running", { _tag: "stopping" }],
+    ["waking", "running", { _tag: "resuming" }],
+    ["put-away", "stopped", { _tag: "ready" }],
+    ["put-away", "stopped", { _tag: "stopped", reason: "requested" }],
+    ["launching", "running", { _tag: "booting" }],
+    [
+      "failed",
+      "running",
+      { _tag: "failed", step: "resume", message: "Boat refused", retryable: true },
+    ],
+    [
+      "failed",
+      "destroyed",
+      { _tag: "failed", step: "destroy", message: "Boat refused", retryable: true },
+    ],
+    ["gone", "destroyed", { _tag: "stopped", reason: "requested" }],
+    ["gone", "stopped", { _tag: "destroying" }],
+  ] as const)("reads %s when it should be %s and is %o", (presence, desired, status) => {
+    expect(sandboxPresence({ desired, status })).toBe(presence);
+  });
+});
+
+describe("sandboxWakeLabel", () => {
+  it.each([
+    ["asleep", "available", "Asleep"],
+    ["waking", "available", "Waking"],
+    ["running", "available", "Connecting"],
+    ["running", "connecting", "Connecting"],
+    ["running", "reconnecting", "Connecting"],
+    ["running", "connected", null],
+    ["running", "offline", null],
+    ["put-away", "available", null],
+    ["failed", "available", null],
+  ] as const)("shows %s while %s as %s", (presence, phase, label) => {
+    expect(sandboxWakeLabel(presence, phase)).toBe(label);
   });
 });
 

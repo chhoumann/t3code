@@ -30,7 +30,11 @@ const OWNER = EnvironmentId.make("environment-owner");
 const SANDBOX_ENV = EnvironmentId.make("environment-sandbox");
 const SANDBOX_ID = SandboxId.make("sbx-1");
 
-const view = (status: SandboxStatus, environmentId: EnvironmentId | null = SANDBOX_ENV) =>
+const view = (
+  status: SandboxStatus,
+  environmentId: EnvironmentId | null = SANDBOX_ENV,
+  desired: SandboxView["desired"] = "running",
+) =>
   ({
     id: SANDBOX_ID,
     accountId: SandboxAccountId.make("work"),
@@ -38,7 +42,7 @@ const view = (status: SandboxStatus, environmentId: EnvironmentId | null = SANDB
     message: "Fix the bug in hello.txt",
     repository: { remoteUrl: "https://github.com/octocat/Hello-World.git", commit: null },
     threadId: ThreadId.make("thread-seed"),
-    desired: "running",
+    desired,
     status,
     environmentId,
     httpBaseUrl: environmentId === null ? null : "https://sbx-1.boat.test",
@@ -46,11 +50,21 @@ const view = (status: SandboxStatus, environmentId: EnvironmentId | null = SANDB
   }) as SandboxView;
 
 const ready: SandboxStatus = { _tag: "ready" };
-const stopped: SandboxStatus = { _tag: "stopped", reason: "requested" };
+const stopped: SandboxStatus = { _tag: "stopped", reason: "external" };
+const putAway = view({ _tag: "stopped", reason: "requested" }, SANDBOX_ENV, "stopped");
+const asleep = view(stopped);
 
 describe("planSandboxRegistrations", () => {
-  const contributed = (enabled: boolean): RegisteredSandbox => ({ contributed: true, enabled });
-  const userSaved = (enabled: boolean): RegisteredSandbox => ({ contributed: false, enabled });
+  const contributed = (enabled: boolean, dormant = false): RegisteredSandbox => ({
+    contributed: true,
+    enabled,
+    dormant,
+  });
+  const userSaved = (enabled: boolean): RegisteredSandbox => ({
+    contributed: false,
+    enabled,
+    dormant: false,
+  });
   const rows: ReadonlyArray<{
     readonly name: string;
     readonly views: ReadonlyArray<SandboxView>;
@@ -81,27 +95,81 @@ describe("planSandboxRegistrations", () => {
       actions: [],
     },
     {
-      name: "switches a stopped sandbox off",
-      views: [view(stopped)],
+      name: "keeps an asleep sandbox's environment on but dormant",
+      views: [asleep],
       registered: contributed(true),
-      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+      actions: [{ _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: true }],
     },
     {
-      name: "keeps a failed sandbox off",
-      views: [view({ _tag: "failed", step: "resume", message: "Boat refused", retryable: true })],
+      name: "keeps a sandbox dormant while its machine stops",
+      views: [view({ _tag: "stopping" })],
       registered: contributed(true),
-      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+      actions: [{ _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: true }],
     },
     {
-      name: "does not switch on a sandbox still resuming",
-      views: [view({ _tag: "resuming" })],
-      registered: contributed(false),
+      name: "leaves an asleep sandbox that is already dormant",
+      views: [asleep],
+      registered: contributed(true, true),
       actions: [],
     },
-    { name: "does not pair a stopped sandbox", views: [view(stopped)], actions: [] },
     {
-      name: "leaves a stopped sandbox the user paired alone",
-      views: [view(stopped)],
+      name: "wakes a dormant environment once the sandbox is ready",
+      views: [view(ready)],
+      registered: contributed(true, true),
+      actions: [{ _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: false }],
+    },
+    {
+      name: "keeps a sandbox that failed on its way back dormant",
+      views: [view({ _tag: "failed", step: "resume", message: "Boat refused", retryable: true })],
+      registered: contributed(true),
+      actions: [{ _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: true }],
+    },
+    {
+      name: "switches a put-away sandbox off",
+      views: [putAway],
+      registered: contributed(true),
+      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+    },
+    {
+      name: "switches a put-away sandbox off while its machine is still up",
+      views: [view(ready, SANDBOX_ENV, "stopped")],
+      registered: contributed(true, false),
+      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+    },
+    {
+      name: "switches a resumed put-away sandbox on dormant first, so nothing dials it",
+      views: [asleep],
+      registered: contributed(false),
+      actions: [
+        { _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: true },
+        { _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: true },
+      ],
+    },
+    {
+      name: "switches a resuming put-away sandbox on dormant first",
+      views: [view({ _tag: "resuming" })],
+      registered: contributed(false),
+      actions: [
+        { _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: true },
+        { _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: true },
+      ],
+    },
+    {
+      name: "keeps a sandbox whose delete failed off",
+      views: [
+        view(
+          { _tag: "failed", step: "destroy", message: "Boat refused", retryable: true },
+          SANDBOX_ENV,
+          "destroyed",
+        ),
+      ],
+      registered: contributed(true),
+      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+    },
+    { name: "does not pair an asleep sandbox", views: [asleep], actions: [] },
+    {
+      name: "leaves an asleep sandbox the user paired alone",
+      views: [asleep],
       registered: userSaved(true),
       actions: [],
     },
@@ -159,7 +227,7 @@ const entry = (environmentId: EnvironmentId, managedBy?: EnvironmentId): Connect
 };
 
 describe("SandboxRegistrations", () => {
-  it.effect("follows one owner's sandbox through ready, stop, resume, and removal", () =>
+  it.effect("follows one owner's sandbox through ready, sleep, put away, resume, and removal", () =>
     Effect.gen(function* () {
       const USER_ENV = EnvironmentId.make("environment-user");
       const entries = yield* SubscriptionRef.make<
@@ -176,13 +244,24 @@ describe("SandboxRegistrations", () => {
           f(next);
           return next;
         });
+      /** Every switch the reconcile flips, in order, as the registry saw it. */
+      const switches: Array<string> = [];
       const registry = Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
         entries,
         networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
         setEnabled: (environmentId, enabled) =>
           update((next) => {
+            switches.push(`enabled:${enabled}`);
             const current = next.get(environmentId);
             if (current !== undefined) next.set(environmentId, { ...current, enabled });
+          }),
+        setDormant: (environmentId, dormant) =>
+          update((next) => {
+            switches.push(`dormant:${dormant}`);
+            const current = next.get(environmentId);
+            if (current === undefined) return;
+            const { dormant: _previous, ...rest } = current;
+            next.set(environmentId, dormant ? { ...rest, dormant: true } : rest);
           }),
         removeContributed: (_source, environmentId) =>
           update((next) => void next.delete(environmentId)),
@@ -206,19 +285,36 @@ describe("SandboxRegistrations", () => {
             Stream.filter(predicate),
             Stream.runHead,
           );
+        const switched = (enabled: boolean, dormant: boolean) =>
+          sandboxEntry(
+            (current) => current?.enabled === enabled && (current.dormant === true) === dormant,
+          );
 
         yield* Queue.offer(lists, [view(ready)]);
-        yield* sandboxEntry((current) => current?.enabled === true);
+        yield* switched(true, false);
         expect(paired).toEqual([`${OWNER} ${SANDBOX_ID}`]);
         expect(
           sandboxIndex(yield* SubscriptionRef.get(service.owners)).get(SANDBOX_ENV),
         ).toMatchObject({ ownerEnvironmentId: OWNER, sandboxId: SANDBOX_ID });
 
-        yield* Queue.offer(lists, [view(stopped)]);
-        yield* sandboxEntry((current) => current?.enabled === false);
+        yield* Queue.offer(lists, [asleep]);
+        yield* switched(true, true);
 
         yield* Queue.offer(lists, [view(ready)]);
-        yield* sandboxEntry((current) => current?.enabled === true);
+        yield* switched(true, false);
+
+        yield* Queue.offer(lists, [putAway]);
+        yield* switched(false, false);
+
+        yield* Queue.offer(lists, [view({ _tag: "resuming" })]);
+        yield* switched(true, true);
+        expect(switches).toEqual([
+          "dormant:true",
+          "dormant:false",
+          "enabled:false",
+          "dormant:true",
+          "enabled:true",
+        ]);
         expect(paired).toHaveLength(1);
 
         yield* Queue.offer(lists, []);
@@ -238,6 +334,7 @@ describe("SandboxRegistrations", () => {
         entries,
         networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
         setEnabled: () => Effect.void,
+        setDormant: () => Effect.void,
         removeContributed: () => Effect.void,
       });
       const service = yield* makeReconciler(access).pipe(Effect.provide(registry));

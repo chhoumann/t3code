@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { SANDBOX_STATUS_LABEL, isSandboxStopped } from "@t3tools/client-runtime/state/sandboxes";
+import { SANDBOX_STATUS_LABEL, sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { BoxIcon, PlayIcon } from "lucide-react";
@@ -11,9 +11,10 @@ import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 /**
- * Sandboxes stopped by archiving their last thread, at their TTL, or by the
- * provider. A stopped machine cannot list its threads, so the sandbox stands
- * in for them: Resume brings the machine and its thread back.
+ * Sandboxes put away by archiving their last thread or by Stop. They leave
+ * the sidebar, so the sandbox stands in for its threads here: Resume brings
+ * the machine and its threads back. A sandbox that only sleeps keeps its
+ * threads in the sidebar instead.
  */
 export function StoppedSandboxesSection(props: {
   readonly ownerEnvironmentIds: ReadonlyArray<EnvironmentId>;
@@ -21,7 +22,7 @@ export function StoppedSandboxesSection(props: {
   const owners = useAtomValue(sandboxes.ownersAtom);
   const stopped = props.ownerEnvironmentIds.flatMap((ownerEnvironmentId) =>
     (owners.get(ownerEnvironmentId) ?? [])
-      .filter(isSandboxStopped)
+      .filter((sandbox) => sandboxPresence(sandbox) === "put-away")
       .map((sandbox) => ({ ownerEnvironmentId, sandbox })),
   );
   if (stopped.length === 0) return null;

@@ -20,16 +20,20 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import type { EnvironmentConnectionPhase } from "../connection/presentation.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import type { EnvironmentProject } from "./models.ts";
 import {
   SandboxRegistrations,
   type SandboxIndexEntry,
+  type SandboxPresence,
   sandboxIndex,
+  sandboxPresence,
 } from "../sandbox/sandboxRegistrations.ts";
 import { createSandboxEnvironmentAtoms } from "./sandboxCommands.ts";
 
-export type { SandboxIndexEntry };
+export { sandboxPresence };
+export type { SandboxIndexEntry, SandboxPresence };
 
 type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
 
@@ -79,11 +83,26 @@ export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
 };
 
 /**
- * Asked to stop, or stopped on its own at its TTL or by the provider. Either
- * way its threads cannot be listed until it resumes.
+ * What a thread of a sandbox shows on its way back from sleep: "Asleep", then
+ * "Waking" while its owner resumes the machine, then "Connecting" until this
+ * device has a socket to it again. Null once connected, and off that path.
  */
-export function isSandboxStopped(view: Pick<SandboxView, "desired" | "status">): boolean {
-  return view.desired === "stopped" || view.status._tag === "stopped";
+export function sandboxWakeLabel(
+  presence: SandboxPresence,
+  phase: EnvironmentConnectionPhase,
+): "Asleep" | "Waking" | "Connecting" | null {
+  switch (presence) {
+    case "asleep":
+      return "Asleep";
+    case "waking":
+      return "Waking";
+    case "running":
+      return phase === "available" || phase === "connecting" || phase === "reconnecting"
+        ? "Connecting"
+        : null;
+    default:
+      return null;
+  }
 }
 
 /** The stages a new sandbox shows before its thread opens, in order. */
@@ -140,13 +159,15 @@ export interface PendingSandboxThread {
  * The sandboxes to list until their thread arrives, newest first. A sandbox
  * stops being pending once its environment lists the thread its launch view
  * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
- * Stopped sandboxes stand in for their threads elsewhere, and deleted ones
- * are gone, so neither is pending.
+ * Put-away sandboxes stand in for their threads under Settings, deleted ones
+ * are gone, and asleep ones list their threads from cache, so none of those
+ * is pending.
  */
-const AWAITING_THREAD: ReadonlySet<SandboxStatus["_tag"]> = new Set([
-  ...SANDBOX_LAUNCH_STAGES,
-  "ready",
-  "resuming",
+const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
+  "launching",
+  "running",
+  "waking",
+  "failed",
 ]);
 
 export function pendingSandboxThreads(
@@ -156,11 +177,7 @@ export function pendingSandboxThreads(
   const pending: PendingSandboxThread[] = [];
   for (const [ownerEnvironmentId, views] of owners) {
     for (const view of views) {
-      const awaited =
-        view.status._tag === "failed"
-          ? view.desired !== "stopped"
-          : view.desired === "running" && AWAITING_THREAD.has(view.status._tag);
-      if (!awaited) continue;
+      if (!AWAITING_THREAD.has(sandboxPresence(view))) continue;
       if (
         view.environmentId !== null &&
         sandboxLandingThreadId(threadsOf(view.environmentId), view.threadId) !== null

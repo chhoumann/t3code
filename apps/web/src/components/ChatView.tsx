@@ -25,7 +25,7 @@ import {
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { isSandboxStopped } from "@t3tools/client-runtime/state/sandboxes";
+import { sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
@@ -2694,7 +2694,8 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
   const sandboxIndex = useAtomValue(sandboxes.indexAtom);
   const activeSandbox = activeThread ? sandboxIndex.get(activeThread.environmentId) : undefined;
-  const activeSandboxStopped = activeSandbox !== undefined && isSandboxStopped(activeSandbox.view);
+  const activeSandboxStopped =
+    activeSandbox !== undefined && sandboxPresence(activeSandbox.view) !== "running";
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
