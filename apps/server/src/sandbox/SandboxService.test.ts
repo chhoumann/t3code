@@ -5,6 +5,7 @@ import {
   ProviderDriverKind,
   SandboxAccountId,
   SandboxId,
+  ServerSettingsError,
   type SandboxStatus,
   type SandboxView,
 } from "@t3tools/contracts";
@@ -42,7 +43,7 @@ const GUEST_ENV = EnvironmentId.make("env-guest");
 const OWNER_ENV = EnvironmentId.make("env-owner");
 
 /** An in-memory provider and guest sharing one set of machines, kept across service restarts. */
-const makeWorld = () => {
+const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
   const machines = new Map<string, { state: ProviderMachineState }>();
   const machineByKey = new Map<string, ProviderMachineId>();
   const world = {
@@ -229,7 +230,7 @@ const makeWorld = () => {
       }),
     ),
     Layer.provide(NodeCrypto.layer),
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(settingsLayer),
   );
 
   /** Starts the service in its own scope over the test's database; closing the scope is a crash. */
@@ -380,6 +381,38 @@ describe("SandboxService", () => {
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("fails a launch whose project defaults cannot be read, creating nothing", () =>
+    Effect.gen(function* () {
+      const unreadable = Layer.effect(
+        ServerSettings.ServerSettingsService,
+        ServerSettings.ServerSettingsService.pipe(
+          Effect.map((settings) => ({
+            ...settings,
+            getSettings: Effect.fail(
+              new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+            ),
+          })),
+        ),
+      ).pipe(Layer.provide(ServerSettings.layerTest()));
+      const { world, start } = makeWorld(unreadable);
+      const started = yield* start;
+      const error = yield* service.pipe(
+        Effect.flatMap((sandboxes) => sandboxes.launch(launchInput("sbx-unreadable"))),
+        Effect.flip,
+        Effect.provide(started.context),
+      );
+      const listed = yield* service.pipe(
+        Effect.flatMap((sandboxes) => sandboxes.list()),
+        Effect.provide(started.context),
+      );
+      yield* Scope.close(started.scope, Exit.void);
+
+      assert.strictEqual(error._tag, "SandboxPersistenceError");
+      assert.deepStrictEqual(listed, []);
+      assert.deepStrictEqual(world.createKeys, []);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   it.effect(

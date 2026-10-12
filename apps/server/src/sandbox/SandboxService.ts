@@ -785,7 +785,7 @@ const make = Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const defaults = resolveSandboxProjectDefaults(
             account,
-            (yield* settings.getSettings.pipe(Effect.orDie)).sandboxProjectDefaults[
+            (yield* settings.getSettings.pipe(persistence)).sandboxProjectDefaults[
               sandboxProjectKey(input.accountId, input.repository.projectRemoteUrl)
             ],
           );
