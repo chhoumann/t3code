@@ -5,6 +5,7 @@ import {
   type SandboxLaunchAction,
   type SandboxLaunchPanel,
   type SandboxWakeFailure,
+  type WorkGrant,
   sandboxCommandFailure,
   sandboxLandingThreadId,
   sandboxLaunchAction,
@@ -12,6 +13,7 @@ import {
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { Atom } from "effect/reactivity";
 import { CheckIcon, CircleIcon, PlayIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -27,6 +29,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { cn } from "~/lib/utils";
+
+const NO_ENVIRONMENT_GRANT = Atom.make<WorkGrant>("pending");
 
 /**
  * A sandbox on its way to its thread: the message it started with and the
@@ -49,6 +53,9 @@ export function SandboxLaunchView(props: {
   const environment = useEnvironment(environmentId);
   const threads = useEnvironmentThreads(environmentId);
   const shells = useAtomValue(sandboxShellsAtom);
+  const grant = useAtomValue(
+    environmentId === null ? NO_ENVIRONMENT_GRANT : sandboxes.workGrantAtom(environmentId),
+  );
   const action =
     view === null
       ? null
@@ -56,6 +63,7 @@ export function SandboxLaunchView(props: {
           view,
           landingThreadId: sandboxLandingThreadId(threads, view.threadId),
           shell: environmentId === null ? null : (shells.get(environmentId) ?? null),
+          grant,
           connected: environment?.connection.phase === "connected",
         });
   useOpenThread(action);
@@ -141,9 +149,7 @@ interface SandboxWake {
 /**
  * Wakes an asleep sandbox once per visit, as sending to one of its threads
  * would, so opening it is enough: the owner resumes it and this device
- * connects to it, then `useOpenThread` opens its thread. Unlike a send, it is
- * not checked up front against the owner's grant: a visit can arrive before
- * that loads, and the request to the owner waits for it. A failure keeps the
+ * connects to it, then `useOpenThread` opens its thread. A failure keeps the
  * sandbox's request revision when it came (`sandboxLaunchPanel`).
  */
 function useWakeOnArrival(
@@ -197,6 +203,7 @@ function SandboxProgress(props: {
     case "Failed":
       return (
         <SandboxFailure
+          heading={panel.heading}
           message={panel.message}
           onRetry={panel.retryable ? () => void setDesired(sandbox, view.desired) : null}
           onDelete={remove}
@@ -205,6 +212,7 @@ function SandboxProgress(props: {
     case "WakeFailed":
       return (
         <SandboxFailure
+          heading={panel.heading}
           message={panel.message}
           onRetry={() => wake.retry(panel.environmentId)}
           onDelete={remove}
@@ -267,13 +275,14 @@ function SandboxStages(props: { readonly current: number }) {
 }
 
 function SandboxFailure(props: {
+  readonly heading: string;
   readonly message: string;
   readonly onRetry: (() => void) | null;
   readonly onDelete: () => void;
 }) {
   return (
     <div className="flex flex-col gap-3 text-sm">
-      <p className="font-medium text-destructive">{SANDBOX_STATUS_LABEL.failed}</p>
+      <p className="font-medium text-destructive">{props.heading}</p>
       <p className="whitespace-pre-wrap break-words text-muted-foreground">{props.message}</p>
       <div className="flex items-center gap-2">
         {props.onRetry === null ? null : (

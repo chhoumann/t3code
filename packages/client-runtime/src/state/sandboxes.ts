@@ -1,5 +1,6 @@
 import {
   AuthOrchestrationOperateScope,
+  type AuthSessionState,
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
   type OrchestrationV2ThreadShell,
@@ -91,24 +92,25 @@ export function createSandboxAtoms<R, E>(
    * Whether this client may send work to an environment's threads, read up
    * front, from the grant `workGrantEnvironmentId` names.
    */
+  const workGrantAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) =>
+      sessionWorkGrant(
+        get(sessions.sessionStateAtom(workGrantEnvironmentId(get(indexAtom), environmentId))),
+      ),
+    ).pipe(Atom.withLabel(`sandboxes:work-grant:${environmentId}`)),
+  );
+  /** `workGrantAtom` once granted. */
   const canSendWorkAtom = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => {
-      const result = get(
-        sessions.sessionStateAtom(workGrantEnvironmentId(get(indexAtom), environmentId)),
-      );
-      const session = Option.getOrNull(AsyncResult.value(result));
-      return (
-        result._tag !== "Failure" &&
-        session !== null &&
-        sessionGrantsScope(session, AuthOrchestrationOperateScope)
-      );
-    }).pipe(Atom.withLabel(`sandboxes:can-send-work:${environmentId}`)),
+    Atom.make((get) => get(workGrantAtom(environmentId)) === "granted").pipe(
+      Atom.withLabel(`sandboxes:can-send-work:${environmentId}`),
+    ),
   );
   return {
     ownersAtom,
     indexAtom,
     ownerSandboxesAtom,
     presenceAtom,
+    workGrantAtom,
     canSendWorkAtom,
     ...createSandboxEnvironmentAtoms(runtime),
   };
@@ -128,6 +130,19 @@ export function workGrantEnvironmentId(
   return sandbox !== undefined && wakesForWork(sandbox.view)
     ? sandbox.ownerEnvironmentId
     : environmentId;
+}
+
+/** Whether a session lets this client send work, pending until it loads. */
+export type WorkGrant = "pending" | "granted" | "denied";
+
+export function sessionWorkGrant(
+  result: AsyncResult.AsyncResult<AuthSessionState, unknown>,
+): WorkGrant {
+  if (result._tag === "Initial") return "pending";
+  return result._tag === "Success" &&
+    sessionGrantsScope(result.value, AuthOrchestrationOperateScope)
+    ? "granted"
+    : "denied";
 }
 
 /**
@@ -248,8 +263,9 @@ function threadsLoaded(shell: EnvironmentShellStatus | null): boolean {
  * sandbox lands on once this device can show it: an asleep sandbox's from
  * cache, since sending to it wakes the sandbox, and a running one's once
  * connected. It wakes an asleep sandbox whose thread this device never
- * loaded, and leaves one asleep until it knows that. It offers to resume one
- * the user put away. Otherwise it follows the sandbox as its owner reports it.
+ * loaded, as sending it work would, so only with the grant to. It leaves one
+ * asleep until it knows both. It offers to resume one the user put away.
+ * Otherwise it follows the sandbox as its owner reports it.
  */
 export type SandboxLaunchAction =
   | {
@@ -268,6 +284,8 @@ export function sandboxLaunchAction(input: {
   readonly landingThreadId: ThreadId | null;
   /** This device's shell of the sandbox's environment; null when it never registered it. */
   readonly shell: EnvironmentShellStatus | null;
+  /** Whether this client may send the sandbox work (`workGrantAtom`). */
+  readonly grant: WorkGrant;
   /** Whether this device has a socket to the sandbox's environment. */
   readonly connected: boolean;
 }): SandboxLaunchAction {
@@ -282,7 +300,9 @@ export function sandboxLaunchAction(input: {
       if (landingThreadId !== null) {
         return { _tag: "OpenThread", environmentId, threadId: landingThreadId };
       }
-      return threadsLoaded(input.shell) ? { _tag: "Wake", environmentId } : { _tag: "Asleep" };
+      return threadsLoaded(input.shell) && input.grant === "granted"
+        ? { _tag: "Wake", environmentId }
+        : { _tag: "Asleep" };
     case "running":
       return environmentId !== null && landingThreadId !== null && input.connected
         ? { _tag: "OpenThread", environmentId, threadId: landingThreadId }
@@ -312,9 +332,15 @@ export type SandboxLaunchPanel =
   | { readonly _tag: "Stages"; readonly current: number }
   | { readonly _tag: "Status"; readonly label: string }
   | { readonly _tag: "Resume"; readonly label: string; readonly available: boolean }
-  | { readonly _tag: "Failed"; readonly message: string; readonly retryable: boolean }
+  | {
+      readonly _tag: "Failed";
+      readonly heading: string;
+      readonly message: string;
+      readonly retryable: boolean;
+    }
   | {
       readonly _tag: "WakeFailed";
+      readonly heading: string;
       readonly message: string;
       readonly environmentId: EnvironmentId;
     };
@@ -326,7 +352,12 @@ export function sandboxLaunchPanel(input: {
 }): SandboxLaunchPanel {
   const { view, action, wakeFailure } = input;
   if (view.status._tag === "failed") {
-    return { _tag: "Failed", message: view.status.message, retryable: view.status.retryable };
+    return {
+      _tag: "Failed",
+      heading: SANDBOX_STATUS_LABEL.failed,
+      message: view.status.message,
+      retryable: view.status.retryable,
+    };
   }
   if (action._tag === "OfferResume") {
     return {
@@ -340,7 +371,12 @@ export function sandboxLaunchPanel(input: {
     wakeFailure.revision === view.revision &&
     view.environmentId !== null
   ) {
-    return { _tag: "WakeFailed", message: wakeFailure.message, environmentId: view.environmentId };
+    return {
+      _tag: "WakeFailed",
+      heading: "Could not wake",
+      message: wakeFailure.message,
+      environmentId: view.environmentId,
+    };
   }
   const stage = sandboxLaunchStageIndex(view.status);
   if (stage !== null) return { _tag: "Stages", current: stage };

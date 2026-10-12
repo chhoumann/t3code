@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  type AuthSessionState,
   EnvironmentId,
   SandboxAccountId,
   type SandboxAccountConfig,
@@ -25,6 +27,8 @@ import {
   sandboxPresence,
   sandboxRepositoryFor,
   sandboxWakeStatus,
+  sessionWorkGrant,
+  type WorkGrant,
   workDelivery,
   workGrantEnvironmentId,
 } from "./sandboxes.ts";
@@ -365,6 +369,30 @@ describe("workGrantEnvironmentId", () => {
   });
 });
 
+describe("sessionWorkGrant", () => {
+  const session = (
+    permissions: NonNullable<AuthSessionState["permissions"]>,
+  ): AuthSessionState => ({
+    authenticated: true,
+    auth: {
+      policy: "remote-reachable",
+      bootstrapMethods: [],
+      sessionMethods: [],
+      sessionCookieName: "test",
+    },
+    permissions,
+  });
+
+  it("is pending until the session loads, and granted only for one that may operate", () => {
+    expect([
+      sessionWorkGrant(AsyncResult.initial(true)),
+      sessionWorkGrant(AsyncResult.success(session([AuthOrchestrationOperateScope]))),
+      sessionWorkGrant(AsyncResult.success(session([]))),
+      sessionWorkGrant(AsyncResult.failure(Cause.fail(new Error("Work laptop is offline.")))),
+    ]).toEqual(["pending", "granted", "denied", "denied"]);
+  });
+});
+
 describe("sandboxLaunchStageIndex", () => {
   it.each([
     [{ _tag: "creating" }, 0],
@@ -488,7 +516,13 @@ describe("sandboxLaunchAction", () => {
 
   it("wakes an asleep sandbox once this device knows it lists none of its threads", () => {
     const decide = (shell: EnvironmentShellStatus | null, landingThreadId: ThreadId | null) =>
-      sandboxLaunchAction({ view: asleep, landingThreadId, connected: false, shell });
+      sandboxLaunchAction({
+        view: asleep,
+        landingThreadId,
+        connected: false,
+        shell,
+        grant: "granted",
+      });
     expect([
       decide(null, null),
       decide("empty", null),
@@ -506,9 +540,37 @@ describe("sandboxLaunchAction", () => {
     ]);
   });
 
+  it("wakes an asleep sandbox only with this device's grant to send it work", () => {
+    const decide = (grant: WorkGrant, landingThreadId: ThreadId | null) =>
+      sandboxLaunchAction({
+        view: asleep,
+        landingThreadId,
+        connected: false,
+        shell: "live",
+        grant,
+      });
+    expect([
+      decide("granted", null),
+      decide("pending", null),
+      decide("denied", null),
+      decide("denied", LANDING),
+    ]).toEqual([
+      { _tag: "Wake", environmentId: "environment-sandbox" },
+      { _tag: "Asleep" },
+      { _tag: "Asleep" },
+      { _tag: "OpenThread", environmentId: "environment-sandbox", threadId: "thread-seed" },
+    ]);
+  });
+
   it("wakes an asleep sandbox whose thread this device never loaded", () => {
     expect(
-      sandboxLaunchAction({ view: asleep, landingThreadId: null, connected: false, shell: "live" }),
+      sandboxLaunchAction({
+        view: asleep,
+        landingThreadId: null,
+        connected: false,
+        shell: "live",
+        grant: "granted",
+      }),
     ).toEqual({
       _tag: "Wake",
       environmentId: "environment-sandbox",
@@ -519,6 +581,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: null,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({ _tag: "Wake", environmentId: "environment-sandbox" });
   });
@@ -530,6 +593,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: LANDING,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({
       _tag: "OpenThread",
@@ -550,6 +614,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: null,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({ _tag: "OfferResume" });
     expect(
@@ -558,6 +623,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: LANDING,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({ _tag: "OfferResume" });
   });
@@ -569,6 +635,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: null,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({ _tag: "OfferResume" });
   });
@@ -580,6 +647,7 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: LANDING,
         connected: true,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({
       _tag: "OpenThread",
@@ -592,10 +660,17 @@ describe("sandboxLaunchAction", () => {
         landingThreadId: LANDING,
         connected: false,
         shell: "live",
+        grant: "granted",
       }),
     ).toEqual({ _tag: "Follow" });
     expect(
-      sandboxLaunchAction({ view: ready, landingThreadId: null, connected: true, shell: "live" }),
+      sandboxLaunchAction({
+        view: ready,
+        landingThreadId: null,
+        connected: true,
+        shell: "live",
+        grant: "granted",
+      }),
     ).toEqual({
       _tag: "Follow",
     });
@@ -613,6 +688,7 @@ describe("sandboxLaunchAction", () => {
           landingThreadId: null,
           connected: false,
           shell: "live",
+          grant: "granted",
         }),
       ).toEqual({ _tag: "Follow" });
     }
@@ -655,7 +731,7 @@ describe("sandboxLaunchPanel", () => {
       { _tag: "Status", label: "Resuming" },
       { _tag: "Status", label: "Opening thread" },
       { _tag: "Resume", label: "Stopping", available: false },
-      { _tag: "Failed", message: "boom", retryable: false },
+      { _tag: "Failed", heading: "Failed", message: "boom", retryable: false },
     ]);
   });
 
@@ -666,7 +742,12 @@ describe("sandboxLaunchPanel", () => {
         action: wake,
         wakeFailure: { message: OFFLINE, revision: 1 },
       }),
-    ).toEqual({ _tag: "WakeFailed", message: OFFLINE, environmentId: "environment-sandbox" });
+    ).toEqual({
+      _tag: "WakeFailed",
+      heading: "Could not wake",
+      message: OFFLINE,
+      environmentId: "environment-sandbox",
+    });
     // The wake's own request woke the sandbox, but this device never reached it.
     expect(
       sandboxLaunchPanel({
@@ -679,6 +760,7 @@ describe("sandboxLaunchPanel", () => {
       }),
     ).toEqual({
       _tag: "WakeFailed",
+      heading: "Could not wake",
       message: "The sandbox is awake, but this device could not reconnect to it.",
       environmentId: "environment-sandbox",
     });
@@ -703,7 +785,12 @@ describe("sandboxLaunchPanel", () => {
     };
     expect(
       sandboxLaunchPanel({ view: view(resumeFailed, 2), action: follow, wakeFailure: failedHere }),
-    ).toEqual({ _tag: "Failed", message: "The machine did not start in time.", retryable: true });
+    ).toEqual({
+      _tag: "Failed",
+      heading: "Failed",
+      message: "The machine did not start in time.",
+      retryable: true,
+    });
     expect(
       sandboxLaunchPanel({
         view: view({ _tag: "resuming" }, 3),
