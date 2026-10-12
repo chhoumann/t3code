@@ -253,6 +253,7 @@ describe("BoatSandboxProvider", () => {
       const refused = new Set([
         "POST /api/v1/sandboxes/t3-preflight-probe/resume",
         "POST /api/v1/sandboxes/t3-preflight-probe/host",
+        "GET /api/v1/named-snapshots",
       ]);
       const layer = BoatSandboxProvider.layer.pipe(
         Layer.provide(
@@ -288,11 +289,11 @@ describe("BoatSandboxProvider", () => {
         provider.checkAccess(account),
       ).pipe(Effect.provide(layer));
 
-      expect(missing).toEqual(["sandbox.resume", "host"]);
-      expect(seen).toHaveLength(8);
+      expect(missing).toEqual(["sandbox.resume", "host", "snapshot.read"]);
+      expect(seen).toHaveLength(9);
       for (const request of seen) {
-        expect(new URL(request.url).pathname).toMatch(
-          /^\/api\/v1\/sandboxes(\/t3-preflight-probe(\/[a-z]+)?)?$/,
+        expect(`${request.method} ${new URL(request.url).pathname}`).toMatch(
+          /^(\w+ \/api\/v1\/sandboxes(\/t3-preflight-probe(\/[a-z]+)?)?|GET \/api\/v1\/named-snapshots)$/,
         );
       }
       const create = seen.find((request) => new URL(request.url).pathname === "/api/v1/sandboxes");

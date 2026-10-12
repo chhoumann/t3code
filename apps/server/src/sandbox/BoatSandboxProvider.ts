@@ -133,10 +133,10 @@ const probePath = `/sandboxes/${PROBE_MACHINE}`;
 /**
  * One request per Boat action sandboxes take. Boat refuses a scoped key's
  * missing action with 403 before looking any further, so every allowed probe
- * ends at the missing probe machine or, for create, at a body Boat rejects
- * before creating anything: no machine type has the probe's name, and the
- * setup script is not a string. Were one ever made, it would stop within a
- * minute.
+ * only lists the account's templates, or ends at the missing probe machine
+ * or, for create, at a body Boat rejects before creating anything: no machine
+ * type has the probe's name, and the setup script is not a string. Were one
+ * ever made, it would stop within a minute.
  */
 const ACCESS_PROBES: ReadonlyArray<{
   readonly action: string;
@@ -193,6 +193,7 @@ const ACCESS_PROBES: ReadonlyArray<{
       HttpClientRequest.bodyJsonUnsafe({ port: 3773, public: true }),
     ),
   },
+  { action: "snapshot.read", request: HttpClientRequest.get("/named-snapshots") },
 ];
 
 const toMachine = (sandbox: BoatSandbox): ProviderMachine => ({
