@@ -134,22 +134,34 @@ export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
 };
 
 /**
- * What a thread of a sandbox shows on its way back from sleep: "Asleep", then
- * "Waking" while its owner resumes the machine, then "Connecting" until this
- * device has a socket to it again. Null once connected, and off that path.
+ * What a thread of a sandbox shows while the sandbox does not serve it:
+ * asleep, then waking while its owner resumes the machine, then connecting
+ * until this device has a socket to it again; or why it failed, since
+ * sending again retries. Null once connected, and off that path.
  */
-export function sandboxWakeLabel(
-  presence: SandboxPresence,
+export type SandboxWakeStatus =
+  | { readonly kind: "asleep" | "waking" | "connecting"; readonly label: string }
+  | { readonly kind: "failed"; readonly label: string };
+
+export function sandboxWakeStatus(
+  view: Pick<SandboxView, "desired" | "status">,
   phase: EnvironmentConnectionPhase,
-): "Asleep" | "Waking" | "Connecting" | null {
-  switch (presence) {
+): SandboxWakeStatus | null {
+  switch (sandboxPresence(view)) {
     case "asleep":
-      return "Asleep";
+      return { kind: "asleep", label: "Asleep" };
     case "waking":
-      return "Waking";
+      return { kind: "waking", label: "Waking" };
     case "running":
       return phase === "available" || phase === "connecting" || phase === "reconnecting"
-        ? "Connecting"
+        ? { kind: "connecting", label: "Connecting" }
+        : null;
+    case "failed":
+      return view.status._tag === "failed"
+        ? {
+            kind: "failed",
+            label: `${view.status.step === "resume" ? "Could not wake" : "Sandbox failed"}: ${view.status.message}`,
+          }
         : null;
     default:
       return null;

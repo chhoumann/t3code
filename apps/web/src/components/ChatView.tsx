@@ -27,7 +27,7 @@ import { useScratchProject } from "../hooks/useScratchProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import {
   sandboxPresence,
-  sandboxWakeLabel,
+  sandboxWakeStatus,
   wakesForWork,
 } from "@t3tools/client-runtime/state/sandboxes";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -315,6 +315,7 @@ import {
   WifiOffIcon,
   MoonIcon,
   SunriseIcon,
+  CircleAlertIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
@@ -2707,10 +2708,14 @@ export default function ChatView(props: ChatViewProps) {
     activeSandbox === undefined ? null : sandboxPresence(activeSandbox.view);
   // Work sent to a sandbox that sleeps wakes it first, so it is not refused as offline.
   const activeSandboxWakes = activeSandbox !== undefined && wakesForWork(activeSandbox.view);
-  const activeSandboxWakeLabel =
-    activeSandboxPresence === null
-      ? null
-      : sandboxWakeLabel(activeSandboxPresence, activeEnvironmentConnectionPhase);
+  const activeSandboxView = activeSandbox?.view;
+  const activeSandboxWakeStatus = useMemo(
+    () =>
+      activeSandboxView === undefined
+        ? null
+        : sandboxWakeStatus(activeSandboxView, activeEnvironmentConnectionPhase),
+    [activeEnvironmentConnectionPhase, activeSandboxView],
+  );
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
       return null;
@@ -3152,19 +3157,27 @@ export default function ChatView(props: ChatViewProps) {
     // dial; their wake status shows instead.
     const suppressUnavailableBanner =
       (activeSandboxPresence !== null && activeSandboxPresence !== "running") ||
-      (activeSandboxWakeLabel !== null && unavailableConnection?.phase === "available") ||
+      (activeSandboxWakeStatus !== null && unavailableConnection?.phase === "available") ||
       (environmentReconnecting && (updateRunning || !reconnectWarningGraceElapsed));
     const showUnavailableBanner =
       activeEnvironmentUnavailableState !== null &&
       unavailableConnection !== null &&
       !suppressUnavailableBanner;
-    if (!showUnavailableBanner && activeSandboxWakeLabel !== null) {
+    if (!showUnavailableBanner && activeSandboxWakeStatus !== null) {
+      const { kind, label } = activeSandboxWakeStatus;
       items.push({
         id: "sandbox-wake",
-        variant: "default",
-        ...(activeSandboxWakeLabel === "Asleep" ? {} : { priority: "activity" as const }),
-        icon: activeSandboxWakeLabel === "Asleep" ? <MoonIcon /> : <SunriseIcon />,
-        title: activeSandboxWakeLabel,
+        variant: kind === "failed" ? "error" : "default",
+        ...(kind === "waking" || kind === "connecting" ? { priority: "activity" as const } : {}),
+        icon:
+          kind === "asleep" ? (
+            <MoonIcon />
+          ) : kind === "failed" ? (
+            <CircleAlertIcon />
+          ) : (
+            <SunriseIcon />
+          ),
+        title: label,
       });
     }
     if (activeEnvironmentUnavailableState && unavailableConnection && showUnavailableBanner) {
@@ -3280,7 +3293,7 @@ export default function ChatView(props: ChatViewProps) {
     autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
     activeSandboxPresence,
-    activeSandboxWakeLabel,
+    activeSandboxWakeStatus,
     handleReconnectActiveEnvironment,
     canDisconnectActiveEnvironment,
     disconnectingEnvironment,

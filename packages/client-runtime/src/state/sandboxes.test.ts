@@ -20,7 +20,7 @@ import {
   sandboxLaunchStageIndex,
   sandboxPresence,
   sandboxRepositoryFor,
-  sandboxWakeLabel,
+  sandboxWakeStatus,
   workGrantEnvironmentId,
 } from "./sandboxes.ts";
 import { sandboxIndex } from "../sandbox/sandboxRegistrations.ts";
@@ -185,19 +185,51 @@ describe("sandboxPresence", () => {
   });
 });
 
-describe("sandboxWakeLabel", () => {
+describe("sandboxWakeStatus", () => {
+  const stopped: SandboxStatus = { _tag: "stopped", reason: "idle" };
+  const ready: SandboxStatus = { _tag: "ready" };
   it.each([
-    ["asleep", "available", "Asleep"],
-    ["waking", "available", "Waking"],
-    ["running", "available", "Connecting"],
-    ["running", "connecting", "Connecting"],
-    ["running", "reconnecting", "Connecting"],
-    ["running", "connected", null],
-    ["running", "offline", null],
-    ["put-away", "available", null],
-    ["failed", "available", null],
-  ] as const)("shows %s while %s as %s", (presence, phase, label) => {
-    expect(sandboxWakeLabel(presence, phase)).toBe(label);
+    ["asleep", "running", stopped, "available", { kind: "asleep", label: "Asleep" }],
+    ["waking", "running", { _tag: "resuming" }, "available", { kind: "waking", label: "Waking" }],
+    [
+      "back, not dialed",
+      "running",
+      ready,
+      "available",
+      { kind: "connecting", label: "Connecting" },
+    ],
+    ["back, dialing", "running", ready, "connecting", { kind: "connecting", label: "Connecting" }],
+    [
+      "back, redialing",
+      "running",
+      ready,
+      "reconnecting",
+      { kind: "connecting", label: "Connecting" },
+    ],
+    ["back and connected", "running", ready, "connected", null],
+    ["running while this device is offline", "running", ready, "offline", null],
+    ["put away", "stopped", { _tag: "stopped", reason: "requested" }, "available", null],
+    [
+      "failed to resume",
+      "running",
+      {
+        _tag: "failed",
+        step: "resume",
+        message: "The machine did not start in time.",
+        retryable: true,
+      },
+      "available",
+      { kind: "failed", label: "Could not wake: The machine did not start in time." },
+    ],
+    [
+      "failed on another step",
+      "running",
+      { _tag: "failed", step: "observe", message: "Boat could not be reached.", retryable: true },
+      "available",
+      { kind: "failed", label: "Sandbox failed: Boat could not be reached." },
+    ],
+  ] as const)("shows a sandbox %s", (_case, desired, status, phase, expected) => {
+    expect(sandboxWakeStatus({ desired, status }, phase)).toEqual(expected);
   });
 });
 
