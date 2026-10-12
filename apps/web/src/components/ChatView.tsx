@@ -2711,7 +2711,8 @@ export default function ChatView(props: ChatViewProps) {
     sandbox: activeSandbox?.view,
     connected: !activeEnvironmentUnavailable,
   });
-  // Work that wakes the sandbox waits for the thread to load from it instead.
+  // A send that wakes the sandbox waits for the thread to load from it instead. A resume
+  // needs the loaded runs, so it always waits.
   const threadLoadBlocksWork = threadDetailLoading && sendDelivery !== "after-wake";
   const activeSandboxView = activeSandbox?.view;
   const activeSandboxWakeStatus = useMemo(
@@ -8840,7 +8841,7 @@ export default function ChatView(props: ChatViewProps) {
       isResuming ||
       isConnecting ||
       isRevertingCheckpoint ||
-      threadLoadBlocksWork ||
+      threadDetailLoading ||
       sendDelivery === "offline" ||
       sendInFlightRef.current
     ) {
