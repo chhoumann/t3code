@@ -29,6 +29,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
 import type { ManagedSandboxMarker } from "./ManagedSandbox.ts";
+import type { SandboxGuestActivity } from "./sandboxActivity.ts";
 import {
   ProviderMachineId,
   SandboxProvider,
@@ -60,6 +61,10 @@ const makeWorld = () => {
     resumes: [] as Array<number | null>,
     /** Every `ttlSeconds` the owner moved a machine's deadline to. */
     deadlines: [] as Array<number>,
+    /** Stops the owner asked for; the provider's own deadline is not one. */
+    stops: 0,
+    /** What the guest's agents report; null when the guest does not answer. */
+    activity: { busy: false, lastActivityAt: 0 } as SandboxGuestActivity | null,
     credentialRefreshes: 0,
     managedMarkers: [] as Array<ManagedSandboxMarker>,
     bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
@@ -127,14 +132,18 @@ const makeWorld = () => {
           yield* Deferred.await(gate.release);
         }
         const machine = machines.get(id);
-        return machine === undefined
-          ? null
-          : {
-              id,
-              state: machine.state,
-              setup: "done" as const,
-              archiveAfter: machine.archiveAfter,
-            };
+        if (machine === undefined) return null;
+        // Boat stops a machine on its own once its deadline passes.
+        const now = yield* Clock.currentTimeMillis;
+        if (machine.state === "running" && machine.archiveAfter !== null) {
+          if (now >= machine.archiveAfter) machine.state = "stopped";
+        }
+        return {
+          id,
+          state: machine.state,
+          setup: "done" as const,
+          archiveAfter: machine.archiveAfter,
+        };
       }),
     exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "", timedOut: false }),
     writeFile: () => Effect.void,
@@ -147,6 +156,7 @@ const makeWorld = () => {
       }),
     stop: (_account, id) =>
       Effect.sync(() => {
+        world.stops += 1;
         const machine = machines.get(id);
         if (machine !== undefined) machine.state = "stopped";
       }),
@@ -197,7 +207,10 @@ const makeWorld = () => {
     cloneCheckout: () => Effect.succeed([]),
     launchSeedThread: (_target, input) =>
       Effect.sync(() => void world.launchedThreads.push(input.seed.threadId)),
-    readActivity: () => Effect.die("unused"),
+    readActivity: () =>
+      world.activity === null
+        ? Effect.fail(new SandboxGuest.SandboxGuestError({ operation: "read-activity" }))
+        : Effect.succeed(world.activity),
     issuePairingCredential: (target, grant) =>
       world.adminTokens.has(Redacted.value(target.token))
         ? Effect.sync(() => {
@@ -231,8 +244,7 @@ const makeWorld = () => {
           machineSetupScript: null,
           providerEnvironment: null,
           size: "small",
-          // One minute, so a machine stopped by the first watch is past its TTL.
-          stopAfterHours: 1 / 60,
+          stopAfterHours: 1,
         },
         {
           id: SandboxAccountId.make("boat-personal"),
@@ -354,7 +366,7 @@ describe("SandboxService", () => {
           const key = sandboxProjectKey(ACCOUNT_ID, launchInput("project-a").repository.remoteUrl);
           yield* settings.updateSettings({
             sandboxProjectDefaults: {
-              [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 2 },
+              [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 0.25 },
             },
           });
           const sandboxes = yield* service;
@@ -370,10 +382,12 @@ describe("SandboxService", () => {
           yield* awaitStatus("project-b", "ready");
           assert.strictEqual(world.createInputs[0]?.template, "quickadd-dev");
           assert.strictEqual(world.createInputs[0]?.size, "large");
-          assert.strictEqual(world.createInputs[0]?.ttlSeconds, 7200);
+          // Boat's own stop leaves T3 its 30 minutes to answer, plus the 10 minute grace.
+          assert.strictEqual(world.createInputs[0]?.ttlSeconds, 2400);
           assert.strictEqual(world.createInputs[1]?.template, null);
           assert.strictEqual(world.createInputs[1]?.size, "small");
-          assert.strictEqual(world.createInputs[1]?.ttlSeconds, 60);
+          // The account's hour without activity, plus the grace.
+          assert.strictEqual(world.createInputs[1]?.ttlSeconds, 4200);
           assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
           yield* settings.updateSettings({
             sandboxProjectDefaults: { [key]: { template: "updated" } },
@@ -500,6 +514,72 @@ describe("SandboxService", () => {
         yield* sandboxes.update({ id, desired: "running" });
         yield* awaitStatus(id, "ready");
         assert.strictEqual(world.resumes.length, 1);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "keeps a sandbox running through a turn longer than its stop time, stops it once idle, and resumes it when asked",
+    () =>
+      Effect.gen(function* () {
+        const { world, start } = makeWorld();
+        world.activity = { busy: true, lastActivityAt: 0 };
+        const started = yield* start;
+        yield* Effect.gen(function* () {
+          const sandboxes = yield* service;
+          const id = SandboxId.make("sbx-idle");
+          yield* sandboxes.launch(launchInput(id));
+          yield* awaitStatus(id, "ready");
+
+          // Boat alone would stop the machine 70 minutes in; the turn runs for 3 hours.
+          yield* advanceUntil(Effect.sleep(Duration.hours(3)), Duration.minutes(1));
+          const [machine] = [...world.machines.values()];
+          assert.strictEqual(machine?.state, "running");
+          assert.strictEqual((yield* sandboxes.list())[0]?.status._tag, "ready");
+          assert.isAbove(world.deadlines.length, 0);
+          // Each move puts Boat's stop the hour's stop time plus the grace past the work.
+          assert.deepStrictEqual(new Set(world.deadlines), new Set([4200]));
+
+          const idleAt = yield* Clock.currentTimeMillis;
+          world.activity = { busy: false, lastActivityAt: idleAt };
+          const asleep = yield* advanceUntil(awaitStatus(id, "stopped"), Duration.minutes(1));
+          assert.deepStrictEqual(asleep.status, { _tag: "stopped", reason: "idle" });
+          assert.strictEqual(asleep.desired, "running");
+          assert.strictEqual(world.stops, 1);
+          assert.isAtLeast((yield* Clock.currentTimeMillis) - idleAt, Duration.toMillis("1 hour"));
+
+          yield* TestClock.adjust(Duration.hours(1));
+          assert.deepStrictEqual(world.resumes, []);
+          yield* sandboxes.update({ id, desired: "running" });
+          yield* awaitStatus(id, "ready");
+          assert.deepStrictEqual(world.resumes, [4200]);
+        }).pipe(Effect.provide(started.context));
+        yield* Scope.close(started.scope, Exit.void);
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("leaves a sandbox whose T3 does not answer to Boat's own stop, as external", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      world.activity = null;
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-silent");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        const readyAt = yield* Clock.currentTimeMillis;
+
+        const stopped = yield* advanceUntil(awaitStatus(id, "stopped"), Duration.minutes(1));
+        assert.deepStrictEqual(stopped.status, { _tag: "stopped", reason: "external" });
+        assert.strictEqual(stopped.desired, "running");
+        assert.strictEqual(world.stops, 0);
+        assert.deepStrictEqual(world.deadlines, []);
+        assert.isAtLeast(
+          (yield* Clock.currentTimeMillis) - readyAt,
+          Duration.toMillis("70 minutes"),
+        );
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

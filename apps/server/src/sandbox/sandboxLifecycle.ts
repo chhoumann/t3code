@@ -26,6 +26,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
+import type { SandboxGuestActivity } from "./sandboxActivity.ts";
 import { SandboxT3Source } from "./sandboxBootScript.ts";
 import type { ProviderMachine, ProviderMachineId } from "./SandboxProvider.ts";
 
@@ -43,6 +44,22 @@ export const TRANSITION_DEADLINE_MS = 10 * 60 * 1000;
  * credentials before T3 restarts.
  */
 export const ANSWER_DEADLINE_MS = 30 * 60 * 1000;
+/**
+ * How far the provider's own stop trails this owner's idle stop. The owner
+ * moves it along while the agents work, so the provider stops the machine
+ * only once the owner has been gone this long past the stop time.
+ */
+export const BACKSTOP_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * The provider's own stop for a machine that starts or resumes: past its stop
+ * time and past the time T3 has to answer, so this owner takes over first.
+ */
+export function startupTtlSeconds(stopAfterSeconds: number | null): number | null {
+  return stopAfterSeconds === null
+    ? null
+    : (Math.max(stopAfterSeconds * 1000, ANSWER_DEADLINE_MS) + BACKSTOP_GRACE_MS) / 1000;
+}
 
 /** Fixed at launch, so a replayed create sends the provider the same request. */
 export const SandboxSpec = Schema.Struct({
@@ -55,6 +72,9 @@ export const SandboxSpec = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   machine: Schema.Struct({
     size: SandboxMachineSize,
+    /** How long without agent activity before the machine stops; null never stops it. */
+    stopAfterSeconds: Schema.NullOr(Schema.Number),
+    /** The create's `startupTtlSeconds`, so a replayed create sends the same request. */
     ttlSeconds: Schema.NullOr(Schema.Number),
     template: Schema.NullOr(Schema.String),
     providerEnvironment: Schema.NullOr(Schema.String),
@@ -118,6 +138,11 @@ export interface SandboxObservation {
   readonly machine: ProviderMachine | null;
   /** What the guest answered as. Null when it did not answer, or was not asked because the sandbox is ready. */
   readonly environmentId: EnvironmentId | null;
+  /**
+   * What the guest's agents are doing. Null when the guest did not answer, or
+   * was not asked because the sandbox is not ready or never stops.
+   */
+  readonly activity: SandboxGuestActivity | null;
 }
 
 export type SandboxAction =
@@ -130,12 +155,14 @@ export type SandboxAction =
   | { readonly _tag: "Stop" }
   | { readonly _tag: "Resume" }
   | { readonly _tag: "Destroy" }
+  /** Moves the provider's own stop to `until`, then watches; nothing a client sees changes. */
+  | { readonly _tag: "ExtendDeadline"; readonly until: number }
   | { readonly _tag: "ClearInflight" }
   /** A transition the provider started on its own, recorded as in flight so it gets a deadline. */
   | { readonly _tag: "Track"; readonly op: "stop" | "resume" }
   /** Look again shortly. */
   | { readonly _tag: "Wait" }
-  /** Converged and running: look again now and then, for a stop the provider makes on its own. */
+  /** Converged and running: look again now and then, for idle agents and stops from outside. */
   | { readonly _tag: "Watch" }
   /** Converged or given up: stop reconciling until the next request. */
   | { readonly _tag: "Settle" };
@@ -147,7 +174,7 @@ export interface SandboxPlan {
 
 const plan = (status: SandboxStatus, action: SandboxAction): SandboxPlan => ({ status, action });
 const act = (
-  tag: Exclude<SandboxAction["_tag"], "RecordEnvironment" | "Track">,
+  tag: Exclude<SandboxAction["_tag"], "RecordEnvironment" | "Track" | "ExtendDeadline">,
 ): SandboxAction => ({
   _tag: tag,
 });
@@ -224,7 +251,7 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
       return planStopped(record);
     case "running":
       return firstBootDone
-        ? planRunning(record, observation)
+        ? planRunning(record, observation, machine)
         : planFirstBoot(record, observation, machine);
   }
 }
@@ -363,13 +390,17 @@ function planFirstBoot(
     : plan(booting, act("Wait"));
 }
 
-function planRunning(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
+function planRunning(
+  record: SandboxRecord,
+  observation: SandboxObservation,
+  machine: ProviderMachine,
+): SandboxPlan {
   if (record.desired === "stopped") {
     return plan({ _tag: "stopping", reason: "requested" }, act("Stop"));
   }
   const waiting = record.seedLaunchedAt === null ? launching : resuming;
   if (record.credentialsStale) return plan(waiting, act("RefreshCredentials"));
-  if (record.status._tag === "ready") return plan(ready, act("Watch"));
+  if (record.status._tag === "ready") return planReady(record, observation, machine);
   if (observation.environmentId === null) {
     const since = record.runningSince ?? record.createdAt;
     return observation.now - since < ANSWER_DEADLINE_MS
@@ -391,4 +422,33 @@ function planRunning(record: SandboxRecord, observation: SandboxObservation): Sa
   }
   if (record.seedLaunchedAt === null) return plan(launching, act("LaunchSeed"));
   return plan(ready, act("Watch"));
+}
+
+/**
+ * A ready sandbox stops once no agent has worked for its stop time; the user
+ * still wants it running, so asking again resumes it. While the agents work,
+ * the provider's own stop is kept `BACKSTOP_GRACE_MS` past this owner's, and
+ * moved only once it trails by half of that, so a busy sandbox costs one
+ * provider call every few minutes.
+ */
+function planReady(
+  record: SandboxRecord,
+  observation: SandboxObservation,
+  machine: ProviderMachine,
+): SandboxPlan {
+  const stopAfterSeconds = record.spec.machine.stopAfterSeconds;
+  const activity = observation.activity;
+  if (stopAfterSeconds === null || activity === null) return plan(ready, act("Watch"));
+  const stopAfter = stopAfterSeconds * 1000;
+  // A resume restarts the count, however long the sandbox sat stopped.
+  const idleSince = activity.busy
+    ? observation.now
+    : Math.max(record.runningSince ?? record.createdAt, activity.lastActivityAt);
+  if (observation.now - idleSince >= stopAfter) {
+    return plan({ _tag: "stopping", reason: "idle" }, act("Stop"));
+  }
+  const until = idleSince + stopAfter + BACKSTOP_GRACE_MS;
+  return machine.archiveAfter === null || machine.archiveAfter < until - BACKSTOP_GRACE_MS / 2
+    ? plan(ready, { _tag: "ExtendDeadline", until })
+    : plan(ready, act("Watch"));
 }
