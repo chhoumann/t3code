@@ -1,8 +1,6 @@
 import type { RepositoryIdentity, SourceControlProviderError } from "@t3tools/contracts";
-import {
-  detectSourceControlProviderFromGitRemoteUrl,
-  normalizeGitRemoteUrl,
-} from "@t3tools/shared/git";
+import { parseRemoteFetchUrls, repositoryIdentityFromRemotes } from "@t3tools/shared/git";
+import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -38,82 +36,6 @@ export class RepositoryIdentityResolver extends Context.Service<
     ) => Effect.Effect<RepositoryIdentity | null>;
   }
 >()("t3/project/RepositoryIdentityResolver") {}
-
-function parseRemoteFetchUrls(stdout: string): Map<string, string> {
-  const remotes = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
-    if (!match) continue;
-    const [, remoteName = "", remoteUrl = "", direction = ""] = match;
-    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
-      continue;
-    }
-    remotes.set(remoteName, remoteUrl);
-  }
-  return remotes;
-}
-
-function pickPrimaryRemote(
-  remotes: ReadonlyMap<string, string>,
-): { readonly remoteName: string; readonly remoteUrl: string } | null {
-  for (const preferredRemoteName of ["upstream", "origin"] as const) {
-    const remoteUrl = remotes.get(preferredRemoteName);
-    if (remoteUrl) {
-      return { remoteName: preferredRemoteName, remoteUrl };
-    }
-  }
-
-  const [remoteName, remoteUrl] =
-    [...remotes.entries()].toSorted(([left], [right]) => left.localeCompare(right))[0] ?? [];
-  return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
-}
-
-function repositoryPathOf(canonicalKey: string): string {
-  return canonicalKey.split("/").slice(1).join("/");
-}
-
-function buildRepositoryOrigin(
-  originUrl: string | undefined,
-  canonicalKey: string,
-): RepositoryIdentity["origin"] {
-  if (!originUrl) return undefined;
-  const originKey = normalizeGitRemoteUrl(originUrl);
-  if (originKey === canonicalKey) return undefined;
-  const displayName = repositoryPathOf(originKey);
-  return { canonicalKey: originKey, ...(displayName ? { displayName } : {}) };
-}
-
-function buildRepositoryIdentity(input: {
-  readonly remoteName: string;
-  readonly remoteUrl: string;
-  readonly originUrl: string | undefined;
-  readonly rootPath: string;
-}): RepositoryIdentity {
-  const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
-  const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
-  const repositoryPath = repositoryPathOf(canonicalKey);
-  const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
-  const [owner] = repositoryPathSegments;
-  const repositoryName = repositoryPathSegments.at(-1);
-  const origin = buildRepositoryOrigin(input.originUrl, canonicalKey);
-
-  return {
-    canonicalKey,
-    locator: {
-      source: "git-remote",
-      remoteName: input.remoteName,
-      remoteUrl: input.remoteUrl,
-    },
-    rootPath: input.rootPath,
-    ...(repositoryPath ? { displayName: repositoryPath } : {}),
-    ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
-    ...(owner ? { owner } : {}),
-    ...(repositoryName ? { name: repositoryName } : {}),
-    ...(origin ? { origin } : {}),
-  };
-}
 
 const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.resolveCacheKey")(
   function* (cwd: string) {
@@ -155,9 +77,8 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   }
 
   const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
-  const remote = pickPrimaryRemote(remotes);
-  return remote
-    ? buildRepositoryIdentity({ ...remote, originUrl: remotes.get("origin"), rootPath: cacheKey })
+  return Arr.isReadonlyArrayNonEmpty(remotes)
+    ? { ...repositoryIdentityFromRemotes(remotes), rootPath: cacheKey }
     : null;
 });
 

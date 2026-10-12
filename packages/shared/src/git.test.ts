@@ -11,6 +11,7 @@ import {
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   parseOriginUrlFromGitConfig,
+  pickPrimaryRemote,
   resolveAutoFeatureBranchName,
   sanitizeFeatureBranchName,
   WORKTREE_BRANCH_PREFIX,
@@ -86,6 +87,18 @@ describe("normalizeGitRemoteUrl", () => {
     expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v3/T3Tools/T3Code")).toBe(
       "ssh.dev.azure.com/v3/t3tools/t3code",
     );
+  });
+});
+
+describe("pickPrimaryRemote", () => {
+  const remote = (name: string) => ({ name, url: `https://github.com/${name}/t3code.git` });
+
+  it("names upstream, then origin, then the first remote by name", () => {
+    expect(pickPrimaryRemote([remote("origin"), remote("fork"), remote("upstream")]).name).toBe(
+      "upstream",
+    );
+    expect(pickPrimaryRemote([remote("fork"), remote("origin")]).name).toBe("origin");
+    expect(pickPrimaryRemote([remote("mirror"), remote("fork"), remote("work")]).name).toBe("fork");
   });
 });
 

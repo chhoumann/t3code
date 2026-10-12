@@ -1,5 +1,7 @@
 import type {
   BranchNamingOptions,
+  GitRemote,
+  RepositoryIdentity,
   VcsRef,
   SourceControlProviderInfo,
   VcsStatusLocalResult,
@@ -353,6 +355,62 @@ export function detectSourceControlProviderFromGitRemoteUrl(
   remoteUrl: string,
 ): SourceControlProviderInfo | null {
   return detectSourceControlProviderFromRemoteUrl(remoteUrl);
+}
+
+/** Each remote and its fetch URL, from `git remote -v`. */
+export function parseRemoteFetchUrls(stdout: string): GitRemote[] {
+  const remotes: GitRemote[] = [];
+  for (const line of stdout.split("\n")) {
+    const [, name, url] = /^(\S+)\s+(\S+)\s+\(fetch\)$/.exec(line.trim()) ?? [];
+    if (name && url) remotes.push({ name, url });
+  }
+  return remotes;
+}
+
+/** The remote a checkout's repository identity names: `upstream`, then `origin`, then the first by name. */
+export function pickPrimaryRemote<R extends GitRemote>(remotes: Arr.NonEmptyReadonlyArray<R>): R {
+  return (
+    remotes.find((remote) => remote.name === "upstream") ??
+    remotes.find((remote) => remote.name === "origin") ??
+    remotes.reduce((first, remote) => (remote.name.localeCompare(first.name) < 0 ? remote : first))
+  );
+}
+
+function repositoryPathOf(canonicalKey: string): string {
+  return canonicalKey.split("/").slice(1).join("/");
+}
+
+/**
+ * A checkout's repository identity, read from its remotes: the one
+ * `pickPrimaryRemote` names, and `origin` when that is another repository.
+ */
+export function repositoryIdentityFromRemotes(
+  remotes: Arr.NonEmptyReadonlyArray<GitRemote>,
+): RepositoryIdentity {
+  const primary = pickPrimaryRemote(remotes);
+  const canonicalKey = normalizeGitRemoteUrl(primary.url);
+  const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(primary.url);
+  const repositoryPath = repositoryPathOf(canonicalKey);
+  const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
+  const [owner] = repositoryPathSegments;
+  const repositoryName = repositoryPathSegments.at(-1);
+  const originUrl = remotes.find((remote) => remote.name === "origin")?.url;
+  const originKey = originUrl === undefined ? canonicalKey : normalizeGitRemoteUrl(originUrl);
+  const originPath = repositoryPathOf(originKey);
+
+  return {
+    canonicalKey,
+    locator: { source: "git-remote", remoteName: primary.name, remoteUrl: primary.url },
+    ...(repositoryPath ? { displayName: repositoryPath } : {}),
+    ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
+    ...(owner ? { owner } : {}),
+    ...(repositoryName ? { name: repositoryName } : {}),
+    ...(originKey === canonicalKey
+      ? {}
+      : {
+          origin: { canonicalKey: originKey, ...(originPath ? { displayName: originPath } : {}) },
+        }),
+  };
 }
 
 const EMPTY_GIT_STATUS_REMOTE: VcsStatusRemoteResult = {
