@@ -325,6 +325,7 @@ describe("BoatSandboxProvider", () => {
     Effect.gen(function* () {
       const seen: Array<Seen> = [];
       const refused = new Set([
+        "PATCH /api/v1/sandboxes/t3-preflight-probe",
         "POST /api/v1/sandboxes/t3-preflight-probe/resume",
         "POST /api/v1/sandboxes/t3-preflight-probe/host",
         "GET /api/v1/named-snapshots",
@@ -363,8 +364,8 @@ describe("BoatSandboxProvider", () => {
         provider.checkAccess(account),
       ).pipe(Effect.provide(layer));
 
-      expect(missing).toEqual(["sandbox.resume", "host", "snapshot.read"]);
-      expect(seen).toHaveLength(9);
+      expect(missing).toEqual(["sandbox.update", "sandbox.resume", "host", "snapshot.read"]);
+      expect(seen).toHaveLength(10);
       for (const request of seen) {
         expect(`${request.method} ${new URL(request.url).pathname}`).toMatch(
           /^(\w+ \/api\/v1\/sandboxes(\/t3-preflight-probe(\/[a-z]+)?)?|GET \/api\/v1\/named-snapshots)$/,

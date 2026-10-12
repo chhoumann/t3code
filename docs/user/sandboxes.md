@@ -8,10 +8,10 @@ branch there, and starts a thread with your message. Sandboxes run on
 ## Add an account
 
 Open **Settings → Sandboxes** and choose **Add account**. Paste a Boat API key.
-T3 Code checks that the key can create, read, stop, resume, and delete
+T3 Code checks that the key can create, read, update, stop, resume, and delete
 sandboxes, run commands, write files, host ports, and read snapshots before it
-saves the account. The key must also be allowed to update sandboxes, so T3 Code
-can push back Boat's own stop time while agents work. The key and any
+saves the account. Updating is how T3 Code pushes back Boat's own stop time
+while agents work. The key and any
 environment variable values stay in that environment's secret store, not in its
 settings. You can add more than one account, such as a personal and a work
 account.

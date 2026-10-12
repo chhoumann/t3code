@@ -163,6 +163,12 @@ const ACCESS_PROBES: ReadonlyArray<{
   },
   { action: "sandbox.read", request: HttpClientRequest.get(probePath) },
   {
+    action: "sandbox.update",
+    request: HttpClientRequest.patch(probePath).pipe(
+      HttpClientRequest.bodyJsonUnsafe({ ttlSeconds: 60 }),
+    ),
+  },
+  {
     action: "sandbox.stop",
     request: HttpClientRequest.post(`${probePath}/stop`).pipe(HttpClientRequest.bodyJsonUnsafe({})),
   },
