@@ -27,7 +27,7 @@ const shared = {
 const SandboxLaunchTool = Tool.make("sandbox_launch", {
   ...shared,
   description:
-    "Create a sandbox machine under one of this environment's sandbox accounts (see sandbox_list), clone repository.remoteUrl into it, and start a thread there with message. Returns at once with status creating; call sandbox_list to follow it to ready. Pass the same id again to retry without creating a second machine. runtimeMode and interactionMode default to, and may not exceed, the caller's own.",
+    "Create a sandbox machine under one of this environment's sandbox accounts (see sandbox_list), clone repository.remoteUrl into it (repository.projectRemoteUrl is the project's own remote, the same URL unless remoteUrl is a fork of it), and start a thread there with message. Returns at once with status creating; call sandbox_list to follow it to ready. Pass the same id again to retry without creating a second machine. runtimeMode and interactionMode default to, and may not exceed, the caller's own.",
   parameters: Schema.Struct({
     id: Schema.optionalKey(SandboxLaunchInput.fields.id),
     accountId: SandboxLaunchInput.fields.accountId,

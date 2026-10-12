@@ -28,7 +28,8 @@ export interface SandboxLaunchRequest {
   readonly message: string;
   /** Attachments and context the composer holds besides the message. */
   readonly extrasCount: number;
-  readonly remoteUrl: string | null;
+  /** The remote the project's repository identity names. */
+  readonly projectRemoteUrl: string | null;
   readonly gitStatus: VcsStatusResult | null;
   readonly driver: ProviderDriverKind;
   readonly model: string;
@@ -52,7 +53,7 @@ export function useSandboxLaunch() {
         return "A sandbox starts from your message alone. Remove attachments and context to start one.";
       }
       const repository = sandboxRepositoryFor({
-        remoteUrl: request.remoteUrl,
+        projectRemoteUrl: request.projectRemoteUrl,
         status: request.gitStatus,
       });
       if (repository._tag === "Refused") {

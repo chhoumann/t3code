@@ -34,10 +34,10 @@ script. An SSH remote needs a key set up the same way.
 ## Start a sandbox
 
 In a new thread in a project, open the environment picker and choose
-**New sandbox · _account_**, then send your message. The sandbox starts from
-the commit your branch has pushed, so commit and push first: uncommitted or
-unpushed work is not included. The first message cannot carry attachments or
-context.
+**New sandbox · _account_**, then send your message. The sandbox clones the
+remote your branch tracks, such as your fork, and starts from the commit your
+branch has pushed there, so commit and push first: uncommitted or unpushed
+work is not included. The first message cannot carry attachments or context.
 
 Every device connected to the environment that owns the sandbox pairs with it
 automatically.

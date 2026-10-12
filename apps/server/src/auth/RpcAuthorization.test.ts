@@ -439,7 +439,11 @@ describe("sandbox RPC authorization", () => {
     accountId,
     title: "Fix the bug",
     message: "Fix the bug in hello.txt",
-    repository: { remoteUrl: "https://github.com/octocat/Hello-World", commit: null },
+    repository: {
+      remoteUrl: "https://github.com/octocat/Hello-World",
+      projectRemoteUrl: "https://github.com/octocat/Hello-World",
+      commit: null,
+    },
     threadId: ThreadId.make("thread-auth"),
     desired: "running" as const,
     status: { _tag: "ready" as const },

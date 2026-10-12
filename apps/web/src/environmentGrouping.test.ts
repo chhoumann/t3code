@@ -606,6 +606,7 @@ describe("resolveSandboxProjectGroup", () => {
   const sandboxEnvironmentId = EnvironmentId.make("env-sandbox");
   const cloned = sandboxProject({
     remoteUrl: "https://github.com/Example/Shared-Repo.git",
+    projectRemoteUrl: "https://github.com/Example/Shared-Repo.git",
     commit: null,
   });
   const snapshots = (projects: Project[], mode: "repository" | "separate") =>

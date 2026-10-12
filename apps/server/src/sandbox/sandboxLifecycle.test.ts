@@ -39,7 +39,11 @@ const fresh: SandboxRecord = {
   spec: {
     title: "Fix the bug",
     message: "Fix the bug",
-    repository: { remoteUrl: "https://github.com/octocat/Hello-World", commit: null },
+    repository: {
+      remoteUrl: "https://github.com/octocat/Hello-World",
+      projectRemoteUrl: "https://github.com/octocat/Hello-World",
+      commit: null,
+    },
     driver: ProviderDriverKind.make("claudeAgent"),
     model: "claude-sonnet-4-6",
     runtimeMode: "full-access",

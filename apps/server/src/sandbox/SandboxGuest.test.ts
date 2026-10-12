@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,6 +12,7 @@ import * as Redacted from "effect/Redacted";
 import { HttpClient } from "effect/http";
 import { Socket } from "effect/socket";
 
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { FLOCK_SHIM } from "../testUtils/flockShim.ts";
 import { SANDBOX_ENV_FILE } from "./sandboxBootScript.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
@@ -34,27 +36,40 @@ const commit = (cwd: string, message: string) =>
     message,
   );
 
-/** An origin with a pinned commit and a later one, and a clone command whose guest paths live under `root`. */
-const cloneFixture = () => {
+/** A temp dir standing in for the guest's home, and a repository in it with one commit. */
+const guestFixture = () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-clone-"));
+  // The guest's home only exists in a sandbox.
+  const at = (path: string) => path.replace("/home/user", root);
+  NodeFS.mkdirSync(NodePath.join(at(SANDBOX_ENV_FILE), "..", "sandbox"), { recursive: true });
+  NodeFS.writeFileSync(at(SANDBOX_ENV_FILE), "");
   const origin = NodePath.join(root, "origin");
   NodeFS.mkdirSync(origin);
   git(origin, "init", "--quiet", "--initial-branch=main");
   commit(origin, "pinned");
   const pinned = git(origin, "rev-parse", "HEAD");
-  commit(origin, "later");
-  // The guest's home only exists in a sandbox.
-  const at = (path: string) => path.replace("/home/user", root);
-  NodeFS.mkdirSync(NodePath.join(at(SANDBOX_ENV_FILE), "..", "sandbox"), { recursive: true });
-  NodeFS.writeFileSync(at(SANDBOX_ENV_FILE), "");
   const checkout = NodePath.join(root, "project");
-  const command = renderCloneCommand({
-    remoteUrl: origin,
-    commit: pinned,
-    branch: "t3/sandbox-0a1b2c3d",
-    path: checkout,
-  }).replaceAll("/home/user", root);
-  return { root, pinned, checkout, script: `${FLOCK_SHIM}\n${command}` };
+  const script = (checkoutInput: Omit<SandboxGuest.SandboxCheckout, "branch" | "path">) =>
+    `${FLOCK_SHIM}\n${renderCloneCommand({
+      ...checkoutInput,
+      branch: "t3/sandbox-0a1b2c3d",
+      path: checkout,
+    }).replaceAll("/home/user", root)}`;
+  return { root, origin, pinned, checkout, script };
+};
+
+/** An origin with a pinned commit and a later one, and the command that clones it at the pinned one. */
+const cloneFixture = () => {
+  const fixture = guestFixture();
+  commit(fixture.origin, "later");
+  return {
+    ...fixture,
+    script: fixture.script({
+      remoteUrl: fixture.origin,
+      projectRemoteUrl: fixture.origin,
+      commit: fixture.pinned,
+    }),
+  };
 };
 
 /** Runs `script`; `printed` resolves once its stdout shows `line`. */
@@ -84,9 +99,54 @@ describe("renderCloneCommand", () => {
       expect(result.status, run).toBe(0);
       expect(git(checkout, "symbolic-ref", "--short", "HEAD"), run).toBe("t3/sandbox-0a1b2c3d");
       expect(git(checkout, "rev-parse", "HEAD"), run).toBe(pinned);
+      expect(git(checkout, "remote"), run).toBe("origin");
     }
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
+
+  it.effect(
+    "clones the fork a branch tracks at its commit, so the clone has the project's identity",
+    () =>
+      Effect.gen(function* () {
+        const { root, origin: project, checkout, script } = guestFixture();
+        const fork = NodePath.join(root, "fork");
+        NodeChildProcess.execFileSync("git", ["clone", "--quiet", project, fork]);
+        commit(fork, "only on the fork");
+        const forkOnly = git(fork, "rev-parse", "HEAD");
+        const projectUrl = "https://github.com/pingdotgg/t3code.git";
+        const forkUrl = "https://github.com/chhoumann/t3code.git";
+        // Clones and fetches reach the local repositories; the clone's config keeps the URLs.
+        const env = {
+          ...process.env,
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: `url.${project}.insteadOf`,
+          GIT_CONFIG_VALUE_0: projectUrl,
+          GIT_CONFIG_KEY_1: `url.${fork}.insteadOf`,
+          GIT_CONFIG_VALUE_1: forkUrl,
+        };
+
+        const result = NodeChildProcess.spawnSync(
+          "bash",
+          ["-c", script({ remoteUrl: forkUrl, projectRemoteUrl: projectUrl, commit: forkOnly })],
+          { encoding: "utf8", env },
+        );
+        const identity = yield* RepositoryIdentityResolver.RepositoryIdentityResolver.pipe(
+          Effect.flatMap((resolver) => resolver.resolve(checkout)),
+          Effect.provide(RepositoryIdentityResolver.layer),
+        );
+
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expect(git(checkout, "symbolic-ref", "--short", "HEAD")).toBe("t3/sandbox-0a1b2c3d");
+        expect(git(checkout, "rev-parse", "HEAD")).toBe(forkOnly);
+        expect(identity).toMatchObject({
+          canonicalKey: "github.com/pingdotgg/t3code",
+          locator: { source: "git-remote", remoteName: "upstream", remoteUrl: projectUrl },
+          origin: { canonicalKey: "github.com/chhoumann/t3code", displayName: "chhoumann/t3code" },
+        });
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it("lets a replay that starts while the first clone runs wait for it and keep its clone", async () => {
     const { root, pinned, checkout, script } = cloneFixture();
@@ -148,6 +208,7 @@ describe("SandboxGuest", () => {
       const failure = yield* guest
         .cloneCheckout({ apiKey: Redacted.make("key") }, ProviderMachineId.make("bx_1"), {
           remoteUrl: "https://github.com/acme/app.git",
+          projectRemoteUrl: "https://github.com/acme/app.git",
           commit: null,
           branch: "t3/sandbox-0a1b2c3d",
           path: "/home/user/projects/app",

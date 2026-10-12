@@ -179,32 +179,45 @@ export function pendingSandboxThreads(
 
 /**
  * The project a sandbox's environment creates for its clone, as far as
- * project grouping reads it: titled after the checkout directory and
- * identified by the cloned remote. Mirrors the server's sandbox checkout path
- * and repository identity, so a launching sandbox is labeled the way its
- * thread will be.
+ * project grouping reads it: titled after the checkout directory, with the
+ * repository identity the clone's remotes give it. Mirrors the server's
+ * sandbox checkout path and clone remotes, so a launching sandbox is labeled
+ * and grouped the way its thread will be.
  */
 export function sandboxProject(
   repository: SandboxRepository,
 ): Pick<EnvironmentProject, "title" | "repositoryIdentity"> {
-  const { remoteUrl } = repository;
-  const canonicalKey = normalizeGitRemoteUrl(remoteUrl);
+  const { remoteUrl, projectRemoteUrl } = repository;
+  const canonicalKey = normalizeGitRemoteUrl(projectRemoteUrl);
+  const originKey = normalizeGitRemoteUrl(remoteUrl);
+  const forked = originKey !== canonicalKey;
   const path = canonicalKey.split("/").slice(1);
+  const originPath = originKey.split("/").slice(1);
   const owner = path[0];
   const name = path.at(-1);
   return {
     title:
-      remoteUrl
+      projectRemoteUrl
         .replace(/\/+$/, "")
         .split(/[/:]/)
         .at(-1)
         ?.replace(/\.git$/, "") || "project",
     repositoryIdentity: {
       canonicalKey,
-      locator: { source: "git-remote", remoteName: "origin", remoteUrl },
+      locator: forked
+        ? { source: "git-remote", remoteName: "upstream", remoteUrl: projectRemoteUrl }
+        : { source: "git-remote", remoteName: "origin", remoteUrl },
       ...(path.length > 0 ? { displayName: path.join("/") } : {}),
       ...(owner ? { owner } : {}),
       ...(name ? { name } : {}),
+      ...(forked
+        ? {
+            origin: {
+              canonicalKey: originKey,
+              ...(originPath.length > 0 ? { displayName: originPath.join("/") } : {}),
+            },
+          }
+        : {}),
     },
   };
 }
@@ -253,32 +266,39 @@ export const SANDBOX_REPOSITORY_PROBLEM_MESSAGE: Record<SandboxRepositoryProblem
   "uncommitted-changes":
     "A sandbox starts from the pushed commit, so uncommitted changes would not travel. Commit and push them first.",
   "not-pushed":
-    "A sandbox starts from the pushed commit, so local commits would not travel. Push them first.",
+    "A sandbox clones the remote your branch tracks at its pushed commit, so local commits would not travel. Push the branch first.",
 };
 
 /**
- * What a sandbox clones: the project's remote at the current commit, which
- * must already be on that remote. Local changes never reach the sandbox.
+ * What a sandbox clones: the remote the current branch tracks, at the
+ * current commit, which must already be on that remote. Local changes never
+ * reach the sandbox. `projectRemoteUrl` is the remote the project's
+ * repository identity names.
  */
 export function sandboxRepositoryFor(input: {
-  readonly remoteUrl: string | null;
+  readonly projectRemoteUrl: string | null;
   readonly status: VcsStatusResult | null;
 }):
   | { readonly _tag: "Ready"; readonly repository: SandboxRepository }
   | { readonly _tag: "Refused"; readonly problem: SandboxRepositoryProblem } {
   const refuse = (problem: SandboxRepositoryProblem) => ({ _tag: "Refused" as const, problem });
-  const { status } = input;
+  const { projectRemoteUrl, status } = input;
   if (status === null || !status.isRepo) return refuse("not-a-repository");
-  if (input.remoteUrl === null || !status.hasPrimaryRemote) return refuse("no-remote");
+  if (projectRemoteUrl === null) return refuse("no-remote");
   if (status.headCommit === undefined) return refuse("no-commit");
   // Untracked files never reach the sandbox either, but they are usually caches or build
   // output, so only edits to tracked files block a launch.
   if (status.hasTrackedChanges ?? status.hasWorkingTreeChanges)
     return refuse("uncommitted-changes");
-  if (!status.hasUpstream || status.aheadCount > 0) return refuse("not-pushed");
+  if (status.trackedRemoteUrl === undefined || !status.hasUpstream || status.aheadCount > 0)
+    return refuse("not-pushed");
   return {
     _tag: "Ready",
-    repository: { remoteUrl: input.remoteUrl, commit: status.headCommit },
+    repository: {
+      remoteUrl: status.trackedRemoteUrl,
+      projectRemoteUrl,
+      commit: status.headCommit,
+    },
   };
 }
 

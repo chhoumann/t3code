@@ -13,6 +13,16 @@ describe("sandbox project defaults", () => {
     expect(sandboxProjectKey(work, "https://github.com/chhoumann/quickadd.git")).not.toBe(key);
   });
 
+  it("keys a project's settings, which hold its canonical key, like a launch from its remote", () => {
+    const personal = SandboxAccountId.make("personal");
+    expect(sandboxProjectKey(personal, "github.com/chhoumann/quickadd")).toBe(
+      '["personal","github.com/chhoumann/quickadd"]',
+    );
+    expect(sandboxProjectKey(personal, "git@github.com:chhoumann/QuickAdd.git")).toBe(
+      '["personal","github.com/chhoumann/quickadd"]',
+    );
+  });
+
   it("inherits account defaults while allowing an explicit unlimited lifetime", () => {
     expect(resolveSandboxProjectDefaults(account, undefined)).toEqual({
       template: null,

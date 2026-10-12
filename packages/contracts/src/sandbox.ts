@@ -62,7 +62,18 @@ export const SandboxStatus = Schema.Union([
 export type SandboxStatus = typeof SandboxStatus.Type;
 
 export const SandboxRepository = Schema.Struct({
+  /**
+   * Cloned as `origin`: the remote the launching branch tracks, which has
+   * `commit`. The sandbox's task branch pushes there.
+   */
   remoteUrl: TrimmedNonEmptyString,
+  /**
+   * The remote the project's repository identity names, which keys its
+   * sandbox defaults. A branch on a fork tracks another remote; the clone
+   * then also has this one as `upstream`, so the sandbox's project gets the
+   * project's canonical key.
+   */
+  projectRemoteUrl: TrimmedNonEmptyString,
   /** Checked out after cloning; null keeps the remote's default branch. */
   commit: Schema.NullOr(TrimmedNonEmptyString),
 });

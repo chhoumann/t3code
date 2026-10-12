@@ -565,11 +565,11 @@ const make = Effect.gen(function* () {
           const baseUrl =
             record.httpBaseUrl ??
             (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
+          const { repository } = record.spec;
           const checkout = {
-            remoteUrl: record.spec.repository.remoteUrl,
-            commit: record.spec.repository.commit,
+            ...repository,
             branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-            path: checkoutPath(record.spec.repository.remoteUrl),
+            path: checkoutPath(repository.projectRemoteUrl),
           };
           const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
           yield* asOwner(record, resolved, yield* machineId, (token) =>
@@ -786,7 +786,7 @@ const make = Effect.gen(function* () {
           const defaults = resolveSandboxProjectDefaults(
             account,
             (yield* settings.getSettings.pipe(Effect.orDie)).sandboxProjectDefaults[
-              sandboxProjectKey(input.accountId, input.repository.remoteUrl)
+              sandboxProjectKey(input.accountId, input.repository.projectRemoteUrl)
             ],
           );
           const record: SandboxRecord = {

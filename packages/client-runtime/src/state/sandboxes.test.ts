@@ -25,11 +25,13 @@ import {
 
 const OWNER = EnvironmentId.make("environment-owner");
 const REMOTE = "https://github.com/octocat/Hello-World.git";
+const FORK = "git@github.com:hubot/Hello-World.git";
 const HEAD = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d";
 
 const pushed: VcsStatusResult = {
   isRepo: true,
   hasPrimaryRemote: true,
+  trackedRemoteUrl: REMOTE,
   isDefaultRef: true,
   refName: "main",
   headCommit: HEAD,
@@ -53,16 +55,23 @@ const account = (label: string): SandboxAccountConfig => ({
 
 describe("sandboxRepositoryFor", () => {
   it("pins the remote at the current commit once it is pushed, even when behind", () => {
-    expect(sandboxRepositoryFor({ remoteUrl: REMOTE, status: pushed })).toEqual({
+    expect(sandboxRepositoryFor({ projectRemoteUrl: REMOTE, status: pushed })).toEqual({
       _tag: "Ready",
-      repository: { remoteUrl: REMOTE, commit: HEAD },
+      repository: { remoteUrl: REMOTE, projectRemoteUrl: REMOTE, commit: HEAD },
+    });
+  });
+
+  it("clones the fork a branch tracks, where its commit is, and keeps the project's remote", () => {
+    const onFork = { ...pushed, isDefaultRef: false, refName: "fix", trackedRemoteUrl: FORK };
+    expect(sandboxRepositoryFor({ projectRemoteUrl: REMOTE, status: onFork })).toEqual({
+      _tag: "Ready",
+      repository: { remoteUrl: FORK, projectRemoteUrl: REMOTE, commit: HEAD },
     });
   });
 
   it.each([
     ["not-a-repository", null, { ...pushed, isRepo: false }],
-    ["no-remote", null, pushed],
-    ["no-remote", REMOTE, { ...pushed, hasPrimaryRemote: false }],
+    ["no-remote", null, { ...pushed, trackedRemoteUrl: undefined }],
     ["no-commit", REMOTE, { ...pushed, headCommit: undefined }],
     ["uncommitted-changes", REMOTE, { ...pushed, hasWorkingTreeChanges: true }],
     [
@@ -71,21 +80,26 @@ describe("sandboxRepositoryFor", () => {
       { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: true },
     ],
     ["not-pushed", REMOTE, { ...pushed, aheadCount: 1 }],
-    ["not-pushed", REMOTE, { ...pushed, hasUpstream: false }],
-  ] as const)("refuses with %s", (problem, remoteUrl, status) => {
-    expect(sandboxRepositoryFor({ remoteUrl, status })).toEqual({ _tag: "Refused", problem });
+    ["not-pushed", REMOTE, { ...pushed, hasUpstream: false, trackedRemoteUrl: undefined }],
+    // A branch that tracks another local branch has an upstream but no remote.
+    ["not-pushed", REMOTE, { ...pushed, trackedRemoteUrl: undefined }],
+  ] as const)("refuses with %s", (problem, projectRemoteUrl, status) => {
+    expect(sandboxRepositoryFor({ projectRemoteUrl, status })).toEqual({
+      _tag: "Refused",
+      problem,
+    });
   });
 
   it("launches when only untracked files changed, since they never travel anyway", () => {
     const status = { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: false };
-    expect(sandboxRepositoryFor({ remoteUrl: REMOTE, status })).toEqual({
+    expect(sandboxRepositoryFor({ projectRemoteUrl: REMOTE, status })).toEqual({
       _tag: "Ready",
-      repository: { remoteUrl: REMOTE, commit: HEAD },
+      repository: { remoteUrl: REMOTE, projectRemoteUrl: REMOTE, commit: HEAD },
     });
   });
 
   it("refuses before the status has loaded", () => {
-    expect(sandboxRepositoryFor({ remoteUrl: REMOTE, status: null })).toEqual({
+    expect(sandboxRepositoryFor({ projectRemoteUrl: REMOTE, status: null })).toEqual({
       _tag: "Refused",
       problem: "not-a-repository",
     });
@@ -218,7 +232,7 @@ describe("pendingSandboxThreads", () => {
     accountId: SandboxAccountId.make("work"),
     title: id,
     message: "Fix the flaky test",
-    repository: { remoteUrl: REMOTE, commit: HEAD },
+    repository: { remoteUrl: REMOTE, projectRemoteUrl: REMOTE, commit: HEAD },
     threadId: ThreadId.make(`seed-${id}`),
     desired: "running",
     status: { _tag: "creating" },
@@ -341,7 +355,7 @@ describe("pendingSandboxThreads", () => {
 
 describe("sandboxProject", () => {
   it("names the project after its checkout and identifies it by the cloned remote", () => {
-    expect(sandboxProject({ remoteUrl: REMOTE, commit: HEAD })).toEqual({
+    expect(sandboxProject({ remoteUrl: REMOTE, projectRemoteUrl: REMOTE, commit: HEAD })).toEqual({
       title: "Hello-World",
       repositoryIdentity: {
         canonicalKey: "github.com/octocat/hello-world",
@@ -356,9 +370,35 @@ describe("sandboxProject", () => {
   it("identifies an SSH remote like its HTTPS spelling", () => {
     const ssh = sandboxProject({
       remoteUrl: "git@github.com:octocat/Hello-World.git/",
+      projectRemoteUrl: REMOTE,
       commit: null,
     });
     expect(ssh.title).toBe("Hello-World");
     expect(ssh.repositoryIdentity?.canonicalKey).toBe("github.com/octocat/hello-world");
+    expect(ssh.repositoryIdentity?.origin).toBeUndefined();
+  });
+
+  it("identifies a fork's clone by the project's remote, as its upstream, with the fork as origin", () => {
+    expect(
+      sandboxProject({
+        remoteUrl: "https://github.com/chhoumann/t3code.git",
+        projectRemoteUrl: "https://github.com/pingdotgg/t3code.git",
+        commit: HEAD,
+      }),
+    ).toEqual({
+      title: "t3code",
+      repositoryIdentity: {
+        canonicalKey: "github.com/pingdotgg/t3code",
+        locator: {
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "https://github.com/pingdotgg/t3code.git",
+        },
+        displayName: "pingdotgg/t3code",
+        owner: "pingdotgg",
+        name: "t3code",
+        origin: { canonicalKey: "github.com/chhoumann/t3code", displayName: "chhoumann/t3code" },
+      },
+    });
   });
 });

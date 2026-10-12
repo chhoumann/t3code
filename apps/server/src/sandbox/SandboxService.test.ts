@@ -55,6 +55,7 @@ const makeWorld = () => {
     managedMarkers: [] as Array<ManagedSandboxMarker>,
     bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
     launchedThreads: [] as Array<string>,
+    checkouts: [] as Array<SandboxGuest.SandboxCheckout>,
     pairingGrants: [] as Array<{ readonly baseUrl: string; readonly scopes: unknown }>,
     secrets: new Map<string, Uint8Array>(),
     /** Admin sessions the guest accepts. */
@@ -163,7 +164,11 @@ const makeWorld = () => {
         world.adminTokens.add(token);
         return Redacted.make(token);
       }),
-    cloneCheckout: () => Effect.succeed([]),
+    cloneCheckout: (_account, _machineId, checkout) =>
+      Effect.sync(() => {
+        world.checkouts.push(checkout);
+        return [];
+      }),
     launchSeedThread: (_target, input) =>
       Effect.sync(() => void world.launchedThreads.push(input.seed.threadId)),
     issuePairingCredential: (target, grant) =>
@@ -242,7 +247,11 @@ const launchInput = (id: string) => ({
   accountId: ACCOUNT_ID,
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
-  repository: { remoteUrl: "https://github.com/octocat/Hello-World.git", commit: null },
+  repository: {
+    remoteUrl: "https://github.com/octocat/Hello-World.git",
+    projectRemoteUrl: "https://github.com/octocat/Hello-World.git",
+    commit: null,
+  },
   driver: ProviderDriverKind.make("claudeAgent"),
   model: "claude-sonnet-4-6",
   runtimeMode: "full-access" as const,
@@ -312,14 +321,15 @@ describe("SandboxService", () => {
   );
 
   it.effect(
-    "uses different project templates with one shared account and freezes each launch",
+    "uses a project's defaults for every branch's launch, on a fork too, and freezes each launch",
     () =>
       Effect.gen(function* () {
         const { world, start } = makeWorld();
         const started = yield* start;
         yield* Effect.gen(function* () {
           const settings = yield* ServerSettings.ServerSettingsService;
-          const key = sandboxProjectKey(ACCOUNT_ID, launchInput("project-a").repository.remoteUrl);
+          // What the project's settings page writes: its repository identity's canonical key.
+          const key = sandboxProjectKey(ACCOUNT_ID, "github.com/octocat/hello-world");
           yield* settings.updateSettings({
             sandboxProjectDefaults: {
               [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 2 },
@@ -332,22 +342,41 @@ describe("SandboxService", () => {
             ...launchInput("project-b"),
             repository: {
               remoteUrl: "https://github.com/octocat/website.git",
+              projectRemoteUrl: "https://github.com/octocat/website.git",
               commit: null,
             },
           });
           yield* awaitStatus("project-b", "ready");
+          // A branch on a fork, launched from a checkout whose identity remote is spelled over SSH.
+          yield* sandboxes.launch({
+            ...launchInput("project-a-fork"),
+            repository: {
+              remoteUrl: "https://github.com/hubot/Hello-World.git",
+              projectRemoteUrl: "git@github.com:octocat/Hello-World.git",
+              commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+            },
+          });
+          yield* awaitStatus("project-a-fork", "ready");
           assert.strictEqual(world.createInputs[0]?.template, "quickadd-dev");
           assert.strictEqual(world.createInputs[0]?.size, "large");
           assert.strictEqual(world.createInputs[0]?.ttlSeconds, 7200);
           assert.strictEqual(world.createInputs[1]?.template, null);
           assert.strictEqual(world.createInputs[1]?.size, "small");
           assert.strictEqual(world.createInputs[1]?.ttlSeconds, 60);
+          assert.strictEqual(world.createInputs[2]?.template, "quickadd-dev");
           assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
+          assert.deepStrictEqual(world.checkouts[2], {
+            remoteUrl: "https://github.com/hubot/Hello-World.git",
+            projectRemoteUrl: "git@github.com:octocat/Hello-World.git",
+            commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+            branch: "t3/sandbox-project-",
+            path: "/home/user/projects/Hello-World",
+          });
           yield* settings.updateSettings({
             sandboxProjectDefaults: { [key]: { template: "updated" } },
           });
           yield* sandboxes.launch(launchInput("project-a"));
-          assert.strictEqual(world.createInputs.length, 2);
+          assert.strictEqual(world.createInputs.length, 3);
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
