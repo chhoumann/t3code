@@ -811,6 +811,7 @@ const make = Effect.gen(function* () {
                 providerEnvironment: account.providerEnvironment,
                 setupScript: renderSandboxBootScript({
                   t3: { kind: build.kind, version: build.version },
+                  sandboxId: input.id,
                   label: input.title,
                 }),
               },

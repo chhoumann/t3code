@@ -60,6 +60,7 @@ import {
   SANDBOX_T3_BIN,
   SANDBOX_T3_HOME,
   SANDBOX_T3_TARBALL,
+  renderInputsReadyTest,
   renderRefreshCredentialsCommand,
   shellQuote,
 } from "./sandboxBootScript.ts";
@@ -270,7 +271,8 @@ export class SandboxGuest extends Context.Service<
   {
     /**
      * Uploads what the creation script waits for, the ready marker last. A
-     * no-op once the marker exists, so a retry never re-uploads the build.
+     * no-op once the marker names this sandbox, so a retry never re-uploads
+     * the build.
      */
     readonly writeBootInputs: (
       account: SandboxProviderAccount,
@@ -366,7 +368,7 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const marker = yield* provider.exec(account, machineId, {
-        command: `test -e ${shellQuote(SANDBOX_INPUTS_READY_FILE)} && echo present || true`,
+        command: `${renderInputsReadyTest(inputs.managed.sandboxId)} && echo present || true`,
         timeoutSeconds: 10,
       });
       if (marker.stdout.trim() === "present") return;
@@ -411,7 +413,7 @@ const make = Effect.gen(function* () {
       }
       yield* provider.writeFile(account, machineId, {
         path: SANDBOX_INPUTS_READY_FILE,
-        content: new Uint8Array(),
+        content: encode(inputs.managed.sandboxId),
       });
     });
 

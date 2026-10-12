@@ -21,6 +21,7 @@ import {
 const tarball: SandboxT3Source = { kind: "tarball", version: "0.0.45" };
 const npm: SandboxT3Source = { kind: "npm", version: "0.0.45" };
 const label = "Add hello.txt";
+const sandboxId = "sbx-0a1b2c3d";
 
 const bashSyntaxErrors = (script: string) =>
   NodeChildProcess.spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
@@ -33,19 +34,16 @@ describe("renderSandboxBootScript", () => {
     ["tarball", tarball],
     ["npm", npm],
   ])("renders valid bash for %s", (_, source) => {
-    const result = bashSyntaxErrors(renderSandboxBootScript({ t3: source, label }));
+    const result = bashSyntaxErrors(renderSandboxBootScript({ t3: source, sandboxId, label }));
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
   });
 
   it("installs the machine setup as a boot unit with the account env, after the inputs and before T3", () => {
-    const script = renderSandboxBootScript({ t3: tarball, label });
+    const script = renderSandboxBootScript({ t3: tarball, sandboxId, label });
     const lines = script.split("\n");
-    const waitForInputs = lineIndex(
-      script,
-      new RegExp(`\\[ -f '${SANDBOX_INPUTS_READY_FILE}' \\]`),
-    );
-    const unitStart = lineIndex(script, /systemctl start t3-sandbox-machine-setup\.service/);
+    const waitForInputs = lineIndex(script, new RegExp(`cat '${SANDBOX_INPUTS_READY_FILE}'`));
+    const unitStart = lineIndex(script, /systemctl restart t3-sandbox-machine-setup\.service/);
     const install = lineIndex(script, /service install/);
     expect(waitForInputs).toBeGreaterThanOrEqual(0);
     expect(waitForInputs).toBeLessThan(unitStart);
@@ -60,7 +58,7 @@ describe("renderSandboxBootScript", () => {
 
   it("names the machine after the sandbox before T3 starts, hostile titles included", () => {
     const title = `it's "$HOME" \`id\` $(id) \\`;
-    const script = renderSandboxBootScript({ t3: tarball, label: title });
+    const script = renderSandboxBootScript({ t3: tarball, sandboxId, label: title });
     const naming = lineIndex(script, /hostnamectl/);
     expect(naming).toBeGreaterThanOrEqual(0);
     expect(naming).toBeLessThan(lineIndex(script, /service install/));
@@ -79,7 +77,7 @@ describe("renderSandboxBootScript", () => {
   });
 
   it("writes the service drop-in before the service starts", () => {
-    const script = renderSandboxBootScript({ t3: tarball, label });
+    const script = renderSandboxBootScript({ t3: tarball, sandboxId, label });
     const userDropIn = script.lastIndexOf("[Service]");
     const dropIn = script.slice(userDropIn, script.indexOf("EOF", userDropIn));
     expect(dropIn.split("\n").filter(Boolean)).toEqual([
@@ -94,22 +92,90 @@ describe("renderSandboxBootScript", () => {
   });
 
   it("installs an uploaded build without fetching a release", () => {
-    const script = renderSandboxBootScript({ t3: tarball, label });
+    const script = renderSandboxBootScript({ t3: tarball, sandboxId, label });
     expect(script).not.toContain("npx");
     expect(script).toContain("tar -xzf '/home/user/.t3/sandbox/t3.tgz'");
     expect(script).toContain('"$RUNTIME/t3" service install');
   });
 
   it("installs a release through npm at the requested version", () => {
-    expect(renderSandboxBootScript({ t3: npm, label })).toContain(
+    expect(renderSandboxBootScript({ t3: npm, sandboxId, label })).toContain(
       "npx --yes 't3@0.0.45' service install",
     );
   });
 
+  /**
+   * A guest home under a temp dir, as a template snapshot of an earlier
+   * sandbox leaves it: T3 installed and its data written. Machine commands
+   * are logged instead of run, and T3 answers at once.
+   */
+  const templateFixture = (readyFor: string) => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-boot-"));
+    const at = (path: string) => path.replace("/home/user", home);
+    NodeFS.mkdirSync(NodePath.dirname(at(SANDBOX_SETUP_ENV_FILE)), { recursive: true });
+    NodeFS.writeFileSync(at(SANDBOX_ENV_FILE), "");
+    NodeFS.writeFileSync(at(SANDBOX_SETUP_ENV_FILE), "");
+    NodeFS.writeFileSync(at(SANDBOX_INPUTS_READY_FILE), readyFor);
+    const userdata = NodePath.join(home, ".t3", "userdata");
+    NodeFS.mkdirSync(userdata, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(userdata, "environment-id"), "env-earlier-sandbox");
+    const runtime = NodePath.join(home, ".t3", "runtime", "versions", "0.0.45");
+    NodeFS.mkdirSync(runtime, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(runtime, "t3"), "");
+    const log = NodePath.join(home, "commands.log");
+    const run = () =>
+      NodeChildProcess.spawnSync(
+        "bash",
+        [
+          "-c",
+          [
+            `sudo() { if [ "$1" = tee ]; then cat >/dev/null; else echo "sudo $*" >> ${JSON.stringify(log)}; fi; }`,
+            `systemctl() { echo "systemctl $*" >> ${JSON.stringify(log)}; }`,
+            `npx() { echo "npx $*" >> ${JSON.stringify(log)}; }`,
+            "curl() { :; }",
+            "seq() { echo 1; }",
+            "sleep() { :; }",
+            renderSandboxBootScript({ t3: npm, sandboxId, label }).replaceAll("/home/user", home),
+          ].join("\n"),
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+    const commands = () =>
+      NodeFS.existsSync(log) ? NodeFS.readFileSync(log, "utf8").trim().split("\n") : [];
+    return { home, userdata, runtime, run, commands };
+  };
+
+  it("starts T3 afresh over a template's T3 data and keeps its installed runtime", () => {
+    const { home, userdata, runtime, run, commands } = templateFixture(sandboxId);
+    const result = run();
+    const logged = commands();
+    const userdataLeft = NodeFS.existsSync(userdata);
+    const runtimeKept = NodeFS.existsSync(NodePath.join(runtime, "t3"));
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(result.status).toBe(0);
+    expect(userdataLeft).toBe(false);
+    expect(runtimeKept).toBe(true);
+    expect(logged[0]).toBe("systemctl --user stop t3code.service");
+    expect(logged).toContain("sudo systemctl restart t3-sandbox-machine-setup.service");
+    expect(logged.at(-1)).toBe("npx --yes t3@0.0.45 service install");
+  });
+
+  it("waits for this sandbox's inputs, not the earlier sandbox's a template carries", () => {
+    const { home, run, commands } = templateFixture("sbx-earlier");
+    const result = run();
+    const logged = commands();
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Timed out waiting for the sandbox inputs.");
+    expect(logged).toEqual(["systemctl --user stop t3code.service"]);
+  });
+
   it("keeps everything out of paths Boat does not persist", () => {
     for (const script of [
-      renderSandboxBootScript({ t3: tarball, label }),
-      renderSandboxBootScript({ t3: npm, label }),
+      renderSandboxBootScript({ t3: tarball, sandboxId, label }),
+      renderSandboxBootScript({ t3: npm, sandboxId, label }),
       renderRefreshCredentialsCommand(),
     ]) {
       expect(script).not.toMatch(/\/tmp\b/);

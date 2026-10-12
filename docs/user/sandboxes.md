@@ -16,6 +16,9 @@ account, such as a personal and a work account.
 
 In the project's settings, use **Sandboxes** to choose a template for each
 account. The template menu lists the selected account's ready Boat snapshots.
+A snapshot of another sandbox keeps its files and installed tools, but the new
+sandbox starts T3 Code without that sandbox's threads and moves the project's
+clone to your commit.
 You can also override the account's machine size and stop time there.
 These defaults apply to new sandboxes for every checkout of that repository.
 Reset them to use the account defaults and start without a template.
