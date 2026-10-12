@@ -32,10 +32,14 @@ import {
   sandboxIndex,
   sandboxPresence,
 } from "../sandbox/sandboxRegistrations.ts";
-import { createSandboxEnvironmentAtoms, wakesForWork } from "./sandboxCommands.ts";
+import {
+  SANDBOX_RECONNECT_TIMEOUT,
+  createSandboxEnvironmentAtoms,
+  wakesForWork,
+} from "./sandboxCommands.ts";
 import { createEnvironmentSessionAtoms } from "./session.ts";
 
-export { sandboxPresence, wakesForWork };
+export { SANDBOX_RECONNECT_TIMEOUT, sandboxPresence, wakesForWork };
 export type { SandboxIndexEntry, SandboxPresence };
 
 type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;

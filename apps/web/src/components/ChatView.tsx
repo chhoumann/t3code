@@ -2,7 +2,6 @@ import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/Th
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
-  heldSendStep,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
@@ -442,7 +441,6 @@ import {
   useChildThreadInputs,
   useThreadRefs,
   useThreadVisibleTurnItems,
-  waitForThreadDetail,
   waitForThreadShell,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
@@ -606,6 +604,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ServerUpdateAction } from "./ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./chat/useAutoBalanceUpdateBanner";
+import { useHeldSandboxWork } from "./chat/useHeldSandboxWork";
 import {
   ComposerServerUpdateIcon,
   ComposerServerUpdateStatus,
@@ -1567,33 +1566,6 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
-/** How long a thread may take to load from its sandbox once the sandbox is awake. */
-const THREAD_LOAD_AFTER_WAKE_MS = 30_000;
-
-/** What the composer sent to a sandbox that sleeps, to send again once it is awake. */
-type HeldWork =
-  | {
-      readonly _tag: "Send";
-      readonly dispatchMode: ComposerDispatchMode;
-      readonly submissionIntent: ComposerSubmissionIntent;
-      readonly directAnnotation:
-        | { annotation: PreviewAnnotationPayload; image: ComposerImageAttachment | null }
-        | undefined;
-    }
-  | { readonly _tag: "Resume" };
-
-/** Work held while its thread's sandbox wakes; see `deliverOnceAwake`. */
-interface HeldSend {
-  readonly threadKey: string;
-  /**
-   * The prompt as it was sent. Typing more while the sandbox wakes drops the
-   * held work rather than sending what was typed with it.
-   */
-  readonly prompt: string;
-  readonly work: HeldWork;
-  /** The sandbox woke and the thread loaded, so the work runs once a render shows it connected. */
-  readonly awake: boolean;
-}
 const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
 const noopHeldTurnDiff = (_turnId: RunId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
@@ -1679,7 +1651,6 @@ export default function ChatView(props: ChatViewProps) {
   const resumeThreadQueue = useWorkCommand(threadEnvironment.resumeThreadQueue, {
     reportFailure: false,
   });
-  const wakeThreadSandbox = useWorkCommand(threadEnvironment.wake, { reportFailure: false });
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
@@ -3778,7 +3749,6 @@ export default function ChatView(props: ChatViewProps) {
   // Such a send skips the local dispatch, so this keeps its thread's composer busy while it is
   // in flight.
   const [setupQueueSendThreadKey, setSetupQueueSendThreadKey] = useState<string | null>(null);
-  const [heldSend, setHeldSend] = useState<HeldSend | null>(null);
   useEffect(() => {
     attachmentPreviewHandoffByMessageIdRef.current = attachmentPreviewHandoffByMessageId;
   }, [attachmentPreviewHandoffByMessageId]);
@@ -8827,48 +8797,38 @@ export default function ChatView(props: ChatViewProps) {
     void sendStandaloneCommand("/compact", "Failed to compact context.");
   };
 
-  /**
-   * Delivers work to a sandbox that sleeps (`sendDelivery` "after-wake"):
-   * wakes the sandbox and waits for the thread to load from it, then sends
-   * the work again on the render that shows it connected, so it goes as it
-   * would to any running environment, uploads included. The draft stays in
-   * the composer meanwhile.
-   */
-  const deliverOnceAwake = async (work: HeldWork) => {
-    if (!activeThread) return;
-    const threadId = activeThread.id;
-    const held: HeldSend = {
-      threadKey: routeThreadKey,
-      prompt: promptRef.current,
-      work,
-      awake: false,
-    };
-    const giveUp = (message: string | null) => {
-      sendInFlightRef.current = false;
-      setHeldSend(null);
-      if (message !== null) setThreadError(threadId, message);
-    };
-    sendInFlightRef.current = true;
-    setHeldSend(held);
-    setThreadError(threadId, null);
-    const woke = await wakeThreadSandbox({ environmentId, input: undefined });
-    if (woke._tag === "Failure") {
-      if (isAtomCommandInterrupted(woke)) return giveUp(null);
-      const error = squashAtomCommandFailure(woke);
-      return giveUp(error instanceof Error ? error.message : "The sandbox could not wake.");
-    }
-    if (
-      isServerThread &&
-      !(await waitForThreadDetail(
-        scopeThreadRef(environmentId, threadId),
-        THREAD_LOAD_AFTER_WAKE_MS,
-      ))
-    ) {
-      return giveUp("The sandbox is awake, but this thread did not load. Send again.");
-    }
-    sendInFlightRef.current = false;
-    setHeldSend((current) => (current === held ? { ...held, awake: true } : current));
-  };
+  const heldSandboxWork = useHeldSandboxWork({
+    environmentId,
+    threadRef: routeThreadRef,
+    threadKey: routeThreadKey,
+    isServerThread,
+    composerDraftTarget,
+    editingRunId: editingQueuedRun?.runId ?? null,
+    isRunQueued: (runId) =>
+      serverProjection?.runs.some((run) => run.id === runId && run.status === "queued") ?? true,
+    delivery: sendDelivery,
+    threadLoading: threadDetailLoading,
+    setError: (message) => setThreadError(activeThread?.id ?? null, message),
+    run: (work) => {
+      switch (work.kind) {
+        case "send":
+          void onComposerSend(
+            undefined,
+            work.dispatchMode,
+            work.submissionIntent,
+            work.directAnnotation,
+          );
+          return;
+        // The composer still edits that run; the hold checked it.
+        case "edit-queued":
+          void onComposerSend();
+          return;
+        case "resume":
+          void onComposerResume();
+          return;
+      }
+    },
+  });
 
   const onResume = async () => {
     if (
@@ -8885,7 +8845,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (sendDelivery === "after-wake") {
-      void deliverOnceAwake({ _tag: "Resume" });
+      heldSandboxWork.hold({ kind: "resume" });
       return;
     }
     const threadId = activeThread.id;
@@ -9001,7 +8961,6 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
-    const heldWork: HeldWork = { _tag: "Send", dispatchMode, submissionIntent, directAnnotation };
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -9199,7 +9158,7 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       if (sendDelivery === "after-wake") {
-        void deliverOnceAwake(heldWork);
+        heldSandboxWork.hold({ kind: "edit-queued", runId: editingQueuedRun.runId });
         return;
       }
       queuedEditSaveInFlightRef.current = true;
@@ -9625,7 +9584,7 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     if (sendDelivery === "after-wake") {
-      void deliverOnceAwake(heldWork);
+      heldSandboxWork.hold({ kind: "send", dispatchMode, submissionIntent, directAnnotation });
       return;
     }
     sendInFlightRef.current = true;
@@ -11141,28 +11100,6 @@ export default function ChatView(props: ChatViewProps) {
   );
   const onComposerResume = useCallback(() => onResumeRef.current(), []);
   const onComposerCompactContext = useCallback(() => onCompactContextRef.current(), []);
-  useEffect(() => {
-    if (heldSend === null || !heldSend.awake) return;
-    const step = heldSendStep({
-      heldThreadKey: heldSend.threadKey,
-      threadKey: routeThreadKey,
-      promptUnchanged: promptRef.current === heldSend.prompt,
-      delivery: sendDelivery,
-      threadLoading: threadDetailLoading,
-    });
-    if (step === "wait") return;
-    setHeldSend(null);
-    if (step === "drop") return;
-    const { work } = heldSend;
-    void (work._tag === "Resume"
-      ? onResumeRef.current()
-      : onSendRef.current(
-          undefined,
-          work.dispatchMode,
-          work.submissionIntent,
-          work.directAnnotation,
-        ));
-  }, [heldSend, routeThreadKey, sendDelivery, threadDetailLoading]);
   const queuedRunsControl = useMemo(
     () =>
       isServerThread && activeThread ? (
@@ -11982,7 +11919,7 @@ export default function ChatView(props: ChatViewProps) {
                                   setupQueueSendThreadKey === activeThreadKey) ||
                                 isSavingQueuedEdit ||
                                 isResuming ||
-                                heldSend?.threadKey === routeThreadKey
+                                heldSandboxWork.held !== null
                               }
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}

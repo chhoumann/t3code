@@ -1,8 +1,4 @@
-import {
-  findRecordedWorktreeSetup,
-  heldSendStep,
-  resolveVisibleWorktreeSetup,
-} from "./ChatView.logic";
+import { findRecordedWorktreeSetup, resolveVisibleWorktreeSetup } from "./ChatView.logic";
 import {
   recallCheckoutIsRepo,
   rememberCheckoutIsRepo,
@@ -2179,30 +2175,5 @@ describe("waitForRevertedMessage", () => {
     await vi.advanceTimersByTimeAsync(50);
     await settled;
     vi.useRealTimers();
-  });
-});
-
-describe("heldSendStep", () => {
-  const held = {
-    heldThreadKey: "env:thread-a",
-    threadKey: "env:thread-a",
-    promptUnchanged: true,
-    delivery: "now",
-    threadLoading: false,
-  } as const;
-
-  it.each([
-    ["is sent once the woken sandbox is connected and the thread loaded", held, "send"],
-    ["waits while the thread still loads", { ...held, threadLoading: true }, "wait"],
-    [
-      "waits while this device has yet to reach the sandbox",
-      { ...held, delivery: "offline" },
-      "wait",
-    ],
-    ["is dropped when the sandbox fell asleep again", { ...held, delivery: "after-wake" }, "drop"],
-    ["is dropped once another thread is shown", { ...held, threadKey: "env:thread-b" }, "drop"],
-    ["is dropped when its prompt changed", { ...held, promptUnchanged: false }, "drop"],
-  ] as const)("a held send %s", (_case, input, step) => {
-    expect(heldSendStep(input)).toBe(step);
   });
 });

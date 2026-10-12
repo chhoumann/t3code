@@ -32,7 +32,7 @@ import {
  */
 const RESUME_TIMEOUT = Duration.minutes(10);
 /** How long a device may take to reconnect to a sandbox once its owner reports it awake. */
-const RECONNECT_TIMEOUT = Duration.minutes(2);
+export const SANDBOX_RECONNECT_TIMEOUT = Duration.minutes(2);
 
 /** Sandbox lifecycle commands, run against the environment that owns the sandbox. */
 export function createSandboxEnvironmentAtoms<R, E>(
@@ -159,7 +159,10 @@ export const onceConnected = <A, E, R>(
         const session = yield* SubscriptionRef.changes(supervisor.session).pipe(
           Stream.filter(Option.isSome),
           Stream.runHead,
-          Effect.timeoutOrElse({ duration: RECONNECT_TIMEOUT, orElse: () => Effect.succeedNone }),
+          Effect.timeoutOrElse({
+            duration: SANDBOX_RECONNECT_TIMEOUT,
+            orElse: () => Effect.succeedNone,
+          }),
         );
         if (Option.isNone(session)) {
           return yield* notAwake(
