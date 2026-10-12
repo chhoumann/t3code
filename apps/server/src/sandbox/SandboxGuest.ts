@@ -16,6 +16,7 @@ import {
   EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
   type EnvironmentId,
+  type GitRemote,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   WsRpcGroup,
@@ -26,9 +27,9 @@ import {
   type ProviderDriverKind,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type SandboxRepository,
   type ThreadId,
 } from "@t3tools/contracts";
-import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -77,13 +78,7 @@ export interface SandboxGuestTarget {
   readonly token: Redacted.Redacted<string>;
 }
 
-export interface SandboxCheckout {
-  /** Cloned as `origin`; has `commit`. */
-  readonly remoteUrl: string;
-  /** Added as `upstream` when it is another repository than `remoteUrl`. */
-  readonly projectRemoteUrl: string;
-  /** Checked out after cloning; null starts from the remote's default branch. */
-  readonly commit: string | null;
+export interface SandboxCheckout extends SandboxRepository {
   /** The task branch the clone starts on, created at `commit`. */
   readonly branch: string;
   /** Absolute path in the guest. */
@@ -190,10 +185,19 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
   const path = shellQuote(checkout.path);
   const partial = shellQuote(`${checkout.path}.partial`);
   const branch = shellQuote(checkout.branch);
-  const origin = shellQuote(checkout.remoteUrl);
-  const upstream = shellQuote(checkout.projectRemoteUrl);
-  const forked =
-    normalizeGitRemoteUrl(checkout.projectRemoteUrl) !== normalizeGitRemoteUrl(checkout.remoteUrl);
+  const tracked = shellQuote(checkout.trackedRemote);
+  // SandboxRepository's schema keeps the tracked remote among the remotes.
+  const trackedUrl = shellQuote(
+    checkout.remotes.find((remote) => remote.name === checkout.trackedRemote)!.url,
+  );
+  const addRemotes = (repository: string, remotes: ReadonlyArray<GitRemote>) =>
+    remotes.map(
+      (remote) =>
+        `  git -C ${repository} remote add -- ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
+    );
+  // A configured upstream would be one the remote does not have yet, which reads as pushed.
+  const pushToTracked = (repository: string) =>
+    `  git -C ${repository} config -- ${shellQuote(`branch.${checkout.branch}.pushRemote`)} ${tracked}`;
   return [
     "set -euo pipefail",
     // A replay must not delete the partial clone of a run still going.
@@ -202,23 +206,27 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
     `set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a`,
     `if [ ! -d ${path}/.git ]; then`,
     `  rm -rf ${partial}`,
-    `  git clone --quiet -- ${origin} ${partial} ${CLOSE_EXEC_LOCK}`,
-    ...(forked ? [`  git -C ${partial} remote add upstream ${upstream}`] : []),
+    `  git clone --quiet --origin ${tracked} -- ${trackedUrl} ${partial} ${CLOSE_EXEC_LOCK}`,
+    ...addRemotes(
+      partial,
+      checkout.remotes.filter((remote) => remote.name !== checkout.trackedRemote),
+    ),
     `  git -C ${partial} checkout --quiet -b ${branch}${
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
     } ${CLOSE_EXEC_LOCK}`,
+    pushToTracked(partial),
     `  mv ${partial} ${path}`,
-    // A template's clone, which an earlier sandbox made: it moves to this
-    // launch's commit. Once the task branch exists the clone is this
-    // sandbox's own, and an agent's work on it is never reset.
+    // A template's clone, which an earlier sandbox made: it takes this launch's
+    // remotes and moves to its commit. Once the task branch exists the clone is
+    // this sandbox's own, and an agent's work on it is never reset.
     `elif ! git -C ${path} rev-parse --verify --quiet ${shellQuote(`refs/heads/${checkout.branch}`)} >/dev/null; then`,
-    `  git -C ${path} remote set-url origin ${origin}`,
-    `  git -C ${path} remote remove upstream 2>/dev/null || true`,
-    ...(forked ? [`  git -C ${path} remote add upstream ${upstream}`] : []),
-    `  git -C ${path} fetch --quiet origin ${
+    `  for remote in $(git -C ${path} remote); do git -C ${path} remote remove "$remote"; done`,
+    ...addRemotes(path, checkout.remotes),
+    `  git -C ${path} fetch --quiet -- ${tracked} ${
       checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
     } ${CLOSE_EXEC_LOCK}`,
     `  git -C ${path} checkout --quiet --force -b ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
+    pushToTracked(path),
     "fi",
     `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
     `cat ${path}/t3.json 2>/dev/null || true`,

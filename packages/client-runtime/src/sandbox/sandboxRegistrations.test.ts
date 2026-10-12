@@ -36,7 +36,11 @@ const view = (status: SandboxStatus, environmentId: EnvironmentId | null = SANDB
     accountId: SandboxAccountId.make("work"),
     title: "Fix the bug",
     message: "Fix the bug in hello.txt",
-    repository: { remoteUrl: "https://github.com/octocat/Hello-World.git", commit: null },
+    repository: {
+      remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
+      trackedRemote: "origin",
+      commit: null,
+    },
     threadId: ThreadId.make("thread-seed"),
     desired: "running",
     status,

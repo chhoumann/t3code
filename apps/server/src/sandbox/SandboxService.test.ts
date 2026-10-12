@@ -6,6 +6,7 @@ import {
   SandboxAccountId,
   SandboxId,
   ServerSettingsError,
+  type SandboxRepository,
   type SandboxStatus,
   type SandboxView,
 } from "@t3tools/contracts";
@@ -249,10 +250,10 @@ const launchInput = (id: string) => ({
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
   repository: {
-    remoteUrl: "https://github.com/octocat/Hello-World.git",
-    projectRemoteUrl: "https://github.com/octocat/Hello-World.git",
+    remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
+    trackedRemote: "origin",
     commit: null,
-  },
+  } satisfies SandboxRepository,
   driver: ProviderDriverKind.make("claudeAgent"),
   model: "claude-sonnet-4-6",
   runtimeMode: "full-access" as const,
@@ -342,22 +343,36 @@ describe("SandboxService", () => {
           yield* sandboxes.launch({
             ...launchInput("project-b"),
             repository: {
-              remoteUrl: "https://github.com/octocat/website.git",
-              projectRemoteUrl: "https://github.com/octocat/website.git",
+              remotes: [{ name: "origin", url: "https://github.com/octocat/website.git" }],
+              trackedRemote: "origin",
               commit: null,
             },
           });
           yield* awaitStatus("project-b", "ready");
-          // A branch on a fork, launched from a checkout whose identity remote is spelled over SSH.
+          // A branch on a fork, from a checkout whose origin is the project, spelled over SSH.
+          const onFork = {
+            remotes: [
+              { name: "fork", url: "https://github.com/hubot/Hello-World.git" },
+              { name: "origin", url: "git@github.com:octocat/Hello-World.git" },
+            ],
+            trackedRemote: "fork",
+            commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+          } as const;
+          yield* sandboxes.launch({ ...launchInput("project-a-fork"), repository: onFork });
+          yield* awaitStatus("project-a-fork", "ready");
+          // A branch on a fork that is the checkout's origin, with the project as upstream.
           yield* sandboxes.launch({
-            ...launchInput("project-a-fork"),
+            ...launchInput("project-a-fork-origin"),
             repository: {
-              remoteUrl: "https://github.com/hubot/Hello-World.git",
-              projectRemoteUrl: "git@github.com:octocat/Hello-World.git",
+              remotes: [
+                { name: "origin", url: "https://github.com/hubot/Hello-World.git" },
+                { name: "upstream", url: "git@github.com:octocat/Hello-World.git" },
+              ],
+              trackedRemote: "origin",
               commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
             },
           });
-          yield* awaitStatus("project-a-fork", "ready");
+          yield* awaitStatus("project-a-fork-origin", "ready");
           assert.strictEqual(world.createInputs[0]?.template, "quickadd-dev");
           assert.strictEqual(world.createInputs[0]?.size, "large");
           assert.strictEqual(world.createInputs[0]?.ttlSeconds, 7200);
@@ -365,11 +380,10 @@ describe("SandboxService", () => {
           assert.strictEqual(world.createInputs[1]?.size, "small");
           assert.strictEqual(world.createInputs[1]?.ttlSeconds, 60);
           assert.strictEqual(world.createInputs[2]?.template, "quickadd-dev");
+          assert.strictEqual(world.createInputs[3]?.template, "quickadd-dev");
           assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
           assert.deepStrictEqual(world.checkouts[2], {
-            remoteUrl: "https://github.com/hubot/Hello-World.git",
-            projectRemoteUrl: "git@github.com:octocat/Hello-World.git",
-            commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+            ...onFork,
             branch: "t3/sandbox-project-",
             path: "/home/user/projects/Hello-World",
           });
@@ -377,7 +391,7 @@ describe("SandboxService", () => {
             sandboxProjectDefaults: { [key]: { template: "updated" } },
           });
           yield* sandboxes.launch(launchInput("project-a"));
-          assert.strictEqual(world.createInputs.length, 3);
+          assert.strictEqual(world.createInputs.length, 4);
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

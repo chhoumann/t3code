@@ -28,7 +28,11 @@ import {
   type SandboxLaunchInput,
   type SandboxView,
 } from "@t3tools/contracts";
-import { resolveSandboxProjectDefaults, sandboxProjectKey } from "@t3tools/shared/sandboxProject";
+import {
+  resolveSandboxProjectDefaults,
+  sandboxProject,
+  sandboxProjectKey,
+} from "@t3tools/shared/sandboxProject";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -309,15 +313,6 @@ const toView = (record: SandboxRecord): SandboxView => ({
 
 const adminSecretName = (id: SandboxId) => `sandbox-${id}-admin`;
 
-const checkoutPath = (remoteUrl: string) =>
-  `${SANDBOX_HOME_PROJECTS}/${
-    remoteUrl
-      .replace(/\/+$/, "")
-      .split(/[/:]/)
-      .at(-1)
-      ?.replace(/\.git$/, "") || "project"
-  }`;
-
 const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   Create: "create",
   WriteInputs: "boot",
@@ -569,7 +564,7 @@ const make = Effect.gen(function* () {
           const checkout = {
             ...repository,
             branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-            path: checkoutPath(repository.projectRemoteUrl),
+            path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
           };
           const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
           yield* asOwner(record, resolved, yield* machineId, (token) =>
@@ -786,7 +781,10 @@ const make = Effect.gen(function* () {
           const defaults = resolveSandboxProjectDefaults(
             account,
             (yield* settings.getSettings.pipe(persistence)).sandboxProjectDefaults[
-              sandboxProjectKey(input.accountId, input.repository.projectRemoteUrl)
+              sandboxProjectKey(
+                input.accountId,
+                sandboxProject(input.repository).repositoryIdentity.canonicalKey,
+              )
             ],
           );
           const record: SandboxRecord = {

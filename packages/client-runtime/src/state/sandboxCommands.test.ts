@@ -37,8 +37,8 @@ const sandboxView = (status: SandboxStatus): SandboxView => ({
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
   repository: {
-    remoteUrl: "https://example.test/repo.git",
-    projectRemoteUrl: "https://example.test/repo.git",
+    remotes: [{ name: "origin", url: "https://example.test/repo.git" }],
+    trackedRemote: "origin",
     commit: null,
   },
   threadId: ThreadId.make("thread-seed"),

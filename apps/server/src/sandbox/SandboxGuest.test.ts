@@ -6,7 +6,15 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId, SandboxId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type RepositoryIdentity,
+  SandboxId,
+  repositoryGroupingKeyOf,
+} from "@t3tools/contracts";
+import { parseRemoteFetchUrls } from "@t3tools/shared/git";
+import { sandboxProject, sandboxRemotes } from "@t3tools/shared/sandboxProject";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -75,8 +83,8 @@ const cloneFixture = () => {
   return {
     ...fixture,
     script: fixture.script({
-      remoteUrl: fixture.origin,
-      projectRemoteUrl: fixture.origin,
+      remotes: [{ name: "origin", url: fixture.origin }],
+      trackedRemote: "origin",
       commit: fixture.pinned,
     }),
   };
@@ -110,11 +118,12 @@ describe("renderCloneCommand", () => {
       expect(git(checkout, "symbolic-ref", "--short", "HEAD"), run).toBe("t3/sandbox-0a1b2c3d");
       expect(git(checkout, "rev-parse", "HEAD"), run).toBe(pinned);
       expect(git(checkout, "remote"), run).toBe("origin");
+      expect(git(checkout, "config", "branch.t3/sandbox-0a1b2c3d.pushRemote"), run).toBe("origin");
     }
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("moves a template's clone to the launch's commit, then never resets the work on it", () => {
+  it("gives a template's clone the launch's remotes and commit, then never resets the work on it", () => {
     const { root, origin: project, checkout, script } = guestFixture();
     const run = (command: string) =>
       NodeChildProcess.spawnSync("bash", ["-c", command], { encoding: "utf8" });
@@ -125,8 +134,8 @@ describe("renderCloneCommand", () => {
     const earlier = run(
       script(
         {
-          remoteUrl: project,
-          projectRemoteUrl: project,
+          remotes: [{ name: "origin", url: project }],
+          trackedRemote: "origin",
           commit: git(project, "rev-parse", "HEAD"),
         },
         "t3/sandbox-earlier",
@@ -136,12 +145,20 @@ describe("renderCloneCommand", () => {
     NodeFS.writeFileSync(hello, "the earlier agent's edit\n");
     NodeFS.mkdirSync(NodePath.join(checkout, "node_modules"));
     NodeFS.writeFileSync(NodePath.join(checkout, "node_modules", "cache"), "");
+    git(checkout, "remote", "add", "upstream", NodePath.join(root, "elsewhere"));
     const fork = NodePath.join(root, "fork");
     NodeChildProcess.execFileSync("git", ["clone", "--quiet", project, fork]);
     NodeFS.writeFileSync(NodePath.join(fork, "hello.txt"), "v2\n");
     commit(fork, "v2", "--all");
     const v2 = git(fork, "rev-parse", "HEAD");
-    const launch = script({ remoteUrl: fork, projectRemoteUrl: project, commit: v2 });
+    const launch = script({
+      remotes: [
+        { name: "fork", url: fork },
+        { name: "origin", url: project },
+      ],
+      trackedRemote: "fork",
+      commit: v2,
+    });
 
     const first = run(launch);
     const moved = {
@@ -150,6 +167,7 @@ describe("renderCloneCommand", () => {
       hello: NodeFS.readFileSync(hello, "utf8"),
       cacheKept: NodeFS.existsSync(NodePath.join(checkout, "node_modules", "cache")),
       remotes: git(checkout, "remote", "-v"),
+      pushRemote: git(checkout, "config", "branch.t3/sandbox-0a1b2c3d.pushRemote"),
     };
     NodeFS.writeFileSync(hello, "this agent's edit\n");
     const replay = run(launch);
@@ -170,60 +188,124 @@ describe("renderCloneCommand", () => {
       hello: "v2\n",
       cacheKept: true,
       remotes: [
-        `origin\t${fork} (fetch)`,
-        `origin\t${fork} (push)`,
-        `upstream\t${project} (fetch)`,
-        `upstream\t${project} (push)`,
+        `fork\t${fork} (fetch)`,
+        `fork\t${fork} (push)`,
+        `origin\t${project} (fetch)`,
+        `origin\t${project} (push)`,
       ].join("\n"),
+      pushRemote: "fork",
     });
     expect(afterReplay).toBe("this agent's edit\n");
     expect(agentBranch).toBe("agent/fix");
     expect(afterAgentBranch).toBe("this agent's edit\n");
   });
 
-  it.effect(
-    "clones the fork a branch tracks at its commit, so the clone has the project's identity",
-    () =>
+  const PROJECT_URL = "https://github.com/pingdotgg/t3code.git";
+  const FORK_URL = "https://github.com/chhoumann/t3code.git";
+  it.effect.each([
+    {
+      layout: "origin is the project and the branch tracks a fork remote",
+      remotes: { origin: PROJECT_URL, fork: FORK_URL },
+      trackedRemote: "fork",
+      groupingKey: "github.com/pingdotgg/t3code",
+    },
+    {
+      layout: "origin is the fork the branch tracks and upstream is the project",
+      remotes: { origin: FORK_URL, upstream: PROJECT_URL },
+      trackedRemote: "origin",
+      groupingKey: "github.com/chhoumann/t3code",
+    },
+  ])(
+    "clones the fork a branch tracks into a project with the checkout's identity when $layout",
+    ({ remotes, trackedRemote, groupingKey }) =>
       Effect.gen(function* () {
         const { root, origin: project, checkout, script } = guestFixture();
         const fork = NodePath.join(root, "fork");
         NodeChildProcess.execFileSync("git", ["clone", "--quiet", project, fork]);
         commit(fork, "only on the fork");
         const forkOnly = git(fork, "rev-parse", "HEAD");
-        const projectUrl = "https://github.com/pingdotgg/t3code.git";
-        const forkUrl = "https://github.com/chhoumann/t3code.git";
+        const local = NodePath.join(root, "local");
+        NodeFS.mkdirSync(local);
+        git(local, "init", "--quiet");
+        for (const [name, url] of Object.entries(remotes)) git(local, "remote", "add", name, url);
+        // What the launch reads from the local status: every remote, and the tracked one.
+        const localRemotes = parseRemoteFetchUrls(git(local, "remote", "-v"));
+        const tracked = localRemotes.find((remote) => remote.name === trackedRemote);
+        if (!Arr.isReadonlyArrayNonEmpty(localRemotes) || tracked === undefined) {
+          return yield* Effect.die("the local checkout lacks its remotes");
+        }
+        const repository = {
+          remotes: sandboxRemotes(localRemotes, tracked),
+          trackedRemote,
+          commit: forkOnly,
+        };
         // Clones and fetches reach the local repositories; the clone's config keeps the URLs.
         const env = {
           ...process.env,
           GIT_CONFIG_COUNT: "2",
           GIT_CONFIG_KEY_0: `url.${project}.insteadOf`,
-          GIT_CONFIG_VALUE_0: projectUrl,
+          GIT_CONFIG_VALUE_0: PROJECT_URL,
           GIT_CONFIG_KEY_1: `url.${fork}.insteadOf`,
-          GIT_CONFIG_VALUE_1: forkUrl,
+          GIT_CONFIG_VALUE_1: FORK_URL,
         };
 
-        const result = NodeChildProcess.spawnSync(
-          "bash",
-          ["-c", script({ remoteUrl: forkUrl, projectRemoteUrl: projectUrl, commit: forkOnly })],
-          { encoding: "utf8", env },
-        );
-        const identity = yield* RepositoryIdentityResolver.RepositoryIdentityResolver.pipe(
-          Effect.flatMap((resolver) => resolver.resolve(checkout)),
-          Effect.provide(RepositoryIdentityResolver.layer),
-        );
+        const result = NodeChildProcess.spawnSync("bash", ["-c", script(repository)], {
+          encoding: "utf8",
+          env,
+        });
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        const { rootPath: _local, ...localIdentity } = (yield* resolver.resolve(local)) ?? {};
+        const { rootPath: _guest, ...guestIdentity } = (yield* resolver.resolve(checkout)) ?? {};
+        const pending = sandboxProject(repository).repositoryIdentity;
+        NodeFS.rmSync(root, { recursive: true, force: true });
 
         expect(result.stderr).toBe("");
         expect(result.status).toBe(0);
-        expect(git(checkout, "symbolic-ref", "--short", "HEAD")).toBe("t3/sandbox-0a1b2c3d");
-        expect(git(checkout, "rev-parse", "HEAD")).toBe(forkOnly);
-        expect(identity).toMatchObject({
-          canonicalKey: "github.com/pingdotgg/t3code",
-          locator: { source: "git-remote", remoteName: "upstream", remoteUrl: projectUrl },
-          origin: { canonicalKey: "github.com/chhoumann/t3code", displayName: "chhoumann/t3code" },
-        });
-        NodeFS.rmSync(root, { recursive: true, force: true });
-      }).pipe(Effect.provide(NodeServices.layer)),
+        expect(guestIdentity).toEqual(localIdentity);
+        expect(localIdentity).toMatchObject({ canonicalKey: "github.com/pingdotgg/t3code" });
+        expect(repositoryGroupingKeyOf(guestIdentity as RepositoryIdentity)).toBe(groupingKey);
+        expect(repositoryGroupingKeyOf(pending)).toBe(groupingKey);
+      }).pipe(
+        Effect.provide(RepositoryIdentityResolver.layer.pipe(Layer.provide(NodeServices.layer))),
+      ),
   );
+
+  it("starts the task branch at the tracked remote's commit and pushes it there", () => {
+    const { root, origin: project, checkout, script } = guestFixture();
+    const fork = NodePath.join(root, "fork");
+    NodeChildProcess.execFileSync("git", ["clone", "--quiet", "--bare", project, fork]);
+    const launch = script({
+      remotes: [
+        { name: "fork", url: fork },
+        { name: "origin", url: project },
+      ],
+      trackedRemote: "fork",
+      commit: null,
+    });
+
+    const result = NodeChildProcess.spawnSync("bash", ["-c", launch], { encoding: "utf8" });
+    commit(checkout, "the agent's work");
+    // Git's own push defaults, not the machine's.
+    const push = NodeChildProcess.spawnSync("git", ["-C", checkout, "push", "--quiet"], {
+      encoding: "utf8",
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    const pushed = {
+      onFork: git(fork, "rev-parse", "refs/heads/t3/sandbox-0a1b2c3d"),
+      onProject: NodeChildProcess.spawnSync(
+        "git",
+        ["-C", project, "rev-parse", "--verify", "--quiet", "refs/heads/t3/sandbox-0a1b2c3d"],
+        { encoding: "utf8" },
+      ).status,
+    };
+    const head = git(checkout, "rev-parse", "HEAD");
+    NodeFS.rmSync(root, { recursive: true, force: true });
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(push.status).toBe(0);
+    expect(pushed).toEqual({ onFork: head, onProject: 1 });
+  });
 
   it("lets a replay that starts while the first clone runs wait for it and keep its clone", async () => {
     const { root, pinned, checkout, script } = cloneFixture();
@@ -291,8 +373,8 @@ describe("SandboxGuest", () => {
       const guest = yield* SandboxGuest.SandboxGuest;
       const failure = yield* guest
         .cloneCheckout({ apiKey: Redacted.make("key") }, ProviderMachineId.make("bx_1"), {
-          remoteUrl: "https://github.com/acme/app.git",
-          projectRemoteUrl: "https://github.com/acme/app.git",
+          remotes: [{ name: "origin", url: "https://github.com/acme/app.git" }],
+          trackedRemote: "origin",
           commit: null,
           branch: "t3/sandbox-0a1b2c3d",
           path: "/home/user/projects/app",

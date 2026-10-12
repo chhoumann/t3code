@@ -385,7 +385,11 @@ const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
       accountId: ACCOUNT_ID,
       title: "Sandbox tracer",
       message: "Add hello.txt containing 'hello from a sandbox'.",
-      repository: { remoteUrl: flags.repo, projectRemoteUrl: flags.repo, commit: null },
+      repository: {
+        remotes: [{ name: "origin", url: flags.repo }],
+        trackedRemote: "origin",
+        commit: null,
+      },
       driver: ProviderDriverKind.make("claudeAgent"),
       model: "claude-sonnet-4-6",
       runtimeMode: "full-access",

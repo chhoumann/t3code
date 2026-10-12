@@ -40,8 +40,8 @@ const fresh: SandboxRecord = {
     title: "Fix the bug",
     message: "Fix the bug",
     repository: {
-      remoteUrl: "https://github.com/octocat/Hello-World",
-      projectRemoteUrl: "https://github.com/octocat/Hello-World",
+      remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World" }],
+      trackedRemote: "origin",
       commit: null,
     },
     driver: ProviderDriverKind.make("claudeAgent"),

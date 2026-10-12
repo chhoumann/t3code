@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { GitRemote } from "./git.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
@@ -63,20 +64,25 @@ export type SandboxStatus = typeof SandboxStatus.Type;
 
 export const SandboxRepository = Schema.Struct({
   /**
-   * Cloned as `origin`: the remote the launching branch tracks, which has
-   * `commit`. The sandbox's task branch pushes there.
+   * The launching checkout's remotes that its repository identity reads, and
+   * the one its branch tracks. The clone gets each under its name, so its
+   * project has the checkout's repository identity.
    */
-  remoteUrl: TrimmedNonEmptyString,
+  remotes: Schema.NonEmptyArray(GitRemote),
   /**
-   * The remote the project's repository identity names, which keys its
-   * sandbox defaults. A branch on a fork tracks another remote; the clone
-   * then also has this one as `upstream`, so the sandbox's project gets the
-   * project's canonical key.
+   * The remote the launching branch tracks, which has `commit`. The clone is
+   * made from it, and the sandbox's task branch pushes there.
    */
-  projectRemoteUrl: TrimmedNonEmptyString,
-  /** Checked out after cloning; null keeps the remote's default branch. */
+  trackedRemote: TrimmedNonEmptyString,
+  /** Checked out after cloning; null keeps the tracked remote's default branch. */
   commit: Schema.NullOr(TrimmedNonEmptyString),
-});
+}).check(
+  Schema.makeFilter(({ remotes, trackedRemote }) => {
+    const names = new Set(remotes.map((remote) => remote.name));
+    if (names.size < remotes.length) return "Each remote needs its own name.";
+    return names.has(trackedRemote) || "The tracked remote must be one of the remotes.";
+  }),
+);
 export type SandboxRepository = typeof SandboxRepository.Type;
 
 export const SandboxLaunchInput = Schema.Struct({
