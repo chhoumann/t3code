@@ -112,7 +112,7 @@ const resumed: SandboxRecord = {
   credentialsStale: true,
 };
 
-const machine = (state: ProviderMachineState, setup: ProviderMachineSetup = null) => ({
+const machine = (state: ProviderMachineState, setup: ProviderMachineSetup = "done") => ({
   id: ProviderMachineId.make("bx_test"),
   state,
   setup,
@@ -234,10 +234,28 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
   ],
   [
-    "T3 answering records the environment",
+    "T3 answering once the creation script finished records the environment",
     booting,
     answering,
     { status: { _tag: "launching" }, action: { _tag: "RecordEnvironment", environmentId: ENV } },
+  ],
+  [
+    "a T3 answering while the creation script runs, as one from a template does, is not recorded",
+    booting,
+    observed({ machine: machine("running", "running"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a T3 answering before the creation script started is not recorded",
+    booting,
+    observed({ machine: machine("running", "pending"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a failed creation script fails the boot though a T3 answers",
+    booting,
+    observed({ machine: machine("running", "failed"), environmentId: ENV }),
+    failed("boot", false),
   ],
   [
     "launches the seed thread once T3 answers",

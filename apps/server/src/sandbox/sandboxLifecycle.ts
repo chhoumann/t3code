@@ -332,7 +332,9 @@ function planStopped(record: SandboxRecord, observation: SandboxObservation): Sa
 /**
  * The creation script runs once, so a stop requested mid-boot waits for T3 to
  * answer first; stopping earlier would leave a machine that never finishes
- * installing.
+ * installing. Only a T3 the finished script started is this sandbox's: a
+ * machine made from a template snapshot answers as the earlier sandbox until
+ * the script replaces it.
  */
 function planFirstBoot(
   record: SandboxRecord,
@@ -341,12 +343,12 @@ function planFirstBoot(
 ): SandboxPlan {
   if (record.inputsWrittenAt === null) return plan(creating, act("WriteInputs"));
   if (record.httpBaseUrl === null) return plan(booting, act("Host"));
-  if (observation.environmentId !== null) {
-    return plan(launching, { _tag: "RecordEnvironment", environmentId: observation.environmentId });
-  }
   // The provider's setup status is only meaningful here: after a resume it reports stale values.
   if (machine.setup === "failed") {
     return plan(failed("boot", "The sandbox boot script failed.", false), act("Settle"));
+  }
+  if (machine.setup === "done" && observation.environmentId !== null) {
+    return plan(launching, { _tag: "RecordEnvironment", environmentId: observation.environmentId });
   }
   return firstBootDeadlinePassed(record, observation)
     ? plan(failed("boot", "T3 did not start in the sandbox in time.", false), act("Settle"))
