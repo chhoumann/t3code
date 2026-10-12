@@ -649,7 +649,7 @@ const make = Effect.gen(function* () {
           yield* provider.destroy(resolved, yield* machineId);
           return next;
         }
-        case "ExtendDeadline":
+        case "ExtendDeadline": {
           // A refused extension leaves Boat's deadline in charge; the machine still runs.
           const resolved = yield* account();
           const extended = yield* provider
@@ -662,6 +662,7 @@ const make = Effect.gen(function* () {
             );
           }
           return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
+        }
         case "ClearInflight":
           return yield* writeFacts(record, { status, inflight: null });
         case "Track":

@@ -63,6 +63,8 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     resumes: [] as Array<number | null>,
     /** Every `ttlSeconds` the owner moved a machine's deadline to. */
     deadlines: [] as Array<number>,
+    /** Every deadline move fails like this; null lets them through. */
+    refuseDeadlines: null as SandboxProviderErrorKind | null,
     /** Stops the owner asked for; the provider's own deadline is not one. */
     stops: 0,
     /** What the guest's agents report; null when the guest does not answer. */
@@ -153,6 +155,12 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     host: (_account, id) => Effect.succeed(`https://${id}.sandbox.test`),
     setDeadline: (_account, id, ttlSeconds) =>
       Effect.gen(function* () {
+        if (world.refuseDeadlines !== null) {
+          return yield* new SandboxProviderError({
+            operation: "set-deadline",
+            kind: world.refuseDeadlines,
+          });
+        }
         world.deadlines.push(ttlSeconds);
         const machine = machines.get(id);
         if (machine !== undefined) machine.archiveAfter = yield* deadline(ttlSeconds);
@@ -633,6 +641,29 @@ describe("SandboxService", () => {
         }).pipe(Effect.provide(started.context));
         yield* Scope.close(started.scope, Exit.void);
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("keeps a working sandbox ready when Boat refuses to move its stop", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      world.activity = { busy: true, lastActivityAt: 0 };
+      world.refuseDeadlines = "missing-scope";
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-refused-deadline");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+
+        yield* advanceUntil(Effect.sleep(Duration.minutes(30)), Duration.minutes(1));
+        const [machine] = [...world.machines.values()];
+        assert.strictEqual(machine?.state, "running");
+        assert.deepStrictEqual((yield* sandboxes.list())[0]?.status, { _tag: "ready" });
+        assert.deepStrictEqual(world.deadlines, []);
+        assert.strictEqual(world.stops, 0);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   it.effect("leaves a sandbox whose T3 does not answer to Boat's own stop, as external", () =>
