@@ -1,21 +1,30 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
   SANDBOX_LAUNCH_STAGES,
   SANDBOX_STATUS_LABEL,
+  type SandboxLaunchAction,
+  sandboxFailureMessage,
   sandboxLandingThreadId,
+  sandboxLaunchAction,
   sandboxLaunchStageIndex,
   sandboxLaunchStatusLabel,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { CheckIcon, CircleIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
-import { useEffect } from "react";
+import { CheckIcon, CircleIcon, PlayIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { isElectron } from "../env";
 import { useSandboxActions } from "../hooks/useSandboxActions";
 import { useEnvironmentThreads } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { sandboxes } from "../state/sandboxes";
+import { threadEnvironment } from "../state/threads";
+import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
@@ -23,9 +32,9 @@ import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { cn } from "~/lib/utils";
 
 /**
- * A sandbox on its way to its first thread: the message it starts with and
- * the stage it is at. Once the sandbox's environment lists the thread, this
- * route is replaced by the thread itself.
+ * A sandbox on its way to its thread: the message it started with and the
+ * stage it is at. Once this device can show the thread, this route is
+ * replaced by the thread itself. An asleep sandbox is woken on arrival.
  */
 export function SandboxLaunchView(props: {
   readonly ownerEnvironmentId: EnvironmentId;
@@ -39,7 +48,19 @@ export function SandboxLaunchView(props: {
   // Until the owner lists its sandboxes there is nothing to show, unless it cannot.
   const ownerUnreachable =
     ownerPhase !== "connecting" && ownerPhase !== "reconnecting" && ownerPhase !== "connected";
-  useHandOffToThread(view);
+  const environmentId = view?.environmentId ?? null;
+  const environment = useEnvironment(environmentId);
+  const threads = useEnvironmentThreads(environmentId);
+  const action =
+    view === null
+      ? null
+      : sandboxLaunchAction({
+          view,
+          landingThreadId: sandboxLandingThreadId(threads, view.threadId),
+          connected: environment?.connection.phase === "connected",
+        });
+  useOpenThread(action);
+  const wake = useWakeOnArrival(action);
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
@@ -49,7 +70,7 @@ export function SandboxLaunchView(props: {
             {view?.title ?? "Sandbox"}
           </span>
         </WorkspacePageHeader>
-        {view === null ? (
+        {view === null || action === null ? (
           listed ? (
             <Empty className="flex-1">
               <EmptyHeader>
@@ -72,7 +93,12 @@ export function SandboxLaunchView(props: {
                   {view.message}
                 </div>
               </div>
-              <SandboxProgress view={view} ownerEnvironmentId={props.ownerEnvironmentId} />
+              <SandboxProgress
+                view={view}
+                ownerEnvironmentId={props.ownerEnvironmentId}
+                action={action}
+                wake={wake}
+              />
             </div>
           </div>
         )}
@@ -82,66 +108,133 @@ export function SandboxLaunchView(props: {
 }
 
 /**
- * Replaces this route with the sandbox's thread once it runs and its
- * environment lists that thread, so the thread view never opens on an empty
- * state. See `sandboxLandingThreadId` for which thread.
+ * Replaces this route with the thread the sandbox lands on once this device
+ * can show it (`sandboxLaunchAction`), so the thread view never opens on an
+ * empty state.
  */
-function useHandOffToThread(view: SandboxView | null) {
+function useOpenThread(action: SandboxLaunchAction | null) {
   const navigate = useNavigate();
-  const environmentId = view?.environmentId ?? null;
-  const environment = useEnvironment(environmentId);
-  const threads = useEnvironmentThreads(environmentId);
-  const threadId = view === null ? null : sandboxLandingThreadId(threads, view.threadId);
-  const ready = view?.status._tag === "ready" && environment?.connection.phase === "connected";
+  const environmentId = action?._tag === "OpenThread" ? action.environmentId : null;
+  const threadId = action?._tag === "OpenThread" ? action.threadId : null;
 
   useEffect(() => {
-    if (!ready || environmentId === null || threadId === null) return;
+    if (environmentId === null || threadId === null) return;
     void navigate({
       to: "/$environmentId/$threadId",
       params: { environmentId, threadId },
       replace: true,
     });
-  }, [navigate, ready, environmentId, threadId]);
+  }, [navigate, environmentId, threadId]);
+}
+
+interface SandboxWake {
+  /** Why the last wake failed, until the next one starts. */
+  readonly failure: string | null;
+  readonly retry: (environmentId: EnvironmentId) => void;
+  /** A resume asked for here stands in for this visit's wake. */
+  readonly resumed: () => void;
+}
+
+/**
+ * Wakes an asleep sandbox once per visit, as sending to one of its threads
+ * would, so opening it is enough: the owner resumes it and this device
+ * connects to it, then `useOpenThread` opens its thread. Unlike a send, it is
+ * not checked up front against the owner's grant: a visit can arrive before
+ * that loads, and the request to the owner waits for it.
+ */
+function useWakeOnArrival(action: SandboxLaunchAction | null): SandboxWake {
+  const wake = useAtomCommand(threadEnvironment.wake, { reportFailure: false });
+  const [failure, setFailure] = useState<string | null>(null);
+  const asked = useRef(false);
+  const run = async (environmentId: EnvironmentId) => {
+    asked.current = true;
+    setFailure(null);
+    const result = await wake({ environmentId, input: undefined });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      setFailure(sandboxFailureMessage(squashAtomCommandFailure(result)));
+    }
+  };
+  const wakeOnArrival = useEffectEvent((environmentId: EnvironmentId) => {
+    if (!asked.current) void run(environmentId);
+  });
+  const asleep = action?._tag === "Wake" ? action.environmentId : null;
+
+  useEffect(() => {
+    if (asleep !== null) wakeOnArrival(asleep);
+  }, [asleep]);
+
+  return {
+    failure,
+    retry: (environmentId) => void run(environmentId),
+    resumed: () => {
+      asked.current = true;
+    },
+  };
 }
 
 function SandboxProgress(props: {
   readonly view: SandboxView;
   readonly ownerEnvironmentId: EnvironmentId;
+  readonly action: SandboxLaunchAction;
+  readonly wake: SandboxWake;
 }) {
-  const { view } = props;
+  const { view, wake } = props;
   const { setDesired, confirmAndDelete } = useSandboxActions();
   const sandbox = { ownerEnvironmentId: props.ownerEnvironmentId, view: view };
   const stage = sandboxLaunchStageIndex(view.status);
+  const remove = () => void confirmAndDelete(sandbox);
 
   if (view.status._tag === "failed") {
     return (
+      <SandboxFailure
+        message={view.status.message}
+        onRetry={view.status.retryable ? () => void setDesired(sandbox, view.desired) : null}
+        onDelete={remove}
+      />
+    );
+  }
+
+  if (props.action._tag === "OfferResume") {
+    return (
       <div className="flex flex-col gap-3 text-sm">
-        <p className="font-medium text-destructive">{SANDBOX_STATUS_LABEL.failed}</p>
-        <p className="whitespace-pre-wrap break-words text-muted-foreground">
-          {view.status.message}
-        </p>
+        <p className="text-muted-foreground">{SANDBOX_STATUS_LABEL[view.status._tag]}</p>
         <div className="flex items-center gap-2">
-          {view.status.retryable ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void setDesired(sandbox, view.desired)}
-            >
-              <RotateCcwIcon />
-              Retry
-            </Button>
-          ) : null}
-          <Button size="sm" variant="ghost" onClick={() => void confirmAndDelete(sandbox)}>
-            <Trash2Icon />
-            Delete sandbox
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={view.status._tag === "stopping"}
+            onClick={() => {
+              wake.resumed();
+              void setDesired(sandbox, "running");
+            }}
+          >
+            <PlayIcon />
+            Resume
           </Button>
         </div>
       </div>
     );
   }
 
+  const { environmentId } = view;
+  if (wake.failure !== null && environmentId !== null) {
+    return (
+      <SandboxFailure
+        message={wake.failure}
+        onRetry={() => wake.retry(environmentId)}
+        onDelete={remove}
+      />
+    );
+  }
+
   if (stage === null) {
-    return <p className="text-muted-foreground text-sm">{sandboxLaunchStatusLabel(view.status)}</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        {props.action._tag === "Wake"
+          ? SANDBOX_STATUS_LABEL.resuming
+          : sandboxLaunchStatusLabel(view.status)}
+      </p>
+    );
   }
 
   return (
@@ -168,5 +261,30 @@ function SandboxProgress(props: {
         </li>
       ))}
     </ol>
+  );
+}
+
+function SandboxFailure(props: {
+  readonly message: string;
+  readonly onRetry: (() => void) | null;
+  readonly onDelete: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3 text-sm">
+      <p className="font-medium text-destructive">{SANDBOX_STATUS_LABEL.failed}</p>
+      <p className="whitespace-pre-wrap break-words text-muted-foreground">{props.message}</p>
+      <div className="flex items-center gap-2">
+        {props.onRetry === null ? null : (
+          <Button size="sm" variant="outline" onClick={props.onRetry}>
+            <RotateCcwIcon />
+            Retry
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={props.onDelete}>
+          <Trash2Icon />
+          Delete sandbox
+        </Button>
+      </div>
+    </div>
   );
 }

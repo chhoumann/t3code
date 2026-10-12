@@ -5,8 +5,10 @@ import { SandboxLaunchView } from "../components/SandboxLaunchView";
 
 function SandboxLaunchRoute() {
   const { environmentId, sandboxId } = Route.useParams();
+  // One view per sandbox, so a wake on arrival runs once for each sandbox opened.
   return (
     <SandboxLaunchView
+      key={`${environmentId}:${sandboxId}`}
       ownerEnvironmentId={environmentId as EnvironmentId}
       sandboxId={sandboxId as SandboxId}
     />

@@ -17,6 +17,7 @@ import {
   sandboxAccountChoices,
   sandboxFailureMessage,
   sandboxLandingThreadId,
+  sandboxLaunchAction,
   sandboxLaunchStageIndex,
   sandboxPresence,
   sandboxRepositoryFor,
@@ -459,6 +460,93 @@ describe("sandboxLandingThreadId", () => {
 
   it("has nothing to open before the sandbox lists an active thread", () => {
     expect(sandboxLandingThreadId([], SEED)).toBeNull();
+  });
+});
+
+describe("sandboxLaunchAction", () => {
+  const SANDBOX_ENVIRONMENT = EnvironmentId.make("environment-sandbox");
+  const LANDING = ThreadId.make("thread-seed");
+  const asleep = {
+    desired: "running" as const,
+    status: { _tag: "stopped" as const, reason: "external" as const },
+    environmentId: SANDBOX_ENVIRONMENT,
+  };
+  const ready = { ...asleep, status: { _tag: "ready" as const } };
+
+  it("wakes an asleep sandbox whose thread this device never loaded", () => {
+    expect(sandboxLaunchAction({ view: asleep, landingThreadId: null, connected: false })).toEqual({
+      _tag: "Wake",
+      environmentId: "environment-sandbox",
+    });
+    expect(
+      sandboxLaunchAction({
+        view: { ...asleep, status: { _tag: "stopping", reason: "external" } },
+        landingThreadId: null,
+        connected: false,
+      }),
+    ).toEqual({ _tag: "Wake", environmentId: "environment-sandbox" });
+  });
+
+  it("opens an asleep sandbox's thread from cache without waking it", () => {
+    expect(
+      sandboxLaunchAction({ view: asleep, landingThreadId: LANDING, connected: false }),
+    ).toEqual({
+      _tag: "OpenThread",
+      environmentId: "environment-sandbox",
+      threadId: "thread-seed",
+    });
+  });
+
+  it("offers to resume a put-away sandbox, whatever this device has loaded", () => {
+    const putAway = {
+      ...asleep,
+      desired: "stopped" as const,
+      status: { _tag: "stopped" as const, reason: "requested" as const },
+    };
+    expect(sandboxLaunchAction({ view: putAway, landingThreadId: null, connected: false })).toEqual(
+      { _tag: "OfferResume" },
+    );
+    expect(
+      sandboxLaunchAction({ view: putAway, landingThreadId: LANDING, connected: false }),
+    ).toEqual({ _tag: "OfferResume" });
+  });
+
+  it("offers to resume an asleep sandbox that stopped before it had an environment", () => {
+    expect(
+      sandboxLaunchAction({
+        view: { ...asleep, environmentId: null },
+        landingThreadId: null,
+        connected: false,
+      }),
+    ).toEqual({ _tag: "OfferResume" });
+  });
+
+  it("opens a running sandbox's thread once this device is connected and lists it", () => {
+    expect(sandboxLaunchAction({ view: ready, landingThreadId: LANDING, connected: true })).toEqual(
+      { _tag: "OpenThread", environmentId: "environment-sandbox", threadId: "thread-seed" },
+    );
+    expect(
+      sandboxLaunchAction({ view: ready, landingThreadId: LANDING, connected: false }),
+    ).toEqual({ _tag: "Follow" });
+    expect(sandboxLaunchAction({ view: ready, landingThreadId: null, connected: true })).toEqual({
+      _tag: "Follow",
+    });
+  });
+
+  it("follows a sandbox that is launching, waking, or failed, without waking it", () => {
+    for (const status of [
+      { _tag: "launching" },
+      { _tag: "resuming" },
+      { _tag: "failed", step: "resume", message: "boom", retryable: true },
+    ] as const) {
+      expect(
+        sandboxLaunchAction({
+          view: { ...asleep, status },
+          landingThreadId: null,
+          connected: false,
+        }),
+      ).toEqual({ _tag: "Follow" });
+    }
   });
 });
 

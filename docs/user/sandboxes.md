@@ -58,7 +58,9 @@ middle of a turn. A sandbox set to **Never** runs until you stop it.
 A sandbox that stopped on its own is asleep: its threads stay in the sidebar,
 and sending a message in one wakes the sandbox first, which takes a minute or
 two. The message stays in the composer until it goes, and editing it or leaving
-the thread before then cancels the send. A sandbox you stopped by archiving its last thread is listed in
+the thread before then cancels the send. On a device that has yet to load its
+threads, the sandbox is listed in their place, and opening it wakes it. A
+sandbox you stopped by archiving its last thread is listed in
 **Settings → Archive**. Both are listed in **Settings → Sandboxes**, where you
 can resume them.
 

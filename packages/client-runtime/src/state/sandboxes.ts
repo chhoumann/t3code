@@ -229,6 +229,51 @@ export function sandboxLandingThreadId(
 }
 
 /**
+ * What a sandbox's launch view does on this device. It opens the thread the
+ * sandbox lands on once this device can show it: an asleep sandbox's from
+ * cache, since sending to it wakes the sandbox, and a running one's once
+ * connected. It wakes an asleep sandbox whose thread this device never
+ * loaded, and offers to resume one the user put away. Otherwise it follows
+ * the sandbox as its owner reports it.
+ */
+export type SandboxLaunchAction =
+  | {
+      readonly _tag: "OpenThread";
+      readonly environmentId: EnvironmentId;
+      readonly threadId: ThreadId;
+    }
+  | { readonly _tag: "Wake"; readonly environmentId: EnvironmentId }
+  | { readonly _tag: "OfferResume" }
+  | { readonly _tag: "Follow" };
+
+export function sandboxLaunchAction(input: {
+  readonly view: Pick<SandboxView, "desired" | "status" | "environmentId">;
+  /** The thread the sandbox lands on, as this device lists it (`sandboxLandingThreadId`). */
+  readonly landingThreadId: ThreadId | null;
+  /** Whether this device has a socket to the sandbox's environment. */
+  readonly connected: boolean;
+}): SandboxLaunchAction {
+  const { environmentId } = input.view;
+  const { landingThreadId } = input;
+  switch (sandboxPresence(input.view)) {
+    case "put-away":
+      return { _tag: "OfferResume" };
+    case "asleep":
+      // A wake reaches a sandbox through its environment, which one that slept mid-launch lacks.
+      if (environmentId === null) return { _tag: "OfferResume" };
+      return landingThreadId === null
+        ? { _tag: "Wake", environmentId }
+        : { _tag: "OpenThread", environmentId, threadId: landingThreadId };
+    case "running":
+      return environmentId !== null && landingThreadId !== null && input.connected
+        ? { _tag: "OpenThread", environmentId, threadId: landingThreadId }
+        : { _tag: "Follow" };
+    default:
+      return { _tag: "Follow" };
+  }
+}
+
+/**
  * A sandbox listed in place of its thread: meant to run, or failed on the
  * way, while none of its environment's threads has reached this client.
  * Every client of the owner derives it from the owner's list.
