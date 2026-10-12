@@ -85,12 +85,21 @@ export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
 export const SandboxMachineSize = Schema.Literals(["small", "default", "large", "xlarge"]);
 export type SandboxMachineSize = typeof SandboxMachineSize.Type;
 
+/** Boat keeps a machine at most 30 days past its last deadline extension. */
+export const SANDBOX_MAX_STOP_AFTER_HOURS = 720;
+export const SandboxStopAfterHours = Schema.Number.check(
+  Schema.isGreaterThan(0),
+  Schema.isLessThanOrEqualTo(SANDBOX_MAX_STOP_AFTER_HOURS),
+);
+export const isSandboxStopAfterHours = (hours: number): boolean =>
+  Schema.is(SandboxStopAfterHours)(hours);
+
 export const SandboxProjectDefaults = Schema.Struct({
   template: Schema.NullOr(TrimmedNonEmptyString),
   /** Omitted inherits the account's default. */
   size: Schema.optionalKey(SandboxMachineSize),
   /** Hours without agent activity before the sandbox stops. Omitted inherits the account; null never stops it. */
-  stopAfterHours: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0)))),
+  stopAfterHours: Schema.optionalKey(Schema.NullOr(SandboxStopAfterHours)),
 });
 export type SandboxProjectDefaults = typeof SandboxProjectDefaults.Type;
 
@@ -105,7 +114,7 @@ const SandboxAccountFields = {
   providerEnvironment: Schema.NullOr(TrimmedNonEmptyString),
   size: SandboxMachineSize,
   /** Hours without agent activity before a machine stops; null never stops it. */
-  stopAfterHours: Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0))),
+  stopAfterHours: Schema.NullOr(SandboxStopAfterHours),
   /** Run on every boot before T3 starts, with the account env loaded. Must be idempotent. */
   machineSetupScript: Schema.NullOr(Schema.String),
 };

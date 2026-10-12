@@ -10,6 +10,8 @@ import {
   type SandboxAccountId,
   type SandboxProjectDefaults,
   SandboxMachineSize,
+  isSandboxStopAfterHours,
+  SANDBOX_MAX_STOP_AFTER_HOURS,
 } from "@t3tools/contracts";
 import { sandboxProjectKey } from "@t3tools/shared/sandboxProject";
 import * as Schema from "effect/Schema";
@@ -126,10 +128,10 @@ function ProjectSandboxForm({
   const save = async (reset: boolean) => {
     onSelectAccount();
     const stopAfterHours = Number(hours);
-    if (!reset && stop === "custom" && !(Number.isFinite(stopAfterHours) && stopAfterHours > 0)) {
+    if (!reset && stop === "custom" && !isSandboxStopAfterHours(stopAfterHours)) {
       toastManager.add({
         type: "error",
-        title: "Stop after inactivity must be a number of hours above zero.",
+        title: `Stop after inactivity must be above zero and at most ${SANDBOX_MAX_STOP_AFTER_HOURS} hours.`,
       });
       return;
     }

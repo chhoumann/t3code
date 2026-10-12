@@ -4,6 +4,8 @@ import {
   type SandboxAccountSaveInput,
   SandboxEnvName,
   type SandboxMachineSize,
+  isSandboxStopAfterHours,
+  SANDBOX_MAX_STOP_AFTER_HOURS,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -76,10 +78,10 @@ export function sandboxAccountSaveInput(
   if (label.length === 0) return { _tag: "Invalid", message: "Give the account a label." };
   const hours = draft.stopAfterHours.trim();
   const stopAfterHours = hours.length === 0 ? null : Number(hours);
-  if (stopAfterHours !== null && !(Number.isFinite(stopAfterHours) && stopAfterHours > 0)) {
+  if (stopAfterHours !== null && !isSandboxStopAfterHours(stopAfterHours)) {
     return {
       _tag: "Invalid",
-      message: "Stop after inactivity must be a number of hours above zero.",
+      message: `Stop after inactivity must be above zero and at most ${SANDBOX_MAX_STOP_AFTER_HOURS} hours.`,
     };
   }
   const badName = draft.env.find((entry) => !isEnvName(entry.name.trim()));

@@ -72,8 +72,9 @@ describe("sandboxAccountSaveInput", () => {
 
   it.each([
     ["", "8", "Give the account a label."],
-    ["Work", "0", "Stop after inactivity must be a number of hours above zero."],
-    ["Work", "soon", "Stop after inactivity must be a number of hours above zero."],
+    ["Work", "0", "Stop after inactivity must be above zero and at most 720 hours."],
+    ["Work", "soon", "Stop after inactivity must be above zero and at most 720 hours."],
+    ["Work", "721", "Stop after inactivity must be above zero and at most 720 hours."],
   ])("refuses label %j with stop after %j", (label, stopAfterHours, message) => {
     expect(
       sandboxAccountSaveInput(ID, {

@@ -655,11 +655,17 @@ const make = Effect.gen(function* () {
           return next;
         }
         case "ExtendDeadline":
-          yield* provider.setDeadline(
-            yield* account(),
-            yield* machineId,
-            (action.until - now) / 1000,
-          );
+          // A refused extension leaves Boat's deadline in charge; the machine still runs.
+          const resolved = yield* account();
+          const extended = yield* provider
+            .setDeadline(resolved, yield* machineId, (action.until - now) / 1000)
+            .pipe(Effect.result);
+          if (extended._tag === "Failure") {
+            if (!isDefinitiveRefusal(extended.failure)) return yield* extended.failure;
+            yield* Effect.logWarning("sandbox deadline not extended").pipe(
+              Effect.annotateLogs({ sandboxId: record.id, error: extended.failure.message }),
+            );
+          }
           return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
         case "ClearInflight":
           return yield* writeFacts(record, { status, inflight: null });
