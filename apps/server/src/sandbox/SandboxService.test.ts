@@ -447,20 +447,21 @@ describe("SandboxService", () => {
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
-  it.effect("records a stop at the TTL as expired and resumes only when asked", () =>
+  it.effect("records a stop it did not issue as external and resumes only when asked", () =>
     Effect.gen(function* () {
       const { world, start } = makeWorld();
       const started = yield* start;
       yield* Effect.gen(function* () {
         const sandboxes = yield* service;
-        const id = SandboxId.make("sbx-ttl");
+        const id = SandboxId.make("sbx-external");
         yield* sandboxes.launch(launchInput(id));
         yield* awaitStatus(id, "ready");
         for (const machine of world.machines.values()) machine.state = "stopped";
 
         yield* TestClock.adjust(Duration.minutes(1));
-        const expired = yield* awaitStatus(id, "stopped");
-        assert.deepStrictEqual(expired.status, { _tag: "stopped", reason: "expired" });
+        const external = yield* awaitStatus(id, "stopped");
+        assert.deepStrictEqual(external.status, { _tag: "stopped", reason: "external" });
+        assert.strictEqual(external.desired, "running");
         yield* TestClock.adjust(Duration.hours(1));
         assert.strictEqual(world.resumes, 0);
 

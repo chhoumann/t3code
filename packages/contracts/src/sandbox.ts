@@ -21,15 +21,15 @@ export type SandboxAccountId = typeof SandboxAccountId.Type;
 export const SandboxDesired = Schema.Literals(["running", "stopped", "destroyed"]);
 export type SandboxDesired = typeof SandboxDesired.Type;
 
-export const SandboxStoppedReason = Schema.Literals([
-  /** Stopped because the user asked. */
+export const SandboxStopReason = Schema.Literals([
+  /** The user asked. */
   "requested",
-  /** The provider stopped it when its run time ran out. */
-  "expired",
-  /** Stopped outside T3 before its run time ran out. */
+  /** Its owner stopped it after its stop time passed with no agent activity. */
+  "idle",
+  /** Stopped by something other than its owner, such as the provider's own deadline. */
   "external",
 ]);
-export type SandboxStoppedReason = typeof SandboxStoppedReason.Type;
+export type SandboxStopReason = typeof SandboxStopReason.Type;
 
 export const SandboxFailedStep = Schema.Literals([
   "create",
@@ -47,8 +47,8 @@ export const SandboxStatus = Schema.Union([
   Schema.TaggedStruct("booting", {}),
   Schema.TaggedStruct("launching", {}),
   Schema.TaggedStruct("ready", {}),
-  Schema.TaggedStruct("stopping", {}),
-  Schema.TaggedStruct("stopped", { reason: SandboxStoppedReason }),
+  Schema.TaggedStruct("stopping", { reason: SandboxStopReason }),
+  Schema.TaggedStruct("stopped", { reason: SandboxStopReason }),
   Schema.TaggedStruct("resuming", {}),
   Schema.TaggedStruct("destroying", {}),
   Schema.TaggedStruct("destroyed", {}),
@@ -89,7 +89,7 @@ export const SandboxProjectDefaults = Schema.Struct({
   template: Schema.NullOr(TrimmedNonEmptyString),
   /** Omitted inherits the account's default. */
   size: Schema.optionalKey(SandboxMachineSize),
-  /** Omitted inherits the account; null never stops automatically. */
+  /** Hours without agent activity before the sandbox stops. Omitted inherits the account; null never stops it. */
   stopAfterHours: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0)))),
 });
 export type SandboxProjectDefaults = typeof SandboxProjectDefaults.Type;
@@ -104,7 +104,7 @@ const SandboxAccountFields = {
   /** A provider secret bundle; null creates machines with no provider-side secrets. */
   providerEnvironment: Schema.NullOr(TrimmedNonEmptyString),
   size: SandboxMachineSize,
-  /** Null never stops a machine on its own. */
+  /** Hours without agent activity before a machine stops; null never stops it. */
   stopAfterHours: Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0))),
   /** Run on every boot before T3 starts, with the account env loaded. Must be idempotent. */
   machineSetupScript: Schema.NullOr(Schema.String),

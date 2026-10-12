@@ -95,6 +95,11 @@ const ready: SandboxRecord = {
   settledRevision: 1,
 };
 const stopRequested: SandboxRecord = { ...ready, desired: "stopped", desiredRevision: 2 };
+const stopIssued: SandboxRecord = {
+  ...stopRequested,
+  status: { _tag: "stopping", reason: "requested" },
+  inflight: { op: "stop", startedAt: NOW - MINUTE },
+};
 const stopped: SandboxRecord = {
   ...stopRequested,
   status: { _tag: "stopped", reason: "requested" },
@@ -269,7 +274,7 @@ const cases: ReadonlyArray<Case> = [
     "a stop requested mid-boot stops once the environment is recorded",
     { ...launching, desired: "stopped", desiredRevision: 2 },
     answering,
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
 
   // Stop.
@@ -277,23 +282,23 @@ const cases: ReadonlyArray<Case> = [
     "stop while ready",
     stopRequested,
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
   [
     "an issued stop not yet visible waits",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    stopIssued,
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "Wait" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
   ],
   [
     "an issued stop lost past the grace is cleared and re-planned",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - INFLIGHT_GRACE_MS } },
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - INFLIGHT_GRACE_MS } },
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
   ],
   [
     "a stop past its deadline fails",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS } },
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS } },
     observed({ machine: machine("stopping") }),
     failed("stop", true),
   ],
@@ -331,7 +336,7 @@ const cases: ReadonlyArray<Case> = [
       inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
     },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
   [
     "a resume asked for after a stop failed past its deadline issues the stop again first",
@@ -344,13 +349,13 @@ const cases: ReadonlyArray<Case> = [
       inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
     },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Stop" } },
   ],
   [
     "a stopped machine resolves the stop",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    stopIssued,
     observed({ machine: machine("stopped") }),
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
   ],
   [
     "stopped as asked",
@@ -360,14 +365,9 @@ const cases: ReadonlyArray<Case> = [
   ],
   [
     "a resume requested during a stop waits for the stop to land",
-    {
-      ...stopRequested,
-      desired: "running",
-      desiredRevision: 3,
-      inflight: { op: "stop", startedAt: NOW - MINUTE },
-    },
+    { ...stopIssued, desired: "running", desiredRevision: 3 },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Wait" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
   ],
 
   // Resume.
@@ -474,43 +474,57 @@ const cases: ReadonlyArray<Case> = [
 
   // Stops the provider made on its own.
   [
-    "a provider stop in progress while ready is tracked, so it gets a deadline",
+    "a provider stop in progress while ready is tracked as external, so it gets a deadline",
     ready,
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Track", op: "stop" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Track", op: "stop" } },
   ],
   [
-    "a tracked provider stop that lands settles as the provider's stop",
-    { ...ready, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    "a tracked provider stop that lands stays external",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "external" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
     observed({ machine: machine("stopped") }),
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "ClearInflight" } },
   ],
   [
-    "stopped past the TTL while ready is expired, not resumed",
-    { ...ready, runningSince: NOW - TTL_SECONDS * 1000 },
-    observed({ machine: machine("stopped") }),
-    settle({ _tag: "stopped", reason: "expired" }),
-  ],
-  [
-    "stopped before the TTL while ready is external",
-    ready,
+    "a stop this owner did not issue settles as external, however long the sandbox ran",
+    { ...ready, runningSince: NOW - 10 * TTL_SECONDS * 1000 },
     observed({ machine: machine("stopped") }),
     settle({ _tag: "stopped", reason: "external" }),
   ],
   [
-    "an expired sandbox stays stopped until asked again",
-    { ...ready, status: { _tag: "stopped", reason: "expired" } },
+    "an idle stop that landed settles as idle, with running still asked for",
+    { ...ready, status: { _tag: "stopping", reason: "idle" } },
     observed({ machine: machine("stopped") }),
-    settle({ _tag: "stopped", reason: "expired" }),
+    settle({ _tag: "stopped", reason: "idle" }),
   ],
   [
-    "asking for running again resumes an expired sandbox",
-    { ...ready, status: { _tag: "stopped", reason: "expired" }, desiredRevision: 2 },
+    "an idle stop keeps its reason while it lands",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "idle" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "an idle sandbox stays stopped until asked again",
+    { ...ready, status: { _tag: "stopped", reason: "idle" } },
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "idle" }),
+  ],
+  [
+    "asking for running again resumes an idle sandbox",
+    { ...ready, status: { _tag: "stopped", reason: "idle" }, desiredRevision: 2 },
     observed({ machine: machine("stopped") }),
     { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
   ],
   [
-    "a resume never issued before a crash is issued, not mistaken for an expiry",
+    "a resume never issued before a crash is issued, not mistaken for a stop from outside",
     { ...resumeRequested, status: { _tag: "resuming" } },
     observed({ machine: machine("stopped") }),
     { status: { _tag: "resuming" }, action: { _tag: "Resume" } },

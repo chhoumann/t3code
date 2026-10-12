@@ -156,7 +156,6 @@ const creating: SandboxStatus = { _tag: "creating" };
 const booting: SandboxStatus = { _tag: "booting" };
 const launching: SandboxStatus = { _tag: "launching" };
 const ready: SandboxStatus = { _tag: "ready" };
-const stopping: SandboxStatus = { _tag: "stopping" };
 const resuming: SandboxStatus = { _tag: "resuming" };
 const destroying: SandboxStatus = { _tag: "destroying" };
 const destroyed: SandboxStatus = { _tag: "destroyed" };
@@ -166,6 +165,14 @@ const failed = (step: SandboxFailedStep, message: string, retryable: boolean): S
   message,
   retryable,
 });
+/**
+ * A stop keeps the reason it began with. One this owner did not begin is the
+ * user's when they asked for a stop, and external otherwise.
+ */
+const stoppingOf = (record: SandboxRecord): SandboxStatus =>
+  record.status._tag === "stopping"
+    ? record.status
+    : { _tag: "stopping", reason: record.desired === "stopped" ? "requested" : "external" };
 const creationUnknown = failed(
   "create",
   "T3 could not confirm whether Boat created this machine. Check the Boat dashboard, then delete the sandbox to forget it.",
@@ -206,7 +213,7 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
         act("Settle"),
       );
     case "stopping":
-      return plan(stopping, { _tag: "Track", op: "stop" });
+      return plan(stoppingOf(record), { _tag: "Track", op: "stop" });
     case "starting":
       if (firstBootDone) return plan(resuming, { _tag: "Track", op: "resume" });
       // Retry looks at the same machine again, which may have finished provisioning since.
@@ -214,7 +221,7 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
         ? plan(failed("boot", "The machine did not start in time.", true), act("Settle"))
         : plan(record.inputsWrittenAt === null ? creating : booting, act("Wait"));
     case "stopped":
-      return planStopped(record, observation);
+      return planStopped(record);
     case "running":
       return firstBootDone
         ? planRunning(record, observation)
@@ -238,7 +245,8 @@ function resolveInflight(
   switch (inflight.op) {
     case "create":
       return record.machineId === null ? null : plan(creating, act("ClearInflight"));
-    case "stop":
+    case "stop": {
+      const stopping = stoppingOf(record);
       if (machine === null || machine.state === "stopped" || machine.state === "failed") {
         return plan(stopping, act("ClearInflight"));
       }
@@ -248,6 +256,7 @@ function resolveInflight(
           : giveUp(record, plan(stopping, act("Stop")), "The machine did not stop in time.");
       }
       return plan(stopping, act(withinGrace ? "Wait" : "ClearInflight"));
+    }
     case "resume":
       if (machine === null || machine.state === "running" || machine.state === "failed") {
         return plan(resuming, act("ClearInflight"));
@@ -312,19 +321,20 @@ function planCreate(record: SandboxRecord, observation: SandboxObservation): San
     : plan(creationUnknown, act("Settle"));
 }
 
-function planStopped(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
+function planStopped(record: SandboxRecord): SandboxPlan {
   if (record.desired === "stopped") {
     return plan({ _tag: "stopped", reason: "requested" }, act("Settle"));
   }
-  // Already converged on this request, so the provider stopped it; it stays stopped until asked again.
+  // Already converged on this request, so the stop was not asked for: this owner's idle
+  // stop, or one from outside. It stays stopped until asked again.
   if (record.settledRevision === record.desiredRevision) {
-    const ttlMs =
-      record.spec.machine.ttlSeconds === null ? null : record.spec.machine.ttlSeconds * 1000;
-    const expired =
-      ttlMs !== null &&
-      record.runningSince !== null &&
-      observation.now - record.runningSince >= ttlMs;
-    return plan({ _tag: "stopped", reason: expired ? "expired" : "external" }, act("Settle"));
+    return plan(
+      {
+        _tag: "stopped",
+        reason: record.status._tag === "stopping" ? record.status.reason : "external",
+      },
+      act("Settle"),
+    );
   }
   return plan(resuming, act("Resume"));
 }
@@ -354,7 +364,9 @@ function planFirstBoot(
 }
 
 function planRunning(record: SandboxRecord, observation: SandboxObservation): SandboxPlan {
-  if (record.desired === "stopped") return plan(stopping, act("Stop"));
+  if (record.desired === "stopped") {
+    return plan({ _tag: "stopping", reason: "requested" }, act("Stop"));
+  }
   const waiting = record.seedLaunchedAt === null ? launching : resuming;
   if (record.credentialsStale) return plan(waiting, act("RefreshCredentials"));
   if (record.status._tag === "ready") return plan(ready, act("Watch"));

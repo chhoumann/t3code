@@ -79,7 +79,7 @@ export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
 };
 
 /**
- * Asked to stop, or stopped on its own at its TTL or by the provider. Either
+ * Asked to stop, or stopped on its own while idle or by the provider. Either
  * way its threads cannot be listed until it resumes.
  */
 export function isSandboxStopped(view: Pick<SandboxView, "desired" | "status">): boolean {
