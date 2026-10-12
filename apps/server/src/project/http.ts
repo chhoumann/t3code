@@ -1,7 +1,8 @@
 import {
-  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  AuthOrchestrationOperateScope,
+  requiredScopesForProjectMutation,
   type SandboxManagedByOwnerError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -60,6 +61,9 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.projects.mutate")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           const principal = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          for (const scope of requiredScopesForProjectMutation(args.payload)) {
+            yield* requireEnvironmentScope(scope);
+          }
           const operation = projectMutationOperation(projects, args.payload).pipe(
             Effect.provideService(ManagedSandbox.CommandCaller, { subject: principal.subject }),
           );

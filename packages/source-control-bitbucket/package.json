@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./client/definition": {
+      "types": "./src/client/definition.ts",
+      "import": "./src/client/definition.ts"
+    },
     "./server/BitbucketApi": {
       "types": "./src/server/BitbucketApi.ts",
       "import": "./src/server/BitbucketApi.ts"
@@ -33,7 +37,7 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-rs --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {

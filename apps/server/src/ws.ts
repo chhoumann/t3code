@@ -230,11 +230,13 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
+import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
 import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
 import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
+import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
@@ -1203,6 +1205,7 @@ const layerWsRpc = (
         | ThreadLaunchService.ThreadLaunchService
         | FileSystem.FileSystem
         | ServerConfig.ServerConfig
+        | ServerSettings.ServerSettingsService
       >();
       const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
       const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -1232,6 +1235,7 @@ const layerWsRpc = (
       const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
+      const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
       const deviceHostContext =
@@ -1311,6 +1315,7 @@ const layerWsRpc = (
       );
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const otlpEndpointCheck = yield* OtlpEndpointCheck.OtlpEndpointCheck;
       const automaticGitFetchInterval = serverSettings.getSettings.pipe(
         Effect.map(
           (settings) => resolveServerBackgroundActivitySettings(settings).automaticGitFetchInterval,
@@ -1878,6 +1883,7 @@ const layerWsRpc = (
                 ),
             ),
           ),
+        [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
           readWorkflowScript({ scriptPath: input.scriptPath }),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
@@ -2038,6 +2044,13 @@ const layerWsRpc = (
                         commandId: input.commandId,
                         projectId: input.projectId,
                         message: "Failed to launch thread",
+                        cause,
+                      }),
+                    ThreadManagementProviderInstanceDisabledError: (cause) =>
+                      new OrchestrationV2ThreadLaunchError({
+                        commandId: input.commandId,
+                        projectId: input.projectId,
+                        message: cause.message,
                         cause,
                       }),
                   }),
@@ -2451,6 +2464,7 @@ const layerWsRpc = (
         [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
         [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) => resourceTelemetry.retry,
+        [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
         [WS_METHODS.serverSignalProcess]: (input) => processDiagnostics.signal(input),
         [WS_METHODS.serverReportClientActivity]: (input, metadata) =>
           Ref.update(rpcClientIds, (clientIds) => {
@@ -2521,6 +2535,10 @@ const layerWsRpc = (
           withPullRequestViewer(input, pullRequests.checks(input)),
         [WS_METHODS.pullRequestsActivity]: (input) =>
           withPullRequestViewer(input, pullRequests.activity(input)),
+        [WS_METHODS.pullRequestsReviewGuide]: (input) =>
+          withPullRequestViewer(input, reviewGuides.get(input)),
+        [WS_METHODS.pullRequestsGenerateReviewGuide]: (input) =>
+          withPullRequestViewer(input, reviewGuides.generate(input)),
         [WS_METHODS.pullRequestsThreadComments]: (input) =>
           withPullRequestViewer(input, pullRequests.threadComments(input)),
         [WS_METHODS.pullRequestsDiffFileContents]: (input) =>
@@ -2717,6 +2735,7 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
+        [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
         [WS_METHODS.filesystemBrowse]: (input) =>
           workspaceEntries.browse(input).pipe(
             Effect.mapError(
@@ -3169,6 +3188,7 @@ export const layer = Layer.unwrap(
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3235,6 +3255,14 @@ export const layer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              Layer.provide(OtlpEndpointCheck.layer),
+              // Shared like the pull request service, so concurrent generations single-flight.
+              Layer.provide(
+                Layer.succeed(
+                  PullRequestReviewGuideService.PullRequestReviewGuideService,
+                  reviewGuides,
+                ),
+              ),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

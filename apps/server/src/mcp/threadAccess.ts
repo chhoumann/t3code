@@ -23,7 +23,10 @@ export const unavailable = () =>
   });
 
 /** Decider string rejections are public; wrapped storage and hydration causes are not. */
-export const dispatchFailure = (error: OrchestratorV2Error) =>
+export const dispatchFailure = (
+  error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
+) =>
+  error._tag === "ThreadManagementProviderInstanceDisabledError" ||
   error._tag === "SandboxManagedByOwnerError"
     ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
     : (error._tag === "OrchestratorDispatchError" ||

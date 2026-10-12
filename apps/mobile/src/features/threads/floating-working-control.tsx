@@ -3,7 +3,6 @@ import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { GlassContainer, GlassView } from "expo-glass-effect";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   type LayoutChangeEvent,
   Pressable,
   Text as SystemText,
@@ -22,6 +21,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { withUniwind } from "uniwind";
 
+import { AppActivityIndicator } from "../../components/AppActivityIndicator";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { ControlPill } from "../../components/ControlPill";
@@ -46,7 +46,8 @@ const CONTROL_TIMING = {
   easing: Easing.out(Easing.cubic),
   reduceMotion: ReduceMotion.System,
 } as const;
-const CONTROL_SEPARATION = (16 + CONTROL_HEIGHT) / 2;
+const CONTROL_ROW_GAP = 14;
+const CONTROL_SEPARATION = (CONTROL_ROW_GAP + CONTROL_HEIGHT) / 2;
 // Both rows share the same centered anchor, so the outgoing one clears fast and
 // the incoming one waits for it to be mostly gone before it starts to show.
 const LABEL_ENTERING = FadeIn.duration(160).delay(80).reduceMotion(ReduceMotion.System);
@@ -274,7 +275,7 @@ export function FloatingWorkingControl(props: {
 
           <AnimatedGlassView
             colorScheme={props.colorScheme}
-            glassEffectStyle="regular"
+            glassEffectStyle={{ style: props.showScrollToEnd ? "regular" : "none", animate: true }}
             isInteractive
             pointerEvents={props.showScrollToEnd ? "auto" : "none"}
             accessibilityElementsHidden={!props.showScrollToEnd}
@@ -363,7 +364,7 @@ function FloatingStatusLabel(props: {
         className="gap-2"
         onLayout={props.onLayout}
       >
-        <ActivityIndicator size="small" colorClassName="accent-icon-muted" />
+        <AppActivityIndicator size="small" colorClassName="accent-icon-muted" />
         <Text className="shrink font-t3-medium text-xs text-foreground" numberOfLines={1}>
           {props.status.label}
         </Text>
@@ -401,7 +402,7 @@ function FloatingStatusLabel(props: {
         onPress={props.status.onPress}
       >
         {props.status.tone === "reconnecting" ? (
-          <ActivityIndicator size="small" colorClassName="accent-icon-muted" />
+          <AppActivityIndicator size="small" colorClassName="accent-icon-muted" />
         ) : (
           <View className="h-2 w-2 rounded-full bg-red-500" />
         )}

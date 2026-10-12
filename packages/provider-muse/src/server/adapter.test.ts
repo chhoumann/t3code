@@ -18,6 +18,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { MuseSettings } from "../settings.ts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -497,6 +498,41 @@ describe("MuseAdapterV2", () => {
       assert.strictEqual(fake.closeCount(), 0);
       yield* startConversation(harness, fake);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("pins Windows turns to Muse's verbatim root and starts Muse in the plain path", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      let hostCwd: string | undefined;
+      const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...runtimePolicy,
+        cwd: "C:\\work\\repo",
+      });
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        policy,
+        {
+          createHost: async (options) => {
+            hostCwd = options.cwd;
+            return fake.host;
+          },
+        },
+      );
+      yield* startConversation(harness, fake);
+      const turnStart = fake.calls.find((call) => call.method === "turn/start");
+      // Muse 1.4.3 rejects any other form: "expected a canonical path (resolves to \\?\C:\…)".
+      assert.deepStrictEqual(turnStart?.params.workspaceRoots, ["\\\\?\\C:\\work\\repo"]);
+      // The muse.cmd launcher runs under cmd.exe, which cannot start in a verbatim directory.
+      assert.strictEqual(hostCwd, "C:\\work\\repo");
+    }).pipe(
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.scoped,
+      Effect.provide(testLayer),
+    ),
   );
 
   it.effect("skips an unreadable usage notification without ending the turn", () =>
@@ -1092,6 +1128,122 @@ describe("MuseAdapterV2", () => {
       );
       assert.isTrue((yield* harness.adapter.getCapabilities()).planning.emitsPlanUpdated);
       assert.isTrue((yield* harness.adapter.getCapabilities()).planning.emitsTodoList);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("opens a prompt-and-result child thread for a native subagent", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("item/started", {
+        turnId: nativeId,
+        item: {
+          itemId: "sub-1",
+          kind: "subagent",
+          revision: 1,
+          status: "inProgress",
+          turnId: nativeId,
+          subagentId: "subagent-1",
+          controlStatus: "running",
+          childSessionId: "child-session-1",
+          objective: "Check the thing",
+          role: "general-purpose",
+        },
+      });
+      const created = yield* harness.takeEvent("app_thread.created");
+      const childThreadId = created.appThread.id;
+      yield* fake.emit("item/updated", {
+        turnId: nativeId,
+        item: {
+          itemId: "sub-1",
+          kind: "subagent",
+          revision: 2,
+          status: "inProgress",
+          turnId: nativeId,
+          subagentId: "subagent-1",
+          controlStatus: "resultReady",
+          childSessionId: "child-session-1",
+          objective: "Check the thing",
+          result: { summary: "All done" },
+        },
+      });
+      // The revision without a role keeps the title the child thread opened with.
+      const completed = yield* harness.takeEvent(
+        "subagent.updated",
+        (event) => event.subagent.status === "completed",
+      );
+      assert.strictEqual(completed.subagent.title, created.appThread.title);
+      const result = yield* harness.takeEvent(
+        "message.updated",
+        (event) => event.message.threadId === childThreadId && event.message.role === "assistant",
+      );
+      assert.strictEqual(result.message.text, "All done");
+      yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
+      const terminal = yield* harness.takeEvent("turn.terminal");
+      assert.strictEqual(terminal.status, "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a workflow child's first label after later revisions drop it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
+      const { nativeId } = yield* startConversation(harness, fake);
+      const workflowItem = (revision: number, children: unknown) => ({
+        itemId: "wf-1",
+        kind: "workflow",
+        revision,
+        status: "inProgress",
+        turnId: nativeId,
+        entryId: "Probe workflow",
+        children,
+      });
+      yield* fake.emit("item/started", {
+        turnId: nativeId,
+        item: workflowItem(1, [{ childId: "c1", attempt: 1, status: "scheduled", label: "ping" }]),
+      });
+      const scheduled = yield* harness.takeEvent("subagent.updated");
+      assert.strictEqual(scheduled.subagent.title, "ping");
+      yield* fake.emit("item/updated", {
+        turnId: nativeId,
+        item: workflowItem(2, [{ childId: "c1", attempt: 1, status: "started" }]),
+      });
+      const started = yield* harness.takeEvent(
+        "subagent.updated",
+        (event) => event.subagent.status === "running",
+      );
+      assert.strictEqual(started.subagent.title, "ping");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows a workflow child that completed with a failure kind as failed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("item/started", {
+        turnId: nativeId,
+        item: {
+          itemId: "wf-1",
+          kind: "workflow",
+          revision: 1,
+          status: "inProgress",
+          turnId: nativeId,
+          children: [
+            {
+              childId: "c1",
+              attempt: 1,
+              status: "finished",
+              terminal: "completed",
+              failureKind: "budget_exhausted",
+            },
+          ],
+        },
+      });
+      const child = yield* harness.takeEvent("subagent.updated");
+      assert.strictEqual(child.subagent.status, "failed");
+      assert.strictEqual(child.subagent.result, "budget_exhausted");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

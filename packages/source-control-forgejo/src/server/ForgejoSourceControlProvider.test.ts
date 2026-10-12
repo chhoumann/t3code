@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -208,6 +209,7 @@ it.effect.each([
       const summary = yield* readSummary(input);
       const detail = yield* provider.getChangeRequest(input);
       assert.strictEqual(list.items.length, 1);
+      assert.strictEqual(detail.headSha, "head");
       for (const result of [list.items[0]!, summary, detail]) {
         assert.strictEqual(result.mergeability, mergeability);
         assert.strictEqual(result.isDraft, isDraft);
@@ -258,7 +260,11 @@ it.effect("gives Forgejo identities the browser URL of the login that serves the
     });
     const served = (baseUrl: string) => () =>
       Effect.succeed({
-        provider: { kind: "forgejo" as const, name: "Forgejo / Gitea", baseUrl },
+        provider: {
+          kind: SourceControlProviderKind.make("forgejo"),
+          name: "Forgejo / Gitea",
+          baseUrl,
+        },
         remoteName: "origin",
         remoteUrl: "",
       });
@@ -271,7 +277,7 @@ it.effect("gives Forgejo identities the browser URL of the login that serves the
       }),
       {
         ...identity("http://forge.test:3000/git/team/repo.git"),
-        provider: "forgejo",
+        provider: SourceControlProviderKind.make("forgejo"),
         webUrl: "http://forge.test:3000/git/team/repo",
       },
     );
@@ -557,7 +563,7 @@ it.effect("discovers Forgejo accounts and retains the server port", () =>
       cwd: "/repo",
       context: {
         provider: {
-          kind: "unknown",
+          kind: SourceControlProviderKind.make("unknown"),
           name: "git.forgejo.local",
           baseUrl: "https://git.forgejo.local",
         },
@@ -577,7 +583,7 @@ it.effect("discovers Forgejo accounts and retains the server port", () =>
       ),
     });
     assert.deepStrictEqual(refined, {
-      kind: "forgejo",
+      kind: SourceControlProviderKind.make("forgejo"),
       name: "Forgejo / Gitea",
       baseUrl: "http://forgejo.local:3000",
     });
@@ -622,7 +628,11 @@ it.effect("does not choose a default Forgejo login across ambiguous SSH server p
     const refined = ForgejoSourceControlProvider.discovery.refineUnknownRemote({
       cwd: "/repo",
       context: {
-        provider: { kind: "unknown", name: "Forgejo", baseUrl: "https://forgejo.local" },
+        provider: {
+          kind: SourceControlProviderKind.make("unknown"),
+          name: "Forgejo",
+          baseUrl: "https://forgejo.local",
+        },
         remoteName: "origin",
         remoteUrl: "git@forgejo.local:maria/project.git",
         requestedHost: "forgejo.local:4000",
@@ -732,7 +742,11 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
         cwd: "/repo",
         repository: "forgejo/maria/project",
         context: {
-          provider: { kind: "forgejo", name: "Forgejo", baseUrl: "https://code.test/forgejo" },
+          provider: {
+            kind: SourceControlProviderKind.make("forgejo"),
+            name: "Forgejo",
+            baseUrl: "https://code.test/forgejo",
+          },
           remoteName: "origin",
           remoteUrl: "https://code.test/forgejo/maria/project.git",
         },
@@ -744,7 +758,11 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
       cwd: "/repo",
       repository: "forgejo/project",
       context: {
-        provider: { kind: "forgejo", name: "Forgejo", baseUrl: "https://code.test/forgejo" },
+        provider: {
+          kind: SourceControlProviderKind.make("forgejo"),
+          name: "Forgejo",
+          baseUrl: "https://code.test/forgejo",
+        },
         remoteName: "origin",
         remoteUrl: "ssh://git@code.test/forgejo/project.git",
       },
@@ -827,7 +845,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
         repository: "maria/project",
         context: {
           provider: {
-            kind: "forgejo",
+            kind: SourceControlProviderKind.make("forgejo"),
             name: "Forgejo",
             baseUrl: "http://forgejo.local:3000",
           },
