@@ -614,7 +614,9 @@ const make = Effect.gen(function* () {
             runningSince: now,
             credentialsStale: true,
           });
-          yield* provider.resume(resolved, yield* machineId);
+          yield* provider.resume(resolved, yield* machineId, {
+            ttlSeconds: record.spec.machine.ttlSeconds,
+          });
           return next;
         }
         case "Destroy": {

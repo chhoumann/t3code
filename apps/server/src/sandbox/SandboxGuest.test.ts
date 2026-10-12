@@ -134,6 +134,7 @@ describe("SandboxGuest", () => {
             exec: () => Effect.succeed({ exitCode: 128, stdout: "", stderr, timedOut: false }),
             writeFile: unused,
             host: unused,
+            setDeadline: unused,
             stop: unused,
             resume: unused,
             destroy: unused,

@@ -113,10 +113,15 @@ const resumed: SandboxRecord = {
   credentialsStale: true,
 };
 
-const machine = (state: ProviderMachineState, setup: ProviderMachineSetup = null) => ({
+const machine = (
+  state: ProviderMachineState,
+  setup: ProviderMachineSetup = null,
+  archiveAfter: number | null = null,
+) => ({
   id: ProviderMachineId.make("bx_test"),
   state,
   setup,
+  archiveAfter,
 });
 const observed = (overrides: Partial<SandboxObservation> = {}): SandboxObservation => ({
   now: NOW,

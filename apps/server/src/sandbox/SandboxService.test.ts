@@ -9,6 +9,7 @@ import {
   type SandboxView,
 } from "@t3tools/contracts";
 import { sandboxProjectKey } from "@t3tools/shared/sandboxProject";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -41,16 +42,24 @@ const ACCOUNT_ID = SandboxAccountId.make("boat-work");
 const GUEST_ENV = EnvironmentId.make("env-guest");
 const OWNER_ENV = EnvironmentId.make("env-owner");
 
+/** Where an auto-stop `ttlSeconds` from now lands. */
+const deadline = (ttlSeconds: number | null) =>
+  Clock.currentTimeMillis.pipe(
+    Effect.map((now) => (ttlSeconds === null ? null : now + ttlSeconds * 1000)),
+  );
+
 /** An in-memory provider and guest sharing one set of machines, kept across service restarts. */
 const makeWorld = () => {
-  const machines = new Map<string, { state: ProviderMachineState }>();
+  const machines = new Map<string, { state: ProviderMachineState; archiveAfter: number | null }>();
   const machineByKey = new Map<string, ProviderMachineId>();
   const world = {
     machines,
     templateKeys: [] as Array<string>,
     createKeys: [] as Array<string>,
     createInputs: [] as Array<Parameters<SandboxProvider["Service"]["create"]>[1]>,
-    resumes: 0,
+    resumes: [] as Array<number | null>,
+    /** Every `ttlSeconds` the owner moved a machine's deadline to. */
+    deadlines: [] as Array<number>,
     credentialRefreshes: 0,
     managedMarkers: [] as Array<ManagedSandboxMarker>,
     bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
@@ -94,7 +103,7 @@ const makeWorld = () => {
         if (id === undefined) {
           id = ProviderMachineId.make(`bx${machineByKey.size + 1}`);
           machineByKey.set(input.idempotencyKey, id);
-          machines.set(id, { state: "running" });
+          machines.set(id, { state: "running", archiveAfter: yield* deadline(input.ttlSeconds) });
         }
         const hang = world.hangNextCreate;
         if (hang !== null) {
@@ -102,7 +111,12 @@ const makeWorld = () => {
           yield* Deferred.succeed(hang, undefined);
           return yield* Effect.never;
         }
-        return { id, state: "running" as const, setup: "done" as const };
+        return {
+          id,
+          state: "running" as const,
+          setup: "done" as const,
+          archiveAfter: machines.get(id)?.archiveAfter ?? null,
+        };
       }),
     inspect: (_account, id) =>
       Effect.gen(function* () {
@@ -113,16 +127,33 @@ const makeWorld = () => {
           yield* Deferred.await(gate.release);
         }
         const machine = machines.get(id);
-        return machine === undefined ? null : { id, state: machine.state, setup: "done" as const };
+        return machine === undefined
+          ? null
+          : {
+              id,
+              state: machine.state,
+              setup: "done" as const,
+              archiveAfter: machine.archiveAfter,
+            };
       }),
     exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "", timedOut: false }),
     writeFile: () => Effect.void,
     host: (_account, id) => Effect.succeed(`https://${id}.sandbox.test`),
-    stop: (_account, id) => Effect.sync(() => void machines.set(id, { state: "stopped" })),
-    resume: (_account, id) =>
+    setDeadline: (_account, id, ttlSeconds) =>
+      Effect.gen(function* () {
+        world.deadlines.push(ttlSeconds);
+        const machine = machines.get(id);
+        if (machine !== undefined) machine.archiveAfter = yield* deadline(ttlSeconds);
+      }),
+    stop: (_account, id) =>
       Effect.sync(() => {
-        world.resumes += 1;
-        machines.set(id, { state: "running" });
+        const machine = machines.get(id);
+        if (machine !== undefined) machine.state = "stopped";
+      }),
+    resume: (_account, id, input) =>
+      Effect.gen(function* () {
+        world.resumes.push(input.ttlSeconds);
+        machines.set(id, { state: "running", archiveAfter: yield* deadline(input.ttlSeconds) });
       }),
     destroy: (_account, id) =>
       Effect.gen(function* () {
@@ -430,7 +461,7 @@ describe("SandboxService", () => {
           yield* sandboxes.update({ id, desired: "running" });
           const resumed = yield* awaitStatus(id, "ready");
           assert.strictEqual(resumed.environmentId, ready.environmentId);
-          assert.strictEqual(world.resumes, 1);
+          assert.strictEqual(world.resumes.length, 1);
           assert.strictEqual(world.credentialRefreshes, 1);
           assert.strictEqual(world.launchedThreads.length, 1);
           assert.isTrue(world.secrets.has("sandbox-sbx-cycle-admin"));
@@ -463,11 +494,11 @@ describe("SandboxService", () => {
         assert.deepStrictEqual(external.status, { _tag: "stopped", reason: "external" });
         assert.strictEqual(external.desired, "running");
         yield* TestClock.adjust(Duration.hours(1));
-        assert.strictEqual(world.resumes, 0);
+        assert.strictEqual(world.resumes.length, 0);
 
         yield* sandboxes.update({ id, desired: "running" });
         yield* awaitStatus(id, "ready");
-        assert.strictEqual(world.resumes, 1);
+        assert.strictEqual(world.resumes.length, 1);
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

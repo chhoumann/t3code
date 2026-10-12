@@ -125,7 +125,12 @@ describe("BoatSandboxProvider", () => {
       );
       expect(exit._tag).toBe("Success");
       if (exit._tag === "Success") {
-        expect(exit.value).toEqual({ id: "bx_23456789", state: "starting", setup: "pending" });
+        expect(exit.value).toEqual({
+          id: "bx_23456789",
+          state: "starting",
+          setup: "pending",
+          archiveAfter: null,
+        });
       }
       expect(seen.map((request) => request.headers["idempotency-key"])).toEqual([
         "sandbox-1",
@@ -175,7 +180,76 @@ describe("BoatSandboxProvider", () => {
         id: "bx_23456789",
         state: "starting",
         setup: "pending",
+        archiveAfter: null,
       });
+    }),
+  );
+
+  it.effect("reads when Boat will stop a machine on its own", () =>
+    Effect.gen(function* () {
+      const { exit } = yield* run(
+        [
+          () =>
+            new Response(
+              JSON.stringify({
+                ok: true,
+                sandbox: { ...sandbox, state: "idle", archiveAfter: "2026-05-31T13:00:00Z" },
+              }),
+            ),
+        ],
+        (provider) => provider.inspect(account, machineId),
+      );
+      expect(exit._tag === "Success" && exit.value).toEqual({
+        id: "bx_23456789",
+        state: "running",
+        setup: "pending",
+        archiveAfter: 1_780_232_400_000,
+      });
+    }),
+  );
+
+  it.effect("moves Boat's own stop in whole seconds within Boat's bounds, never earlier", () =>
+    Effect.gen(function* () {
+      const ok = () => new Response(JSON.stringify({ ok: true, sandbox }));
+      const { exit, seen } = yield* run([ok, ok, ok], (provider) =>
+        Effect.forEach([4200.2, 0.2, 40 * 24 * 60 * 60], (ttlSeconds) =>
+          provider.setDeadline(account, machineId, ttlSeconds),
+        ),
+      );
+      expect(exit._tag).toBe("Success");
+      expect(seen.map(({ method, url, body }) => ({ method, url, body }))).toEqual([
+        {
+          method: "PATCH",
+          url: "https://boat.dev/api/v1/sandboxes/bx_23456789",
+          body: { ttlSeconds: 4201 },
+        },
+        {
+          method: "PATCH",
+          url: "https://boat.dev/api/v1/sandboxes/bx_23456789",
+          body: { ttlSeconds: 1 },
+        },
+        {
+          method: "PATCH",
+          url: "https://boat.dev/api/v1/sandboxes/bx_23456789",
+          body: { ttlSeconds: 2_592_000 },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("gives a resumed machine a fresh auto-stop, or none", () =>
+    Effect.gen(function* () {
+      const ok = () => new Response(JSON.stringify({ ok: true }));
+      const { exit, seen } = yield* run([ok, ok], (provider) =>
+        Effect.forEach([4200, null], (ttlSeconds) =>
+          provider.resume(account, machineId, { ttlSeconds }),
+        ),
+      );
+      expect(exit._tag).toBe("Success");
+      expect(seen.map(({ url, body }) => ({ url, body }))).toEqual([
+        { url: "https://boat.dev/api/v1/sandboxes/bx_23456789/resume", body: { ttlSeconds: 4200 } },
+        { url: "https://boat.dev/api/v1/sandboxes/bx_23456789/resume", body: { ttlSeconds: null } },
+      ]);
     }),
   );
 
@@ -195,7 +269,7 @@ describe("BoatSandboxProvider", () => {
     Effect.gen(function* () {
       const { exit, seen } = yield* run(
         [() => boatError(409, "sandbox_busy"), () => new Response(JSON.stringify({ ok: true }))],
-        (provider) => provider.resume(account, machineId),
+        (provider) => provider.resume(account, machineId, { ttlSeconds: 3600 }),
       );
       expect(exit._tag).toBe("Success");
       expect(seen).toHaveLength(2);
@@ -205,7 +279,7 @@ describe("BoatSandboxProvider", () => {
   it.effect("reports plan limits as limits without retrying", () =>
     Effect.gen(function* () {
       const { exit, seen } = yield* run([() => boatError(429, "limit_reached")], (provider) =>
-        provider.resume(account, machineId).pipe(Effect.flip),
+        provider.resume(account, machineId, { ttlSeconds: 3600 }).pipe(Effect.flip),
       );
       expect(seen).toHaveLength(1);
       expect(exit._tag === "Success" && exit.value).toMatchObject({

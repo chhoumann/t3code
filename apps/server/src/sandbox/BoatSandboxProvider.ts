@@ -5,6 +5,7 @@
  *
  * @module BoatSandboxProvider
  */
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
@@ -33,6 +34,7 @@ const BoatSandbox = Schema.Struct({
   setupStatus: Schema.optional(
     Schema.NullOr(Schema.Literals(["pending", "running", "done", "failed"])),
   ),
+  archiveAfter: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
 });
 type BoatSandbox = typeof BoatSandbox.Type;
 
@@ -121,6 +123,13 @@ function classifyBoatError(input: {
 const shouldRetry = (error: SandboxProviderError) =>
   error.kind === "transient" && (error.operation !== "exec" || error.code === "boat_starting");
 
+/** Boat takes an auto-stop TTL in whole seconds, up to 30 days. */
+const MAX_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/** A TTL Boat accepts: rounded up, so the machine never stops before it was asked to. */
+const boatTtlSeconds = (seconds: number | null) =>
+  seconds === null ? null : Math.min(MAX_TTL_SECONDS, Math.max(1, Math.ceil(seconds)));
+
 const RETRY_SCHEDULE = Schedule.exponential(Duration.millis(500), 2);
 const RETRY_TIMES = 5;
 /** Long enough for any plan-limit sentence, short enough to show as a status. */
@@ -199,6 +208,7 @@ const toMachine = (sandbox: BoatSandbox): ProviderMachine => ({
   id: ProviderMachineId.make(sandbox.id),
   state: MACHINE_STATE.get(sandbox.state) ?? "starting",
   setup: sandbox.setupStatus ?? null,
+  archiveAfter: sandbox.archiveAfter == null ? null : DateTime.toEpochMillis(sandbox.archiveAfter),
 });
 
 const make = Effect.gen(function* () {
@@ -332,7 +342,7 @@ const make = Effect.gen(function* () {
         HttpClientRequest.setHeader("Idempotency-Key", input.idempotencyKey),
         HttpClientRequest.bodyJsonUnsafe({
           type: input.size,
-          ttlSeconds: input.ttlSeconds,
+          ttlSeconds: boatTtlSeconds(input.ttlSeconds),
           setupScript: input.setupScript,
           ...(input.template === null ? {} : { from: input.template }),
           ...(input.providerEnvironment === null
@@ -385,6 +395,16 @@ const make = Effect.gen(function* () {
       BoatHostResult,
     ).pipe(Effect.map((body) => new URL(body.url).origin));
 
+  const setDeadline: SandboxProvider["Service"]["setDeadline"] = (account, id, ttlSeconds) =>
+    send(
+      "set-deadline",
+      account,
+      HttpClientRequest.patch(sandboxPath(id)).pipe(
+        HttpClientRequest.bodyJsonUnsafe({ ttlSeconds: boatTtlSeconds(ttlSeconds) }),
+      ),
+      Schema.Unknown,
+    ).pipe(Effect.asVoid);
+
   const stop: SandboxProvider["Service"]["stop"] = (account, id) =>
     send(
       "stop",
@@ -393,11 +413,13 @@ const make = Effect.gen(function* () {
       Schema.Unknown,
     ).pipe(Effect.asVoid);
 
-  const resume: SandboxProvider["Service"]["resume"] = (account, id) =>
+  const resume: SandboxProvider["Service"]["resume"] = (account, id, input) =>
     send(
       "resume",
       account,
-      HttpClientRequest.post(sandboxPath(id, "/resume")).pipe(HttpClientRequest.bodyJsonUnsafe({})),
+      HttpClientRequest.post(sandboxPath(id, "/resume")).pipe(
+        HttpClientRequest.bodyJsonUnsafe({ ttlSeconds: boatTtlSeconds(input.ttlSeconds) }),
+      ),
       Schema.Unknown,
     ).pipe(Effect.asVoid);
 
@@ -420,6 +442,7 @@ const make = Effect.gen(function* () {
     exec,
     writeFile,
     host,
+    setDeadline,
     stop,
     resume,
     destroy,

@@ -43,6 +43,7 @@ const makeWorld = () => {
     exec: unused,
     writeFile: unused,
     host: unused,
+    setDeadline: unused,
     stop: unused,
     resume: unused,
     destroy: unused,

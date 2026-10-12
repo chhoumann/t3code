@@ -26,6 +26,8 @@ export interface ProviderMachine {
   readonly id: ProviderMachineId;
   readonly state: ProviderMachineState;
   readonly setup: ProviderMachineSetup;
+  /** When the provider stops the machine on its own, in epoch milliseconds; null when it never will. */
+  readonly archiveAfter: number | null;
 }
 
 export interface SandboxProviderAccount {
@@ -36,7 +38,7 @@ export interface CreateMachineInput {
   /** Stable across retries of one logical create; the provider dedupes on it. */
   readonly idempotencyKey: string;
   readonly size: SandboxMachineSize;
-  /** Null disables the provider's auto-stop. */
+  /** Seconds until the provider stops the machine on its own; null never stops it. */
   readonly ttlSeconds: number | null;
   /** A provider named snapshot to start from. */
   readonly template: string | null;
@@ -60,6 +62,7 @@ export const SandboxProviderOperation = Schema.Literals([
   "exec",
   "writeFile",
   "host",
+  "set-deadline",
   "stop",
   "resume",
   "destroy",
@@ -144,6 +147,12 @@ export class SandboxProvider extends Context.Service<
       id: ProviderMachineId,
       port: number,
     ) => Effect.Effect<string, SandboxProviderError>;
+    /** Moves the provider's own stop of a machine to `ttlSeconds` from now. */
+    readonly setDeadline: (
+      account: SandboxProviderAccount,
+      id: ProviderMachineId,
+      ttlSeconds: number,
+    ) => Effect.Effect<void, SandboxProviderError>;
     readonly stop: (
       account: SandboxProviderAccount,
       id: ProviderMachineId,
@@ -151,6 +160,10 @@ export class SandboxProvider extends Context.Service<
     readonly resume: (
       account: SandboxProviderAccount,
       id: ProviderMachineId,
+      input: {
+        /** Seconds until the provider stops the resumed machine on its own; null never stops it. */
+        readonly ttlSeconds: number | null;
+      },
     ) => Effect.Effect<void, SandboxProviderError>;
     /** Succeeds when the machine is already gone. */
     readonly destroy: (
