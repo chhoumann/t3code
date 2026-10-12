@@ -22,7 +22,7 @@ import { HttpClient } from "effect/http";
 import { Socket } from "effect/socket";
 
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
-import { FLOCK_SHIM } from "../testUtils/flockShim.ts";
+import { FLOCK_SHIM, TIMEOUT_SHIM } from "../testUtils/flockShim.ts";
 import {
   SANDBOX_ENV_FILE,
   SANDBOX_INPUTS_READY_FILE,
@@ -71,7 +71,7 @@ const guestFixture = () => {
     checkoutInput: Omit<SandboxGuest.SandboxCheckout, "sandboxId" | "branch" | "path">,
     sandboxId = SANDBOX_ID,
   ) =>
-    `${FLOCK_SHIM}\n${renderCloneCommand({
+    `${FLOCK_SHIM}\n${TIMEOUT_SHIM}\n${renderCloneCommand({
       ...checkoutInput,
       sandboxId,
       branch: `t3/sandbox-${sandboxId.slice(0, 8)}`,
@@ -251,6 +251,32 @@ describe("renderCloneCommand", () => {
     expect(afterReplay).toBe("this agent's edit\n");
   });
 
+  it("launches when a remote it does not track cannot be fetched", () => {
+    const { root, origin, pinned, checkout, script } = guestFixture();
+    const result = NodeChildProcess.spawnSync(
+      "bash",
+      [
+        "-c",
+        script({
+          remotes: [
+            { name: "gone", url: NodePath.join(root, "gone") },
+            { name: "origin", url: origin },
+          ],
+          trackedRemote: "origin",
+          commit: pinned,
+        }),
+      ],
+      { encoding: "utf8" },
+    );
+    const head = git(checkout, "rev-parse", "HEAD");
+    const remotes = git(checkout, "remote");
+    NodeFS.rmSync(root, { recursive: true, force: true });
+
+    expect(result.status).toBe(0);
+    expect(head).toBe(pinned);
+    expect(remotes).toBe("gone\norigin");
+  });
+
   const PROJECT_URL = "https://github.com/pingdotgg/t3code.git";
   const FORK_URL = "https://github.com/chhoumann/t3code.git";
   it.effect.each([
@@ -258,17 +284,19 @@ describe("renderCloneCommand", () => {
       layout: "origin is the project and the branch tracks a fork remote",
       remotes: { origin: PROJECT_URL, fork: FORK_URL },
       trackedRemote: "fork",
+      otherRemote: "origin",
       groupingKey: "github.com/pingdotgg/t3code",
     },
     {
       layout: "origin is the fork the branch tracks and upstream is the project",
       remotes: { origin: FORK_URL, upstream: PROJECT_URL },
       trackedRemote: "origin",
+      otherRemote: "upstream",
       groupingKey: "github.com/chhoumann/t3code",
     },
   ])(
-    "clones the fork a branch tracks into a project with the checkout's identity when $layout",
-    ({ remotes, trackedRemote, groupingKey }) =>
+    "clones the fork a branch tracks into a project with the checkout's identity, and the project's branches, when $layout",
+    ({ remotes, trackedRemote, otherRemote, groupingKey }) =>
       Effect.gen(function* () {
         const { root, origin: project, checkout, script } = guestFixture();
         const fork = NodePath.join(root, "fork");
@@ -308,6 +336,8 @@ describe("renderCloneCommand", () => {
         const { rootPath: _local, ...localIdentity } = (yield* resolver.resolve(local)) ?? {};
         const { rootPath: _guest, ...guestIdentity } = (yield* resolver.resolve(checkout)) ?? {};
         const pending = sandboxProject(repository).repositoryIdentity;
+        const projectMain = git(checkout, "rev-parse", `refs/remotes/${otherRemote}/main`);
+        const projectHead = git(project, "rev-parse", "main");
         NodeFS.rmSync(root, { recursive: true, force: true });
 
         expect(result.stderr).toBe("");
@@ -316,6 +346,7 @@ describe("renderCloneCommand", () => {
         expect(localIdentity).toMatchObject({ canonicalKey: "github.com/pingdotgg/t3code" });
         expect(repositoryGroupingKeyOf(guestIdentity as RepositoryIdentity)).toBe(groupingKey);
         expect(repositoryGroupingKeyOf(pending)).toBe(groupingKey);
+        expect(projectMain).toBe(projectHead);
       }).pipe(
         Effect.provide(RepositoryIdentityResolver.layer.pipe(Layer.provide(NodeServices.layer))),
       ),

@@ -175,6 +175,8 @@ const READINESS_TIMEOUT = Duration.seconds(5);
 const ACTIVITY_TIMEOUT = Duration.seconds(10);
 const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const CLONE_TIMEOUT_SECONDS = 600;
+/** Per remote the clone does not track, which only diffs read, so it gives up on one sooner. */
+const OTHER_REMOTE_FETCH_TIMEOUT_SECONDS = 60;
 const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
 const STDERR_TAIL_LINES = 5;
 const STDERR_TAIL_CHARS = 600;
@@ -207,6 +209,14 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
       (remote) =>
         `  git -C ${repository} remote add -- ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
     );
+  // Diffs read the other remotes' branches, such as the project's main beside a fork. A
+  // remote this machine cannot reach only leaves diffs on local branches, so it never fails
+  // the launch.
+  const fetchOthers = (repository: string) =>
+    others.map(
+      (remote) =>
+        `  timeout ${OTHER_REMOTE_FETCH_TIMEOUT_SECONDS} git -C ${repository} fetch --quiet -- ${shellQuote(remote.name)} ${CLOSE_EXEC_LOCK} || true`,
+    );
   // A configured upstream would be one the remote does not have yet, which reads as pushed.
   const pushToTracked = (repository: string) =>
     `  git -C ${repository} config -- ${shellQuote(`branch.${checkout.branch}.pushRemote`)} ${tracked}`;
@@ -226,6 +236,7 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
     `  git -C ${partial} checkout --quiet -b ${branch}${
       checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
     } ${CLOSE_EXEC_LOCK}`,
+    ...fetchOthers(partial),
     pushToTracked(partial),
     markOwn(partial),
     `  mv ${partial} ${path}`,
@@ -240,6 +251,7 @@ export function renderCloneCommand(checkout: SandboxCheckout): string {
       checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
     } ${CLOSE_EXEC_LOCK}`,
     `  git -C ${path} checkout --quiet --force -B ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
+    ...fetchOthers(path),
     pushToTracked(path),
     markOwn(path),
     "fi",
