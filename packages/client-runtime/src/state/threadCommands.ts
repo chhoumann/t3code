@@ -365,8 +365,7 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     dismissUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:dismiss-user-input",
-      execute: (input: DismissThreadUserInputInput, registry, environmentId) =>
-        wakeFirst(registry, environmentId).pipe(Effect.andThen(dismissThreadUserInput(input))),
+      execute: (input: DismissThreadUserInputInput) => dismissThreadUserInput(input),
       scheduler,
       concurrency,
     }),
