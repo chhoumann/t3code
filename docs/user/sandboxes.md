@@ -53,9 +53,13 @@ Archiving a sandbox's last active thread stops the sandbox, and unarchiving one
 of its threads resumes it. A sandbox also stops on its own once no agent in it
 has worked for its **Stop after inactivity** time. An agent that is running, or
 waiting for your answer, counts as working, so a sandbox does not stop in the
-middle of a turn. A sandbox set to **Never** runs until you stop it. Stopped
-sandboxes, including ones that stopped on their own, are listed in
-**Settings → Archive** and **Settings → Sandboxes**, where you can resume them.
+middle of a turn. A sandbox set to **Never** runs until you stop it.
+
+A sandbox that stopped on its own is asleep: its threads stay in the sidebar,
+and sending a message in one wakes the sandbox first, which takes a minute or
+two. A sandbox you stopped by archiving its last thread is listed in
+**Settings → Archive**. Both are listed in **Settings → Sandboxes**, where you
+can resume them.
 
 The environment that owns the sandbox checks on it about once a minute and stops
 it once it has been idle long enough. This has two limits:
