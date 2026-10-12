@@ -955,8 +955,8 @@ export const make = Effect.gen(function* () {
         const remaining = removedIds.reduce(routesAfterRemoving, connectionRoutes(entry));
         if (remaining.length === 0) return yield* removeLocked(environmentId);
         const { dormant, ...awake } = entry;
-        if (dormant === true) yield* registrations.setDormant(environmentId, false);
         yield* replaceRoutesLocked(awake, remaining);
+        if (dormant === true) yield* registrations.setDormant(environmentId, false);
       }),
     ).pipe(Effect.withSpan("EnvironmentRegistry.removeContributed"));
 

@@ -157,6 +157,9 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     readonly beforeRegistrationRemove?: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
+    readonly beforeRegistrationSetRoutes?: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
     readonly checkRoute?: (route: ConnectionRoute) => RouteCheck;
     readonly prepareRoute?: (target: ConnectionTarget) => ConnectionBlockedError | undefined;
     /** Runs before preparing a route; may suspend to hold an attempt in flight. */
@@ -243,7 +246,11 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         }
       }),
     setRoutes: (environmentId, routes) =>
-      Ref.update(storedTargets, (current) => replaceRoutes(current, environmentId, routes)),
+      (options?.beforeRegistrationSetRoutes?.(environmentId) ?? Effect.void).pipe(
+        Effect.andThen(
+          Ref.update(storedTargets, (current) => replaceRoutes(current, environmentId, routes)),
+        ),
+      ),
     remove: (environmentId) =>
       Effect.gen(function* () {
         yield* options?.beforeRegistrationRemove?.(environmentId) ?? Effect.void;
@@ -2238,6 +2245,41 @@ describe("EnvironmentRegistry routes", () => {
             dormant: undefined,
           });
           expect(yield* Ref.get(harness.storedDormant)).toEqual(new Set());
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
+
+    it.effect("a sandbox stays asleep when the routes its gone owner left could not be saved", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET, USER_TARGET, RELAY_TARGET],
+          [MANAGED_PROFILE, USER_PROFILE],
+          [
+            [MANAGED_TARGET.connectionId, BEARER_CREDENTIAL],
+            [USER_TARGET.connectionId, BEARER_CREDENTIAL],
+          ],
+          {
+            initialDormant: [SANDBOX],
+            beforeRegistrationSetRoutes: () =>
+              Effect.fail(
+                new Persistence.ConnectionPersistenceError({
+                  operation: "set-connection-routes",
+                  message: "Storage is unavailable.",
+                }),
+              ),
+          },
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* registry.remove(OWNER);
+
+          const sandbox = (yield* SubscriptionRef.get(registry.entries)).get(SANDBOX);
+          expect({ target: sandbox?.target, dormant: sandbox?.dormant }).toEqual({
+            target: MANAGED_TARGET,
+            dormant: true,
+          });
+          expect(yield* Ref.get(harness.storedDormant)).toEqual(new Set([SANDBOX]));
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }),
     );
