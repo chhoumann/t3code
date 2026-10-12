@@ -114,8 +114,7 @@ export const SandboxStopAfterHours = Schema.Number.check(
   Schema.isGreaterThan(0),
   Schema.isLessThanOrEqualTo(SANDBOX_MAX_STOP_AFTER_HOURS),
 );
-export const isSandboxStopAfterHours = (hours: number): boolean =>
-  Schema.is(SandboxStopAfterHours)(hours);
+export const isSandboxStopAfterHours: (hours: number) => boolean = Schema.is(SandboxStopAfterHours);
 
 export const SandboxProjectDefaults = Schema.Struct({
   template: Schema.NullOr(TrimmedNonEmptyString),
