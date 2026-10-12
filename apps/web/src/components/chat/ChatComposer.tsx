@@ -1138,6 +1138,7 @@ import { useDelayedStatus } from "../../hooks/useDelayedStatus";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { readCanSendWork } from "../../state/sandboxes";
 import { readEnvironmentScope } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
@@ -4251,11 +4252,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       dispatchMode?: ComposerDispatchMode,
       submissionIntent?: ComposerSubmissionIntent,
     ) => {
-      if (
-        noProviderAvailable ||
-        isSendDisabled ||
-        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
-      ) {
+      if (noProviderAvailable || isSendDisabled || !readCanSendWork(environmentId)) {
         event?.preventDefault();
         return;
       }

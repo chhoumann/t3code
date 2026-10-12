@@ -21,6 +21,7 @@ import {
   sandboxPresence,
   sandboxRepositoryFor,
   sandboxWakeStatus,
+  workDelivery,
   workGrantEnvironmentId,
 } from "./sandboxes.ts";
 import { sandboxIndex } from "../sandbox/sandboxRegistrations.ts";
@@ -230,6 +231,67 @@ describe("sandboxWakeStatus", () => {
     ],
   ] as const)("shows a sandbox %s", (_case, desired, status, phase, expected) => {
     expect(sandboxWakeStatus({ desired, status }, phase)).toEqual(expected);
+  });
+});
+
+describe("workDelivery", () => {
+  const ready: SandboxStatus = { _tag: "ready" };
+  it.each([
+    ["an environment this device is connected to", undefined, true, "now"],
+    ["an environment this device cannot reach", undefined, false, "offline"],
+    [
+      "a sandbox that sleeps",
+      { desired: "running", status: { _tag: "stopped", reason: "idle" } },
+      false,
+      "after-wake",
+    ],
+    [
+      "a sandbox stopping while its socket is still up",
+      { desired: "running", status: { _tag: "stopping", reason: "idle" } },
+      true,
+      "after-wake",
+    ],
+    [
+      "a sandbox already waking",
+      { desired: "running", status: { _tag: "resuming" } },
+      false,
+      "after-wake",
+    ],
+    [
+      "a sandbox that was put away",
+      { desired: "stopped", status: { _tag: "stopped", reason: "requested" } },
+      false,
+      "after-wake",
+    ],
+    [
+      "a sandbox whose wake failed",
+      {
+        desired: "running",
+        status: { _tag: "failed", step: "resume", message: "No machine.", retryable: true },
+      },
+      false,
+      "after-wake",
+    ],
+    [
+      "a running sandbox this device has yet to reach",
+      { desired: "running", status: ready },
+      false,
+      "offline",
+    ],
+    [
+      "a running sandbox this device is connected to",
+      { desired: "running", status: ready },
+      true,
+      "now",
+    ],
+    [
+      "a sandbox being deleted",
+      { desired: "destroyed", status: { _tag: "destroying" } },
+      false,
+      "offline",
+    ],
+  ] as const)("sends to %s", (_case, sandbox, connected, delivery) => {
+    expect(workDelivery({ sandbox, connected })).toBe(delivery);
   });
 });
 

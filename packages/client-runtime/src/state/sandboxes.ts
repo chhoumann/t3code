@@ -120,6 +120,22 @@ export function workGrantEnvironmentId(
     : environmentId;
 }
 
+/**
+ * How work sent to an environment's thread reaches it: now, over this
+ * device's socket; once its sandbox, which sleeps, has woken; or not at all
+ * while the environment is out of reach for any other reason.
+ */
+export type WorkDelivery = "now" | "after-wake" | "offline";
+
+export function workDelivery(input: {
+  /** The environment's sandbox, as its owner last described it; undefined for any other environment. */
+  readonly sandbox: Pick<SandboxView, "desired" | "status"> | undefined;
+  readonly connected: boolean;
+}): WorkDelivery {
+  if (input.sandbox !== undefined && wakesForWork(input.sandbox)) return "after-wake";
+  return input.connected ? "now" : "offline";
+}
+
 export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
   creating: "Starting machine",
   booting: "Installing T3",

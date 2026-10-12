@@ -225,6 +225,16 @@ export function waitForThreadShell(ref: ScopedThreadRef, timeoutMs = 5_000): Pro
   });
 }
 
+/** Resolves whether the thread's detail reached this client within `timeoutMs`. */
+export function waitForThreadDetail(ref: ScopedThreadRef, timeoutMs: number): Promise<boolean> {
+  return waitForAtomValue({
+    registry: appAtomRegistry,
+    atom: environmentThreadDetails.threadAtom(ref),
+    predicate: (thread) => thread !== null,
+    timeoutMs,
+  });
+}
+
 /** Whether the environment hosts preview tabs in its own browser (`runtime: "server"`),
     so clients without Electron can still use the Browser panel. */
 export function useEnvironmentSupportsServerBrowser(environmentId: EnvironmentId | null): boolean {

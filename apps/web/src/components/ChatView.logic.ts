@@ -1,4 +1,5 @@
 import * as Option from "effect/Option";
+import type { WorkDelivery } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
@@ -223,6 +224,29 @@ export function resolveEffectiveInteractionMode(input: {
 }): ProviderInteractionMode {
   if (!input.planModeEnabled) return "default";
   return input.composerInteractionMode ?? input.threadInteractionMode ?? "default";
+}
+
+/**
+ * What a send held while its thread's sandbox woke does on a render: it is
+ * sent once the woken sandbox is connected and the thread loaded, and waits
+ * until then. It is dropped once its thread is no longer shown, its prompt
+ * changed, or the sandbox fell asleep again before it could go.
+ */
+export function heldSendStep(input: {
+  readonly heldThreadKey: string;
+  readonly threadKey: string;
+  readonly promptUnchanged: boolean;
+  readonly delivery: WorkDelivery;
+  readonly threadLoading: boolean;
+}): "wait" | "send" | "drop" {
+  if (
+    input.heldThreadKey !== input.threadKey ||
+    !input.promptUnchanged ||
+    input.delivery === "after-wake"
+  ) {
+    return "drop";
+  }
+  return input.delivery === "now" && !input.threadLoading ? "send" : "wait";
 }
 
 export function shouldDockDraftHeroForSubmission(input: {

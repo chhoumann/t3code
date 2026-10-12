@@ -2,6 +2,7 @@ import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/Th
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
+  heldSendStep,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
@@ -28,7 +29,7 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import {
   sandboxPresence,
   sandboxWakeStatus,
-  wakesForWork,
+  workDelivery,
 } from "@t3tools/client-runtime/state/sandboxes";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
@@ -441,6 +442,7 @@ import {
   useChildThreadInputs,
   useThreadRefs,
   useThreadVisibleTurnItems,
+  waitForThreadDetail,
   waitForThreadShell,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
@@ -1565,6 +1567,33 @@ function chatActionErrorMessage(error: unknown): string {
 }
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
+/** How long a thread may take to load from its sandbox once the sandbox is awake. */
+const THREAD_LOAD_AFTER_WAKE_MS = 30_000;
+
+/** What the composer sent to a sandbox that sleeps, to send again once it is awake. */
+type HeldWork =
+  | {
+      readonly _tag: "Send";
+      readonly dispatchMode: ComposerDispatchMode;
+      readonly submissionIntent: ComposerSubmissionIntent;
+      readonly directAnnotation:
+        | { annotation: PreviewAnnotationPayload; image: ComposerImageAttachment | null }
+        | undefined;
+    }
+  | { readonly _tag: "Resume" };
+
+/** Work held while its thread's sandbox wakes; see `deliverOnceAwake`. */
+interface HeldSend {
+  readonly threadKey: string;
+  /**
+   * The prompt as it was sent. Typing more while the sandbox wakes drops the
+   * held work rather than sending what was typed with it.
+   */
+  readonly prompt: string;
+  readonly work: HeldWork;
+  /** The sandbox woke and the thread loaded, so the work runs once a render shows it connected. */
+  readonly awake: boolean;
+}
 const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
 const noopHeldTurnDiff = (_turnId: RunId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
@@ -2707,7 +2736,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeSandboxPresence =
     activeSandbox === undefined ? null : sandboxPresence(activeSandbox.view);
   // Work sent to a sandbox that sleeps wakes it first, so it is not refused as offline.
-  const activeSandboxWakes = activeSandbox !== undefined && wakesForWork(activeSandbox.view);
+  const sendDelivery = workDelivery({
+    sandbox: activeSandbox?.view,
+    connected: !activeEnvironmentUnavailable,
+  });
   const activeSandboxView = activeSandbox?.view;
   const activeSandboxWakeStatus = useMemo(
     () =>
@@ -3746,6 +3778,7 @@ export default function ChatView(props: ChatViewProps) {
   // Such a send skips the local dispatch, so this keeps its thread's composer busy while it is
   // in flight.
   const [setupQueueSendThreadKey, setSetupQueueSendThreadKey] = useState<string | null>(null);
+  const [heldSend, setHeldSend] = useState<HeldSend | null>(null);
   useEffect(() => {
     attachmentPreviewHandoffByMessageIdRef.current = attachmentPreviewHandoffByMessageId;
   }, [attachmentPreviewHandoffByMessageId]);
@@ -8794,6 +8827,49 @@ export default function ChatView(props: ChatViewProps) {
     void sendStandaloneCommand("/compact", "Failed to compact context.");
   };
 
+  /**
+   * Delivers work to a sandbox that sleeps (`sendDelivery` "after-wake"):
+   * wakes the sandbox and waits for the thread to load from it, then sends
+   * the work again on the render that shows it connected, so it goes as it
+   * would to any running environment, uploads included. The draft stays in
+   * the composer meanwhile.
+   */
+  const deliverOnceAwake = async (work: HeldWork) => {
+    if (!activeThread) return;
+    const threadId = activeThread.id;
+    const held: HeldSend = {
+      threadKey: routeThreadKey,
+      prompt: promptRef.current,
+      work,
+      awake: false,
+    };
+    const giveUp = (message: string | null) => {
+      sendInFlightRef.current = false;
+      setHeldSend(null);
+      if (message !== null) setThreadError(threadId, message);
+    };
+    sendInFlightRef.current = true;
+    setHeldSend(held);
+    setThreadError(threadId, null);
+    const woke = await wakeThreadSandbox({ environmentId, input: undefined });
+    if (woke._tag === "Failure") {
+      if (isAtomCommandInterrupted(woke)) return giveUp(null);
+      const error = squashAtomCommandFailure(woke);
+      return giveUp(error instanceof Error ? error.message : "The sandbox could not wake.");
+    }
+    if (
+      isServerThread &&
+      !(await waitForThreadDetail(
+        scopeThreadRef(environmentId, threadId),
+        THREAD_LOAD_AFTER_WAKE_MS,
+      ))
+    ) {
+      return giveUp("The sandbox is awake, but this thread did not load. Send again.");
+    }
+    sendInFlightRef.current = false;
+    setHeldSend((current) => (current === held ? { ...held, awake: true } : current));
+  };
+
   const onResume = async () => {
     if (
       !activeThread ||
@@ -8803,9 +8879,13 @@ export default function ChatView(props: ChatViewProps) {
       isConnecting ||
       isRevertingCheckpoint ||
       threadDetailLoading ||
-      (activeEnvironmentUnavailable && !activeSandboxWakes) ||
+      sendDelivery === "offline" ||
       sendInFlightRef.current
     ) {
+      return;
+    }
+    if (sendDelivery === "after-wake") {
+      void deliverOnceAwake({ _tag: "Resume" });
       return;
     }
     const threadId = activeThread.id;
@@ -8921,6 +9001,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    const heldWork: HeldWork = { _tag: "Send", dispatchMode, submissionIntent, directAnnotation };
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -8955,7 +9036,8 @@ export default function ChatView(props: ChatViewProps) {
       isConnecting ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
-      threadDetailLoading ||
+      // A send that wakes the sandbox waits for the thread to load from it.
+      (threadDetailLoading && sendDelivery !== "after-wake") ||
       environmentChangeRef.current !== null ||
       sendInFlightRef.current ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
@@ -8984,7 +9066,7 @@ export default function ChatView(props: ChatViewProps) {
       });
       return;
     }
-    if (activeEnvironmentUnavailable && !activeSandboxWakes) {
+    if (sendDelivery === "offline") {
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -9007,9 +9089,7 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    // A sandbox that sleeps lists only the providers it last reported; it checks
-    // the turn itself once awake.
-    if (!sendCtx || (!sendCtx.providerAvailable && !activeSandboxWakes)) {
+    if (!sendCtx?.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -9116,6 +9196,10 @@ export default function ChatView(props: ChatViewProps) {
         newEditImages.length === 0 &&
         newEditFiles.length === 0
       ) {
+        return;
+      }
+      if (sendDelivery === "after-wake") {
+        void deliverOnceAwake(heldWork);
         return;
       }
       queuedEditSaveInFlightRef.current = true;
@@ -9540,6 +9624,10 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
 
+    if (sendDelivery === "after-wake") {
+      void deliverOnceAwake(heldWork);
+      return;
+    }
     sendInFlightRef.current = true;
     const sendGeneration = ++composerSendGenerationRef.current;
     const attachmentCapabilitiesBeforeUpload = readLiveAttachmentCapabilities();
@@ -9552,9 +9640,7 @@ export default function ChatView(props: ChatViewProps) {
       composerFilesSnapshot.length > 0
         ? attachmentCapabilitiesBeforeUpload.supportsAttachmentUploads
         : supportsAttachmentUploads;
-    /** Uploads the turn's attachments; why they cannot go, or null once they are uploaded. */
-    const uploadTurnAttachments = async (): Promise<string | null> => {
-      if (!turnUsesAttachmentUploads || composerAttachmentsSnapshot.length === 0) return null;
+    if (turnUsesAttachmentUploads && composerAttachmentsSnapshot.length > 0) {
       for (const attachment of composerAttachmentsSnapshot) {
         startAttachmentUpload({
           environmentId,
@@ -9563,27 +9649,18 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
       await awaitAttachmentUploads(composerAttachmentsSnapshot.map((attachment) => attachment.id));
-      return (
-        readLiveAttachmentCapabilities().fileBlockReason ??
-        (getUploadedAttachments({ environmentId, images: composerAttachmentsSnapshot }) === null
-          ? "Retry or remove failed uploads before sending."
-          : null)
-      );
-    };
-    // A sandbox that sleeps takes no uploads: the send shows first, wakes it, then uploads.
-    const uploadBlockReason = activeSandboxWakes ? null : await uploadTurnAttachments();
-    if (uploadBlockReason !== null) {
-      sendInFlightRef.current = false;
-      setThreadError(threadIdForSend, uploadBlockReason);
-      return;
+      const attachmentCapabilitiesAfterUpload = readLiveAttachmentCapabilities();
+      if (attachmentCapabilitiesAfterUpload.fileBlockReason !== null) {
+        sendInFlightRef.current = false;
+        setThreadError(threadIdForSend, attachmentCapabilitiesAfterUpload.fileBlockReason);
+        return;
+      }
+      if (getUploadedAttachments({ environmentId, images: composerAttachmentsSnapshot }) === null) {
+        sendInFlightRef.current = false;
+        setThreadError(threadIdForSend, "Retry or remove failed uploads before sending.");
+        return;
+      }
     }
-    /** Wakes the sandbox, then uploads to it; throws why the turn cannot go. */
-    const wakeSandboxForTurn = async () => {
-      const woke = await wakeThreadSandbox({ environmentId, input: undefined });
-      if (woke._tag === "Failure") throw squashAtomCommandFailure(woke);
-      const reason = await uploadTurnAttachments();
-      if (reason !== null) throw new Error(reason);
-    };
 
     if (
       multipleModelSelections === null &&
@@ -9650,33 +9727,29 @@ export default function ChatView(props: ChatViewProps) {
       );
     }
 
-    const readTurnAttachments = () =>
-      Promise.all(
-        composerAttachmentsSnapshot.map(async (attachment) => {
-          if (turnUsesAttachmentUploads) {
-            const uploaded = getUploadedAttachments({ environmentId, images: [attachment] })?.[0];
-            if (!uploaded) {
-              throw new Error(`Attachment '${attachment.name}' did not finish uploading.`);
-            }
-            return uploaded;
+    const turnAttachmentsPromise = Promise.all(
+      composerAttachmentsSnapshot.map(async (attachment) => {
+        if (turnUsesAttachmentUploads) {
+          const uploaded = getUploadedAttachments({ environmentId, images: [attachment] })?.[0];
+          if (!uploaded) {
+            throw new Error(`Attachment '${attachment.name}' did not finish uploading.`);
           }
-          if (attachment.type !== "image") {
-            throw new Error("This server does not support file attachments.");
-          }
-          return {
-            type: "image" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            dataUrl: await readFileAsDataUrl(attachment.file),
-            ...(attachment.source ? { source: attachment.source } : {}),
-          };
-        }),
-      );
-    // Read now, before the composer clears. A sandbox that sleeps has nothing uploaded yet, so
-    // its turn reads them once it is awake and they are.
-    const turnAttachmentsPromise = activeSandboxWakes ? null : readTurnAttachments();
+          return uploaded;
+        }
+        if (attachment.type !== "image") {
+          throw new Error("This server does not support file attachments.");
+        }
+        return {
+          type: "image" as const,
+          id: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+          dataUrl: await readFileAsDataUrl(attachment.file),
+          ...(attachment.source ? { source: attachment.source } : {}),
+        };
+      }),
+    );
     if (multipleModelSelections !== null) {
       const failedSelections: ModelSelection[] = [];
       let clearedDraft = false;
@@ -9684,8 +9757,7 @@ export default function ChatView(props: ChatViewProps) {
       let canRestoreDraft = () => false;
       let startedCount = 0;
       try {
-        if (activeSandboxWakes) await wakeSandboxForTurn();
-        const attachments = await (turnAttachmentsPromise ?? readTurnAttachments());
+        const attachments = await turnAttachmentsPromise;
         const fileBlockReason = readLiveAttachmentCapabilities().fileBlockReason;
         if (fileBlockReason !== null) throw new Error(fileBlockReason);
         const context = buildOutgoingMessageContext(
@@ -10046,12 +10118,6 @@ export default function ChatView(props: ChatViewProps) {
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
 
-    // The message already shows; a sandbox that sleeps wakes before anything reaches it.
-    if (activeSandboxWakes) {
-      const woke = await settlePromise(wakeSandboxForTurn);
-      if (woke._tag === "Failure") failure = woke;
-    }
-
     if (failure === null && isServerThread) {
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
@@ -10068,7 +10134,7 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     const turnAttachmentsResult = await settlePromise(async () => {
-      const turnAttachments = await (turnAttachmentsPromise ?? readTurnAttachments());
+      const turnAttachments = await turnAttachmentsPromise;
       const liveFileBlockReason = readLiveAttachmentCapabilities().fileBlockReason;
       if (liveFileBlockReason !== null) {
         throw new Error(liveFileBlockReason);
@@ -11075,6 +11141,28 @@ export default function ChatView(props: ChatViewProps) {
   );
   const onComposerResume = useCallback(() => onResumeRef.current(), []);
   const onComposerCompactContext = useCallback(() => onCompactContextRef.current(), []);
+  useEffect(() => {
+    if (heldSend === null || !heldSend.awake) return;
+    const step = heldSendStep({
+      heldThreadKey: heldSend.threadKey,
+      threadKey: routeThreadKey,
+      promptUnchanged: promptRef.current === heldSend.prompt,
+      delivery: sendDelivery,
+      threadLoading: threadDetailLoading,
+    });
+    if (step === "wait") return;
+    setHeldSend(null);
+    if (step === "drop") return;
+    const { work } = heldSend;
+    void (work._tag === "Resume"
+      ? onResumeRef.current()
+      : onSendRef.current(
+          undefined,
+          work.dispatchMode,
+          work.submissionIntent,
+          work.directAnnotation,
+        ));
+  }, [heldSend, routeThreadKey, sendDelivery, threadDetailLoading]);
   const queuedRunsControl = useMemo(
     () =>
       isServerThread && activeThread ? (
@@ -11893,7 +11981,8 @@ export default function ChatView(props: ChatViewProps) {
                                 (setupQueueSendThreadKey !== null &&
                                   setupQueueSendThreadKey === activeThreadKey) ||
                                 isSavingQueuedEdit ||
-                                isResuming
+                                isResuming ||
+                                heldSend?.threadKey === routeThreadKey
                               }
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
@@ -11906,7 +11995,7 @@ export default function ChatView(props: ChatViewProps) {
                                       ? "Rewinding conversation"
                                       : feedbackUploading
                                         ? "Sending feedback"
-                                        : threadDetailLoading
+                                        : threadDetailLoading && sendDelivery !== "after-wake"
                                           ? "Messages loading"
                                           : worktreeSetupBlocksSend
                                             ? "Preparing worktree"
@@ -11927,7 +12016,11 @@ export default function ChatView(props: ChatViewProps) {
                                   ? openUsageLimits
                                   : undefined
                               }
-                              environmentUnavailable={activeEnvironmentUnavailableState}
+                              environmentUnavailable={
+                                sendDelivery === "after-wake"
+                                  ? null
+                                  : activeEnvironmentUnavailableState
+                              }
                               activePendingApproval={activePendingApproval}
                               pendingApprovals={pendingApprovals}
                               pendingUserInputs={pendingUserInputs}
