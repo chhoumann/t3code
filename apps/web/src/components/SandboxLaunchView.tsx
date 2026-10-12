@@ -3,11 +3,12 @@ import {
   SANDBOX_LAUNCH_STAGES,
   SANDBOX_STATUS_LABEL,
   type SandboxLaunchAction,
+  type SandboxLaunchPanel,
+  type SandboxWakeFailure,
   sandboxCommandFailure,
   sandboxLandingThreadId,
   sandboxLaunchAction,
-  sandboxLaunchStageIndex,
-  sandboxLaunchStatusLabel,
+  sandboxLaunchPanel,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -56,7 +57,11 @@ export function SandboxLaunchView(props: {
           connected: environment?.connection.phase === "connected",
         });
   useOpenThread(action);
-  const wake = useWakeOnArrival(action);
+  const wake = useWakeOnArrival(action, view?.revision ?? null);
+  const panel =
+    view === null || action === null
+      ? null
+      : sandboxLaunchPanel({ view, action, wakeFailure: wake.failure });
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
@@ -66,7 +71,7 @@ export function SandboxLaunchView(props: {
             {view?.title ?? "Sandbox"}
           </span>
         </WorkspacePageHeader>
-        {view === null || action === null ? (
+        {view === null || panel === null ? (
           listed ? (
             <Empty className="flex-1">
               <EmptyHeader>
@@ -92,7 +97,7 @@ export function SandboxLaunchView(props: {
               <SandboxProgress
                 view={view}
                 ownerEnvironmentId={props.ownerEnvironmentId}
-                action={action}
+                panel={panel}
                 wake={wake}
               />
             </div>
@@ -125,7 +130,7 @@ function useOpenThread(action: SandboxLaunchAction | null) {
 
 interface SandboxWake {
   /** Why the last wake failed, until the next one starts. */
-  readonly failure: string | null;
+  readonly failure: SandboxWakeFailure | null;
   readonly retry: (environmentId: EnvironmentId) => void;
   /** A resume asked for here stands in for this visit's wake. */
   readonly resumed: () => void;
@@ -136,17 +141,26 @@ interface SandboxWake {
  * would, so opening it is enough: the owner resumes it and this device
  * connects to it, then `useOpenThread` opens its thread. Unlike a send, it is
  * not checked up front against the owner's grant: a visit can arrive before
- * that loads, and the request to the owner waits for it.
+ * that loads, and the request to the owner waits for it. A failure keeps the
+ * sandbox's request revision when it came (`sandboxLaunchPanel`).
  */
-function useWakeOnArrival(action: SandboxLaunchAction | null): SandboxWake {
+function useWakeOnArrival(
+  action: SandboxLaunchAction | null,
+  revision: number | null,
+): SandboxWake {
   const wake = useAtomCommand(threadEnvironment.wake, { reportFailure: false });
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<SandboxWakeFailure | null>(null);
   const asked = useRef(false);
+  const latestRevision = useRef(revision);
+  useEffect(() => {
+    latestRevision.current = revision;
+  }, [revision]);
   const run = async (environmentId: EnvironmentId) => {
     asked.current = true;
     setFailure(null);
-    const result = await wake({ environmentId });
-    setFailure(sandboxCommandFailure(result));
+    const message = sandboxCommandFailure(await wake({ environmentId }));
+    const observedAt = latestRevision.current;
+    setFailure(message === null || observedAt === null ? null : { message, revision: observedAt });
   };
   const wakeOnArrival = useEffectEvent((environmentId: EnvironmentId) => {
     if (!asked.current) void run(environmentId);
@@ -169,85 +183,77 @@ function useWakeOnArrival(action: SandboxLaunchAction | null): SandboxWake {
 function SandboxProgress(props: {
   readonly view: SandboxView;
   readonly ownerEnvironmentId: EnvironmentId;
-  readonly action: SandboxLaunchAction;
+  readonly panel: SandboxLaunchPanel;
   readonly wake: SandboxWake;
 }) {
-  const { view, wake } = props;
+  const { view, panel, wake } = props;
   const { setDesired, confirmAndDelete } = useSandboxActions();
   const sandbox = { ownerEnvironmentId: props.ownerEnvironmentId, view: view };
-  const stage = sandboxLaunchStageIndex(view.status);
   const remove = () => void confirmAndDelete(sandbox);
 
-  if (view.status._tag === "failed") {
-    return (
-      <SandboxFailure
-        message={view.status.message}
-        onRetry={view.status.retryable ? () => void setDesired(sandbox, view.desired) : null}
-        onDelete={remove}
-      />
-    );
-  }
-
-  if (props.action._tag === "OfferResume") {
-    return (
-      <div className="flex flex-col gap-3 text-sm">
-        <p className="text-muted-foreground">{SANDBOX_STATUS_LABEL[view.status._tag]}</p>
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={view.status._tag === "stopping"}
-            onClick={() => {
-              wake.resumed();
-              void setDesired(sandbox, "running");
-            }}
-          >
-            <PlayIcon />
-            Resume
-          </Button>
+  switch (panel._tag) {
+    case "Failed":
+      return (
+        <SandboxFailure
+          message={panel.message}
+          onRetry={panel.retryable ? () => void setDesired(sandbox, view.desired) : null}
+          onDelete={remove}
+        />
+      );
+    case "WakeFailed":
+      return (
+        <SandboxFailure
+          message={panel.message}
+          onRetry={() => wake.retry(panel.environmentId)}
+          onDelete={remove}
+        />
+      );
+    case "Resume":
+      return (
+        <div className="flex flex-col gap-3 text-sm">
+          <p className="text-muted-foreground">{panel.label}</p>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!panel.available}
+              onClick={() => {
+                wake.resumed();
+                void setDesired(sandbox, "running");
+              }}
+            >
+              <PlayIcon />
+              Resume
+            </Button>
+          </div>
         </div>
-      </div>
-    );
+      );
+    case "Status":
+      return <p className="text-muted-foreground text-sm">{panel.label}</p>;
+    case "Stages":
+      return <SandboxStages current={panel.current} />;
   }
+}
 
-  const { environmentId } = view;
-  if (wake.failure !== null && environmentId !== null) {
-    return (
-      <SandboxFailure
-        message={wake.failure}
-        onRetry={() => wake.retry(environmentId)}
-        onDelete={remove}
-      />
-    );
-  }
-
-  if (stage === null) {
-    return (
-      <p className="text-muted-foreground text-sm">
-        {props.action._tag === "Wake"
-          ? SANDBOX_STATUS_LABEL.resuming
-          : sandboxLaunchStatusLabel(view.status)}
-      </p>
-    );
-  }
-
+function SandboxStages(props: { readonly current: number }) {
+  const { current } = props;
   return (
     <ol className="flex flex-col gap-2 text-sm" aria-label="Sandbox progress">
       {SANDBOX_LAUNCH_STAGES.map((step, index) => (
         <li
           key={step}
-          aria-current={index === stage ? "step" : undefined}
+          aria-current={index === current ? "step" : undefined}
           className={cn(
             "flex items-center gap-2",
-            index === stage ? "text-foreground" : "text-muted-foreground",
-            index > stage && "text-muted-foreground/60",
+            index === current ? "text-foreground" : "text-muted-foreground",
+            index > current && "text-muted-foreground/60",
           )}
         >
-          {index < stage ? (
+          {index < current ? (
             <CheckIcon className="size-3.5 shrink-0" aria-hidden />
           ) : (
             <CircleIcon
-              className={cn("size-3.5 shrink-0", index === stage && "fill-current")}
+              className={cn("size-3.5 shrink-0", index === current && "fill-current")}
               aria-hidden
             />
           )}

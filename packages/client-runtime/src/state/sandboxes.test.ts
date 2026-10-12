@@ -20,6 +20,7 @@ import {
   sandboxCommandFailure,
   sandboxLandingThreadId,
   sandboxLaunchAction,
+  sandboxLaunchPanel,
   sandboxLaunchStageIndex,
   sandboxPresence,
   sandboxRepositoryFor,
@@ -558,6 +559,99 @@ describe("sandboxLaunchAction", () => {
         }),
       ).toEqual({ _tag: "Follow" });
     }
+  });
+});
+
+describe("sandboxLaunchPanel", () => {
+  const SANDBOX_ENVIRONMENT = EnvironmentId.make("environment-sandbox");
+  const OFFLINE = "Work laptop is offline, so it cannot wake this sandbox.";
+  const view = (status: SandboxStatus, revision = 1) => ({
+    status,
+    revision,
+    environmentId: SANDBOX_ENVIRONMENT,
+  });
+  const stopped: SandboxStatus = { _tag: "stopped", reason: "external" };
+  const wake = { _tag: "Wake", environmentId: SANDBOX_ENVIRONMENT } as const;
+  const follow = { _tag: "Follow" } as const;
+
+  it("shows where the sandbox stands", () => {
+    expect([
+      sandboxLaunchPanel({ view: view({ _tag: "booting" }), action: follow, wakeFailure: null }),
+      sandboxLaunchPanel({ view: view(stopped), action: wake, wakeFailure: null }),
+      sandboxLaunchPanel({ view: view({ _tag: "resuming" }), action: follow, wakeFailure: null }),
+      sandboxLaunchPanel({ view: view({ _tag: "ready" }), action: follow, wakeFailure: null }),
+      sandboxLaunchPanel({
+        view: view({ _tag: "stopping", reason: "requested" }),
+        action: { _tag: "OfferResume" },
+        wakeFailure: null,
+      }),
+      sandboxLaunchPanel({
+        view: view({ _tag: "failed", step: "boot", message: "boom", retryable: false }),
+        action: follow,
+        wakeFailure: null,
+      }),
+    ]).toEqual([
+      { _tag: "Stages", current: 1 },
+      { _tag: "Status", label: "Resuming" },
+      { _tag: "Status", label: "Resuming" },
+      { _tag: "Status", label: "Opening thread" },
+      { _tag: "Resume", label: "Stopping", available: false },
+      { _tag: "Failed", message: "boom", retryable: false },
+    ]);
+  });
+
+  it("keeps a wake that failed here, with Retry, while the sandbox has no newer request", () => {
+    expect(
+      sandboxLaunchPanel({
+        view: view(stopped),
+        action: wake,
+        wakeFailure: { message: OFFLINE, revision: 1 },
+      }),
+    ).toEqual({ _tag: "WakeFailed", message: OFFLINE, environmentId: "environment-sandbox" });
+    // The wake's own request woke the sandbox, but this device never reached it.
+    expect(
+      sandboxLaunchPanel({
+        view: view({ _tag: "ready" }, 2),
+        action: follow,
+        wakeFailure: {
+          message: "The sandbox is awake, but this device could not reconnect to it.",
+          revision: 2,
+        },
+      }),
+    ).toEqual({
+      _tag: "WakeFailed",
+      message: "The sandbox is awake, but this device could not reconnect to it.",
+      environmentId: "environment-sandbox",
+    });
+  });
+
+  it("drops a wake that failed here once a resume starts from elsewhere", () => {
+    const failedHere = { message: OFFLINE, revision: 1 };
+    // Resumed from Settings or another device.
+    expect(
+      sandboxLaunchPanel({
+        view: view({ _tag: "resuming" }, 2),
+        action: follow,
+        wakeFailure: failedHere,
+      }),
+    ).toEqual({ _tag: "Status", label: "Resuming" });
+    // The owner's resume failed, and its Retry asked again.
+    const resumeFailed: SandboxStatus = {
+      _tag: "failed",
+      step: "resume",
+      message: "The machine did not start in time.",
+      retryable: true,
+    };
+    expect(
+      sandboxLaunchPanel({ view: view(resumeFailed, 2), action: follow, wakeFailure: failedHere }),
+    ).toEqual({ _tag: "Failed", message: "The machine did not start in time.", retryable: true });
+    expect(
+      sandboxLaunchPanel({
+        view: view({ _tag: "resuming" }, 3),
+        action: follow,
+        wakeFailure: failedHere,
+      }),
+    ).toEqual({ _tag: "Status", label: "Resuming" });
   });
 });
 

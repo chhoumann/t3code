@@ -279,6 +279,67 @@ export function sandboxLaunchAction(input: {
 }
 
 /**
+ * A wake this device asked for that failed, and the sandbox's request
+ * revision when it did (`SandboxView.revision`).
+ */
+export interface SandboxWakeFailure {
+  readonly message: string;
+  readonly revision: number;
+}
+
+/**
+ * What a sandbox's launch view shows: the stages of a new sandbox, where it
+ * stands, Resume for one the user put away, or why it failed. The sandbox's
+ * own failure retries through its owner. A wake this device asked for that
+ * failed retries the wake, and shows only until the sandbox's next request,
+ * such as a resume asked for elsewhere, which that failure says nothing about.
+ */
+export type SandboxLaunchPanel =
+  | { readonly _tag: "Stages"; readonly current: number }
+  | { readonly _tag: "Status"; readonly label: string }
+  | { readonly _tag: "Resume"; readonly label: string; readonly available: boolean }
+  | { readonly _tag: "Failed"; readonly message: string; readonly retryable: boolean }
+  | {
+      readonly _tag: "WakeFailed";
+      readonly message: string;
+      readonly environmentId: EnvironmentId;
+    };
+
+export function sandboxLaunchPanel(input: {
+  readonly view: Pick<SandboxView, "status" | "revision" | "environmentId">;
+  readonly action: SandboxLaunchAction;
+  readonly wakeFailure: SandboxWakeFailure | null;
+}): SandboxLaunchPanel {
+  const { view, action, wakeFailure } = input;
+  if (view.status._tag === "failed") {
+    return { _tag: "Failed", message: view.status.message, retryable: view.status.retryable };
+  }
+  if (action._tag === "OfferResume") {
+    return {
+      _tag: "Resume",
+      label: SANDBOX_STATUS_LABEL[view.status._tag],
+      available: view.status._tag !== "stopping",
+    };
+  }
+  if (
+    wakeFailure !== null &&
+    wakeFailure.revision === view.revision &&
+    view.environmentId !== null
+  ) {
+    return { _tag: "WakeFailed", message: wakeFailure.message, environmentId: view.environmentId };
+  }
+  const stage = sandboxLaunchStageIndex(view.status);
+  if (stage !== null) return { _tag: "Stages", current: stage };
+  return {
+    _tag: "Status",
+    label:
+      action._tag === "Wake"
+        ? SANDBOX_STATUS_LABEL.resuming
+        : sandboxLaunchStatusLabel(view.status),
+  };
+}
+
+/**
  * A sandbox listed in place of its thread: meant to run, or failed on the
  * way, while none of its environment's threads has reached this client.
  * Every client of the owner derives it from the owner's list.
