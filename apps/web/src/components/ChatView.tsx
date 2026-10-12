@@ -8811,7 +8811,17 @@ export default function ChatView(props: ChatViewProps) {
       serverProjection?.runs.some((run) => run.id === runId && run.status === "queued") ?? true,
     delivery: sendDelivery,
     threadLoading: threadDetailLoading,
-    setError: (message) => setThreadError(activeThread?.id ?? null, message),
+    setError: (threadKey, message) => {
+      if (threadKey === routeThreadKey) {
+        setThreadError(activeThread?.id ?? null, message);
+        return;
+      }
+      // Held work ends on leaving its server thread; the error shows when the user returns.
+      setLocalServerErrorsByThreadKey((existing) => ({
+        ...existing,
+        [threadKey]: { message: sanitizeThreadErrorMessage(message), at: Date.now() },
+      }));
+    },
     run: (work) => {
       switch (work.kind) {
         case "send":
@@ -11921,7 +11931,7 @@ export default function ChatView(props: ChatViewProps) {
                                   setupQueueSendThreadKey === activeThreadKey) ||
                                 isSavingQueuedEdit ||
                                 isResuming ||
-                                heldSandboxWork.held !== null
+                                heldSandboxWork.holding
                               }
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}

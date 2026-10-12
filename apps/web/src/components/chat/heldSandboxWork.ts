@@ -5,7 +5,6 @@ import {
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { PreviewAnnotationPayload, RunId } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
-import { Atom, type AtomRegistry } from "effect/reactivity";
 
 import type { ComposerSubmissionIntent } from "../../composer-logic";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
@@ -31,22 +30,29 @@ export type HeldWork =
   | { readonly kind: "edit-queued"; readonly runId: RunId }
   | { readonly kind: "resume" };
 
-/** One thread's held work. A thread holds at most one. */
+/** How the wake for held work went. */
+export type HeldWake =
+  | { readonly _tag: "waking" }
+  /** The sandbox woke and the thread loaded from it. */
+  | { readonly _tag: "awake"; readonly at: number }
+  /** `message`: why not, as the thread shows it; null when the wake was called off. */
+  | { readonly _tag: "failed"; readonly message: string | null };
+
+/** Work held for the thread on screen. It ends when the user leaves the thread. */
 export interface HeldOperation {
-  /** Tells this hold from a later one for the same thread. */
-  readonly id: number;
+  readonly threadKey: string;
   readonly work: HeldWork;
   /** The composer's prompt when the work was sent; editing it drops a send or an edit. */
   readonly prompt: string;
-  /** When the sandbox woke and the thread loaded; null while it wakes. */
-  readonly awakeAt: number | null;
+  readonly wake: HeldWake;
 }
 
 export type HeldWorkStep =
   /** `until`: when the wait gives up; null while the sandbox wakes, which the wake itself bounds. */
   | { readonly _tag: "wait"; readonly until: number | null }
   | { readonly _tag: "run" }
-  | { readonly _tag: "drop"; readonly message: string };
+  /** `message`: why, for the held work's thread; null when something else already said so. */
+  | { readonly _tag: "drop"; readonly message: string | null };
 
 const RECONNECT_MS = Duration.toMillis(SANDBOX_RECONNECT_TIMEOUT);
 
@@ -67,16 +73,17 @@ const drop = (work: HeldWork, reason: string): HeldWorkStep => ({
 });
 
 /**
- * What held work does on a render of its thread. It runs once its woken
- * sandbox is connected and the thread loaded, as long as the composer still
- * shows what was sent. Anything else that ends it is dropped with why: the
- * message changed, the queued message it edits left the queue, the sandbox
- * fell asleep again, or this device did not reach the woken sandbox within
+ * What held work does on a render of the thread on screen. It runs once its
+ * woken sandbox is connected and the thread loaded, as long as the composer
+ * still shows what was sent. Anything else that ends it is dropped with why:
+ * the user left the thread, the message changed, the sandbox could not wake
+ * or fell asleep again, or this device did not reach the woken sandbox within
  * the reconnect budget.
  */
 export function heldWorkStep(
   held: HeldOperation,
   thread: {
+    readonly threadKey: string;
     readonly promptChanged: boolean;
     /** The queued run the composer edits, if any. */
     readonly editingRunId: RunId | null;
@@ -87,10 +94,14 @@ export function heldWorkStep(
     readonly now: number;
   },
 ): HeldWorkStep {
-  const { work } = held;
+  const { work, wake } = held;
+  if (held.threadKey !== thread.threadKey) {
+    return drop(work, "you left the thread while the sandbox woke.");
+  }
   switch (work.kind) {
     case "edit-queued":
-      if (!thread.editedRunQueued) return drop(work, "the queued message is no longer queued.");
+      // The composer tells the user itself when the queued message it edits leaves the queue.
+      if (!thread.editedRunQueued) return { _tag: "drop", message: null };
       if (thread.editingRunId !== work.runId) {
         return drop(work, "the edit was closed before the sandbox woke.");
       }
@@ -104,59 +115,18 @@ export function heldWorkStep(
     case "resume":
       break;
   }
-  if (held.awakeAt === null) return { _tag: "wait", until: null };
+  switch (wake._tag) {
+    case "waking":
+      return { _tag: "wait", until: null };
+    case "failed":
+      return { _tag: "drop", message: wake.message };
+    case "awake":
+      break;
+  }
   if (thread.delivery === "after-wake") return drop(work, "the sandbox fell asleep again.");
   if (thread.delivery === "now" && !thread.loading) return { _tag: "run" };
-  const until = held.awakeAt + RECONNECT_MS;
+  const until = wake.at + RECONNECT_MS;
   return thread.now < until
     ? { _tag: "wait", until }
     : drop(work, "this device could not reconnect to the sandbox.");
-}
-
-/** Each thread's held work, by thread key. */
-export const heldWorkAtom = Atom.family((_threadKey: string) =>
-  Atom.make<HeldOperation | null>(null).pipe(Atom.keepAlive),
-);
-
-let lastHeldWorkId = 0;
-
-/** Holds `work` for the thread, unless it already holds some; returns the hold, or null. */
-export function holdWork(
-  registry: AtomRegistry.AtomRegistry,
-  threadKey: string,
-  work: HeldWork,
-  prompt: string,
-): HeldOperation | null {
-  const atom = heldWorkAtom(threadKey);
-  if (registry.get(atom) !== null) return null;
-  const held: HeldOperation = { id: ++lastHeldWorkId, work, prompt, awakeAt: null };
-  registry.set(atom, held);
-  return held;
-}
-
-/** Marks hold `id` awake, unless the thread no longer holds it. */
-export function markHeldWorkAwake(
-  registry: AtomRegistry.AtomRegistry,
-  threadKey: string,
-  id: number,
-  now: number,
-): void {
-  registry.update(heldWorkAtom(threadKey), (current) =>
-    current?.id === id ? { ...current, awakeAt: now } : current,
-  );
-}
-
-/**
- * Releases hold `id`. False when the thread no longer holds it, so how it
- * ended was already reported and is not the caller's to report.
- */
-export function releaseHeldWork(
-  registry: AtomRegistry.AtomRegistry,
-  threadKey: string,
-  id: number,
-): boolean {
-  const atom = heldWorkAtom(threadKey);
-  if (registry.get(atom)?.id !== id) return false;
-  registry.set(atom, null);
-  return true;
 }

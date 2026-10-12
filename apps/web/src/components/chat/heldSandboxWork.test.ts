@@ -1,16 +1,7 @@
 import { RunId } from "@t3tools/contracts";
-import { AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  type HeldOperation,
-  type HeldWork,
-  heldWorkAtom,
-  heldWorkStep,
-  holdWork,
-  markHeldWorkAwake,
-  releaseHeldWork,
-} from "./heldSandboxWork";
+import { type HeldOperation, type HeldWork, heldWorkStep } from "./heldSandboxWork";
 
 const RUN = RunId.make("run-queued");
 const SEND: HeldWork = {
@@ -24,15 +15,16 @@ const RESUME: HeldWork = { kind: "resume" };
 
 const AWAKE_AT = 1_000_000;
 const awake = (work: HeldWork): HeldOperation => ({
-  id: 1,
+  threadKey: "env:thread",
   work,
   prompt: "fix the bug",
-  awakeAt: AWAKE_AT,
+  wake: { _tag: "awake", at: AWAKE_AT },
 });
-const waking = (work: HeldWork): HeldOperation => ({ ...awake(work), awakeAt: null });
+const waking = (work: HeldWork): HeldOperation => ({ ...awake(work), wake: { _tag: "waking" } });
 
 /** The thread as it shows once the woken sandbox is connected and loaded. */
 const connected = {
+  threadKey: "env:thread",
   promptChanged: false,
   editingRunId: null,
   editedRunQueued: true,
@@ -83,6 +75,35 @@ describe("heldWorkStep", () => {
     });
   });
 
+  it("drops work whose sandbox could not wake with why, and silently when the wake was called off", () => {
+    const failed = (message: string | null): HeldOperation => ({
+      ...awake(SEND),
+      wake: { _tag: "failed", message },
+    });
+    expect(heldWorkStep(failed("The machine did not start in time."), connected)).toEqual({
+      _tag: "drop",
+      message: "The machine did not start in time.",
+    });
+    expect(heldWorkStep(failed(null), connected)).toEqual({ _tag: "drop", message: null });
+  });
+
+  it("drops work for the thread the user left, saying so on that thread", () => {
+    const elsewhere = { ...connected, threadKey: "env:other-thread" };
+    expect(heldWorkStep(waking(SEND), elsewhere)).toEqual({
+      _tag: "drop",
+      message: "Not sent: you left the thread while the sandbox woke.",
+    });
+    // Even work that could go now, so it never sends to a thread that is no longer on screen.
+    expect(heldWorkStep(awake(EDIT), { ...elsewhere, editingRunId: RUN })).toEqual({
+      _tag: "drop",
+      message: "Not saved: you left the thread while the sandbox woke.",
+    });
+    expect(heldWorkStep(awake(RESUME), elsewhere)).toEqual({
+      _tag: "drop",
+      message: "Not resumed: you left the thread while the sandbox woke.",
+    });
+  });
+
   it.each([
     ["its prompt was edited", { ...connected, promptChanged: true }],
     ["the composer turned to editing a queued message", { ...connected, editingRunId: RUN }],
@@ -100,10 +121,11 @@ describe("heldWorkStep", () => {
   });
 
   it("never turns a queued edit whose run left the queue into a new message", () => {
-    // The composer may already have moved the edit into the thread's own draft.
+    // The composer may already have moved the edit into the thread's own draft, and tells the
+    // user about it itself.
     expect(
       heldWorkStep(awake(EDIT), { ...connected, editingRunId: null, editedRunQueued: false }),
-    ).toEqual({ _tag: "drop", message: "Not saved: the queued message is no longer queued." });
+    ).toEqual({ _tag: "drop", message: null });
   });
 
   it("drops a queued edit whose edit was closed while the sandbox woke", () => {
@@ -117,39 +139,5 @@ describe("heldWorkStep", () => {
     expect(heldWorkStep(awake(RESUME), { ...connected, promptChanged: true })).toEqual({
       _tag: "run",
     });
-  });
-});
-
-describe("held work per thread", () => {
-  it("holds one operation per thread", () => {
-    const registry = AtomRegistry.make();
-    const first = holdWork(registry, "env:one-per-thread", SEND, "first");
-    expect(holdWork(registry, "env:one-per-thread", RESUME, "second")).toBeNull();
-    expect(registry.get(heldWorkAtom("env:one-per-thread"))).toEqual(first);
-  });
-
-  it("leaves another thread's held work alone when one thread's wake ends", () => {
-    const registry = AtomRegistry.make();
-    const a = holdWork(registry, "env:thread-a", SEND, "to a");
-    const b = holdWork(registry, "env:thread-b", SEND, "to b");
-    if (a === null || b === null) throw new Error("both threads hold their work");
-
-    expect(releaseHeldWork(registry, "env:thread-a", a.id)).toBe(true);
-    markHeldWorkAwake(registry, "env:thread-b", b.id, AWAKE_AT);
-
-    expect(registry.get(heldWorkAtom("env:thread-a"))).toBeNull();
-    expect(registry.get(heldWorkAtom("env:thread-b"))).toEqual({ ...b, awakeAt: AWAKE_AT });
-  });
-
-  it("ignores a finished wake of work the thread no longer holds", () => {
-    const registry = AtomRegistry.make();
-    const dropped = holdWork(registry, "env:thread-c", SEND, "first");
-    if (dropped === null) throw new Error("the thread holds its first work");
-    releaseHeldWork(registry, "env:thread-c", dropped.id);
-    const next = holdWork(registry, "env:thread-c", SEND, "second");
-
-    markHeldWorkAwake(registry, "env:thread-c", dropped.id, AWAKE_AT);
-    expect(releaseHeldWork(registry, "env:thread-c", dropped.id)).toBe(false);
-    expect(registry.get(heldWorkAtom("env:thread-c"))).toEqual(next);
   });
 });
