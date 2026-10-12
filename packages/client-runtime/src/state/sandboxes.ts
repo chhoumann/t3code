@@ -35,7 +35,7 @@ import {
 import { createSandboxEnvironmentAtoms, wakesForWork } from "./sandboxCommands.ts";
 import { createEnvironmentSessionAtoms } from "./session.ts";
 
-export { sandboxPresence };
+export { sandboxPresence, wakesForWork };
 export type { SandboxIndexEntry, SandboxPresence };
 
 type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
@@ -69,6 +69,13 @@ export function createSandboxAtoms<R, E>(
       Atom.withLabel(`sandboxes:owner:${owner}`),
     ),
   );
+  /** A sandbox environment's presence, or null for any other environment. */
+  const presenceAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get): SandboxPresence | null => {
+      const sandbox = get(indexAtom).get(environmentId);
+      return sandbox === undefined ? null : sandboxPresence(sandbox.view);
+    }).pipe(Atom.withLabel(`sandboxes:presence:${environmentId}`)),
+  );
   const sessions = createEnvironmentSessionAtoms(runtime);
   /**
    * Whether this client may send work to an environment's threads, read up
@@ -91,6 +98,7 @@ export function createSandboxAtoms<R, E>(
     ownersAtom,
     indexAtom,
     ownerSandboxesAtom,
+    presenceAtom,
     canSendWorkAtom,
     ...createSandboxEnvironmentAtoms(runtime),
   };
