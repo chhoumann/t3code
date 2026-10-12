@@ -33,6 +33,11 @@ import {
   sandboxPresence,
 } from "../sandbox/sandboxRegistrations.ts";
 import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "./runtime.ts";
+import {
   SANDBOX_RECONNECT_TIMEOUT,
   createSandboxEnvironmentAtoms,
   wakesForWork,
@@ -405,8 +410,13 @@ export function sandboxRepositoryFor(
 
 const isSandboxError = Schema.is(SandboxError);
 
-/** A sandbox command's failure in words, naming the actions an API key lacks. */
-export function sandboxFailureMessage(error: unknown): string {
+/**
+ * Why a sandbox command failed, in words, naming the actions an API key
+ * lacks. Null when it succeeded or was interrupted, which needs no word.
+ */
+export function sandboxCommandFailure(result: AtomCommandResult<unknown, unknown>): string | null {
+  if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
+  const error = squashAtomCommandFailure(result);
   if (
     isSandboxError(error) &&
     error.missingActions !== undefined &&

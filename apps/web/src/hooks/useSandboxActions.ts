@@ -1,8 +1,4 @@
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import { sandboxFailureMessage } from "@t3tools/client-runtime/state/sandboxes";
+import { sandboxCommandFailure } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxDesired, SandboxView } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback } from "react";
@@ -36,12 +32,13 @@ export function useSandboxActions() {
         input: { id: sandbox.view.id, desired },
       });
       if (result._tag === "Success") return true;
-      if (!isAtomCommandInterrupted(result)) {
+      const failure = sandboxCommandFailure(result);
+      if (failure !== null) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: DESIRED_FAILURE_TITLE[desired],
-            description: sandboxFailureMessage(squashAtomCommandFailure(result)),
+            description: failure,
           }),
         );
       }

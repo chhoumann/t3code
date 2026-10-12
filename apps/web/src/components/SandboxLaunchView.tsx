@@ -1,13 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   SANDBOX_LAUNCH_STAGES,
   SANDBOX_STATUS_LABEL,
   type SandboxLaunchAction,
-  sandboxFailureMessage,
+  sandboxCommandFailure,
   sandboxLandingThreadId,
   sandboxLaunchAction,
   sandboxLaunchStageIndex,
@@ -150,9 +146,7 @@ function useWakeOnArrival(action: SandboxLaunchAction | null): SandboxWake {
     asked.current = true;
     setFailure(null);
     const result = await wake({ environmentId, input: undefined });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      setFailure(sandboxFailureMessage(squashAtomCommandFailure(result)));
-    }
+    setFailure(sandboxCommandFailure(result));
   };
   const wakeOnArrival = useEffectEvent((environmentId: EnvironmentId) => {
     if (!asked.current) void run(environmentId);

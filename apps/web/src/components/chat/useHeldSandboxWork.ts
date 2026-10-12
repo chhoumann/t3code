@@ -1,8 +1,4 @@
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import type { WorkDelivery } from "@t3tools/client-runtime/state/sandboxes";
+import { type WorkDelivery, sandboxCommandFailure } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, RunId, ScopedThreadRef } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -111,14 +107,7 @@ export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
     input.setError(threadKey, null);
     const wakeSandbox = async (): Promise<HeldWake> => {
       const woke = await wake({ environmentId, input: undefined });
-      if (woke._tag === "Failure") {
-        if (isAtomCommandInterrupted(woke)) return { _tag: "failed", message: null };
-        const error = squashAtomCommandFailure(woke);
-        return {
-          _tag: "failed",
-          message: error instanceof Error ? error.message : "The sandbox could not wake.",
-        };
-      }
+      if (woke._tag === "Failure") return { _tag: "failed", message: sandboxCommandFailure(woke) };
       if (isServerThread && !(await waitForThreadDetail(threadRef, THREAD_LOAD_AFTER_WAKE_MS))) {
         return {
           _tag: "failed",

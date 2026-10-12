@@ -1,11 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   SANDBOX_STATUS_LABEL,
-  sandboxFailureMessage,
+  sandboxCommandFailure,
 } from "@t3tools/client-runtime/state/sandboxes";
 import {
   resolveEnvironmentMachineKind,
@@ -179,12 +175,13 @@ function SandboxOwnerSection(props: {
       environmentId: owner.environmentId,
       input: { id: accountId },
     });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+    const failure = sandboxCommandFailure(result);
+    if (failure !== null) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
           title: `Could not remove ${account.label}`,
-          description: sandboxFailureMessage(squashAtomCommandFailure(result)),
+          description: failure,
         }),
       );
     }
@@ -368,9 +365,8 @@ function SandboxAccountDialog(props: {
       props.onClose();
       return;
     }
-    if (!isAtomCommandInterrupted(result)) {
-      setError(sandboxFailureMessage(squashAtomCommandFailure(result)));
-    }
+    const failure = sandboxCommandFailure(result);
+    if (failure !== null) setError(failure);
   };
 
   return (

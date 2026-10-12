@@ -1,11 +1,7 @@
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   SANDBOX_REPOSITORY_PROBLEM_MESSAGE,
-  sandboxFailureMessage,
+  sandboxCommandFailure,
   sandboxRepositoryFor,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type {
@@ -69,11 +65,7 @@ export function useSandboxLaunch() {
           interactionMode: request.interactionMode,
         },
       });
-      if (result._tag !== "Success") {
-        return isAtomCommandInterrupted(result)
-          ? null
-          : sandboxFailureMessage(squashAtomCommandFailure(result));
-      }
+      if (result._tag !== "Success") return sandboxCommandFailure(result);
       await navigate({
         to: "/sandbox/$environmentId/$sandboxId",
         params: { environmentId: target.ownerEnvironmentId, sandboxId: target.sandboxId },

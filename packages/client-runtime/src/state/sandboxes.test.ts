@@ -10,12 +10,14 @@ import {
   ThreadId,
   type VcsStatusResult,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import { AsyncResult } from "effect/reactivity";
 
 import {
   pendingSandboxThreads,
   sandboxAccountChoices,
-  sandboxFailureMessage,
+  sandboxCommandFailure,
   sandboxLandingThreadId,
   sandboxLaunchAction,
   sandboxLaunchStageIndex,
@@ -402,21 +404,30 @@ describe("sandboxAccountChoices", () => {
   });
 });
 
-describe("sandboxFailureMessage", () => {
+describe("sandboxCommandFailure", () => {
+  const failed = (error: SandboxError) => AsyncResult.failure<unknown, unknown>(Cause.fail(error));
+
   it("names the actions a key lacks", () => {
     const error = new SandboxError({
       code: "key-missing-actions",
       message: "missing",
       missingActions: ["sandbox.resume", "host"],
     });
-    expect(sandboxFailureMessage(error)).toBe(
+    expect(sandboxCommandFailure(failed(error))).toBe(
       "This API key cannot use sandbox.resume, host. Allow those actions for the key, then save again.",
     );
   });
 
   it("passes any other failure's own message through", () => {
     const error = new SandboxError({ code: "account-in-use", message: "Work owns 2 sandboxes." });
-    expect(sandboxFailureMessage(error)).toBe("Work owns 2 sandboxes.");
+    expect(sandboxCommandFailure(failed(error))).toBe("Work owns 2 sandboxes.");
+  });
+
+  it("has nothing to say for a command that succeeded or was interrupted", () => {
+    expect(sandboxCommandFailure(AsyncResult.success<unknown, unknown>(undefined))).toBeNull();
+    expect(
+      sandboxCommandFailure(AsyncResult.failure<unknown, unknown>(Cause.interrupt())),
+    ).toBeNull();
   });
 });
 
