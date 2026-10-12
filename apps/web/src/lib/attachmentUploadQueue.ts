@@ -27,6 +27,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentCatalog } from "../connection/catalog";
 import { assetEnvironment } from "../state/assets";
 import { attachmentEnvironment } from "../state/attachments";
+import { sandboxSleeps } from "../state/sandboxes";
 import { readEnvironmentScope, readPreparedConnection } from "../state/session";
 import type { AttachmentUploadState, ReadyAttachmentUpload } from "./attachmentUploadState";
 
@@ -417,6 +418,8 @@ export function startAttachmentUpload(input: {
   readonly draftTarget?: ComposerThreadTarget;
 }): void {
   if (!readEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope)) return;
+  // A sandbox that sleeps takes no uploads: sending wakes it first, then uploads.
+  if (sandboxSleeps(input.environmentId)) return;
   const existingJob = jobsByImageId.get(input.image.id);
   if (existingJob?.environmentId === input.environmentId) {
     return;

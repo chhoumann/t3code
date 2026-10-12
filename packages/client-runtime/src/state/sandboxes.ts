@@ -1,4 +1,5 @@
 import {
+  AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
   type OrchestrationV2ThreadShell,
@@ -10,6 +11,7 @@ import {
   type ServerSettings,
   type ThreadId,
   type VcsStatusResult,
+  sessionGrantsScope,
 } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import * as DateTime from "effect/DateTime";
@@ -20,16 +22,21 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import type { EnvironmentConnectionPhase } from "../connection/presentation.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import type { EnvironmentProject } from "./models.ts";
 import {
   SandboxRegistrations,
   type SandboxIndexEntry,
+  type SandboxPresence,
   sandboxIndex,
+  sandboxPresence,
 } from "../sandbox/sandboxRegistrations.ts";
-import { createSandboxEnvironmentAtoms } from "./sandboxCommands.ts";
+import { createSandboxEnvironmentAtoms, wakesForWork } from "./sandboxCommands.ts";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 
-export type { SandboxIndexEntry };
+export { sandboxPresence, wakesForWork };
+export type { SandboxIndexEntry, SandboxPresence };
 
 type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
 
@@ -62,7 +69,55 @@ export function createSandboxAtoms<R, E>(
       Atom.withLabel(`sandboxes:owner:${owner}`),
     ),
   );
-  return { ownersAtom, indexAtom, ownerSandboxesAtom, ...createSandboxEnvironmentAtoms(runtime) };
+  /** A sandbox environment's presence, or null for any other environment. */
+  const presenceAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get): SandboxPresence | null => {
+      const sandbox = get(indexAtom).get(environmentId);
+      return sandbox === undefined ? null : sandboxPresence(sandbox.view);
+    }).pipe(Atom.withLabel(`sandboxes:presence:${environmentId}`)),
+  );
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  /**
+   * Whether this client may send work to an environment's threads, read up
+   * front, from the grant `workGrantEnvironmentId` names.
+   */
+  const canSendWorkAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      const result = get(
+        sessions.sessionStateAtom(workGrantEnvironmentId(get(indexAtom), environmentId)),
+      );
+      const session = Option.getOrNull(AsyncResult.value(result));
+      return (
+        result._tag !== "Failure" &&
+        session !== null &&
+        sessionGrantsScope(session, AuthOrchestrationOperateScope)
+      );
+    }).pipe(Atom.withLabel(`sandboxes:can-send-work:${environmentId}`)),
+  );
+  return {
+    ownersAtom,
+    indexAtom,
+    ownerSandboxesAtom,
+    presenceAtom,
+    canSendWorkAtom,
+    ...createSandboxEnvironmentAtoms(runtime),
+  };
+}
+
+/**
+ * The environment whose session says up front whether this client may send
+ * work to `environmentId`. A sandbox that sleeps cannot answer for its
+ * session, so its owner answers until it is back: the owner is what wakes
+ * it, and the sandbox checks the work itself once it runs.
+ */
+export function workGrantEnvironmentId(
+  index: ReadonlyMap<EnvironmentId, SandboxIndexEntry>,
+  environmentId: EnvironmentId,
+): EnvironmentId {
+  const sandbox = index.get(environmentId);
+  return sandbox !== undefined && wakesForWork(sandbox.view)
+    ? sandbox.ownerEnvironmentId
+    : environmentId;
 }
 
 export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
@@ -79,11 +134,26 @@ export const SANDBOX_STATUS_LABEL: Record<SandboxStatus["_tag"], string> = {
 };
 
 /**
- * Asked to stop, or stopped on its own while idle or by the provider. Either
- * way its threads cannot be listed until it resumes.
+ * What a thread of a sandbox shows on its way back from sleep: "Asleep", then
+ * "Waking" while its owner resumes the machine, then "Connecting" until this
+ * device has a socket to it again. Null once connected, and off that path.
  */
-export function isSandboxStopped(view: Pick<SandboxView, "desired" | "status">): boolean {
-  return view.desired === "stopped" || view.status._tag === "stopped";
+export function sandboxWakeLabel(
+  presence: SandboxPresence,
+  phase: EnvironmentConnectionPhase,
+): "Asleep" | "Waking" | "Connecting" | null {
+  switch (presence) {
+    case "asleep":
+      return "Asleep";
+    case "waking":
+      return "Waking";
+    case "running":
+      return phase === "available" || phase === "connecting" || phase === "reconnecting"
+        ? "Connecting"
+        : null;
+    default:
+      return null;
+  }
 }
 
 /** The stages a new sandbox shows before its thread opens, in order. */
@@ -140,13 +210,15 @@ export interface PendingSandboxThread {
  * The sandboxes to list until their thread arrives, newest first. A sandbox
  * stops being pending once its environment lists the thread its launch view
  * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
- * Stopped sandboxes stand in for their threads elsewhere, and deleted ones
- * are gone, so neither is pending.
+ * Put-away sandboxes stand in for their threads under Settings, deleted ones
+ * are gone, and asleep ones list their threads from cache, so none of those
+ * is pending.
  */
-const AWAITING_THREAD: ReadonlySet<SandboxStatus["_tag"]> = new Set([
-  ...SANDBOX_LAUNCH_STAGES,
-  "ready",
-  "resuming",
+const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
+  "launching",
+  "running",
+  "waking",
+  "failed",
 ]);
 
 export function pendingSandboxThreads(
@@ -156,11 +228,7 @@ export function pendingSandboxThreads(
   const pending: PendingSandboxThread[] = [];
   for (const [ownerEnvironmentId, views] of owners) {
     for (const view of views) {
-      const awaited =
-        view.status._tag === "failed"
-          ? view.desired !== "stopped"
-          : view.desired === "running" && AWAITING_THREAD.has(view.status._tag);
-      if (!awaited) continue;
+      if (!AWAITING_THREAD.has(sandboxPresence(view))) continue;
       if (
         view.environmentId !== null &&
         sandboxLandingThreadId(threadsOf(view.environmentId), view.threadId) !== null

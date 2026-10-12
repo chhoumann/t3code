@@ -90,6 +90,7 @@ import {
   TerminalIcon,
   Undo2Icon,
   XIcon,
+  MoonIcon,
 } from "lucide-react";
 import {
   memo,
@@ -1779,6 +1780,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <TooltipPopup side="top">Unsent draft</TooltipPopup>
     </Tooltip>
   ) : null;
+  const asleepIndicator =
+    useAtomValue(sandboxes.presenceAtom(thread.environmentId)) === "asleep" ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              role="img"
+              aria-label="Asleep"
+              className="inline-flex shrink-0 items-center text-muted-foreground"
+            />
+          }
+        >
+          <MoonIcon aria-hidden className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Asleep</TooltipPopup>
+      </Tooltip>
+    ) : null;
   const showPin =
     props.isPinned && (!sortable?.isDragging || (props.dragOverPinned && props.dropVerb === null));
   const pinIndicator = showPin ? (
@@ -1862,6 +1880,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {draftIndicator}
             {title}
             {pinIndicator}
+            {asleepIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
@@ -2209,6 +2228,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <span className="flex-1" />
               )}
+              {asleepIndicator}
               {terminalStatusIcon}
               {prBadge}
               {diff ? (

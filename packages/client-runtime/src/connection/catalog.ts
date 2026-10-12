@@ -75,6 +75,13 @@ export interface ConnectionCatalogEntry {
   readonly alternateRoutes?: ReadonlyArray<ConnectionRoute>;
   /** False when the user switched the environment off: saved, but never connects. */
   readonly enabled: boolean;
+  /**
+   * Set while the environment cannot answer for a known reason, such as a
+   * sandbox whose machine sleeps: it stays in the workspace from its cache,
+   * but nothing dials it. Never persisted; whoever knows the reason sets it
+   * again after each launch.
+   */
+  readonly dormant?: true;
   /** Discovery rejection stays visible while the saved connection is switched off. */
   readonly unsupportedReason?: string;
   /** The rejection came from an outdated host, which can still be updated remotely. */

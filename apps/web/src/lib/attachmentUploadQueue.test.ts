@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   runAtomCommand: vi.fn(),
   readEnvironmentScope: vi.fn(),
   readPreparedConnection: vi.fn(),
+  sandboxSleeps: vi.fn(),
 }));
 
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
@@ -47,6 +48,8 @@ vi.mock("../state/attachments", () => ({
     remove: mocks.removeUpload,
   },
 }));
+
+vi.mock("../state/sandboxes", () => ({ sandboxSleeps: mocks.sandboxSleeps }));
 
 vi.mock("../state/session", () => ({
   readEnvironmentScope: mocks.readEnvironmentScope,
@@ -175,6 +178,7 @@ describe("attachmentUploadQueue", () => {
     mocks.executeAtomQuery.mockResolvedValue({ _tag: "Success", value: {} });
     mocks.runAtomCommand.mockReset();
     mocks.readEnvironmentScope.mockReset().mockReturnValue(true);
+    mocks.sandboxSleeps.mockReset().mockReturnValue(false);
     mocks.readPreparedConnection.mockReset();
     mocks.readPreparedConnection.mockReturnValue({ httpBaseUrl: "https://environment.test/" });
     mocks.runAtomCommand.mockImplementation(
@@ -249,6 +253,24 @@ describe("attachmentUploadQueue", () => {
       expect(TestXmlHttpRequest.requests).toHaveLength(3);
     },
   );
+
+  it("sends nothing to a sandbox that sleeps until it is awake", async () => {
+    const image = makeFile("asleep");
+    mocks.sandboxSleeps.mockImplementation((environmentId) => environmentId === firstEnvironment);
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+    expect(TestXmlHttpRequest.requests).toHaveLength(0);
+    expect(readAttachmentUpload(image.id)).toBeUndefined();
+
+    mocks.sandboxSleeps.mockReturnValue(false);
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+    const settled = awaitAttachmentUploads([image.id]);
+    TestXmlHttpRequest.requests[0]!.complete();
+    await settled;
+    expect(TestXmlHttpRequest.requests).toHaveLength(1);
+    expect(readAttachmentUpload(image.id)?.status).toBe("ready");
+  });
 
   it("does not retry for another environment or after the attachment is removed", async () => {
     const image = makeFile("removed");

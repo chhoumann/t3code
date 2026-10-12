@@ -4,7 +4,7 @@ import {
   SandboxError,
   type SandboxId,
   type SandboxManagedByOwnerError,
-  type SandboxStatus,
+  type SandboxView,
   WS_METHODS,
   isSandboxManagedByOwnerError,
 } from "@t3tools/contracts";
@@ -25,12 +25,12 @@ import {
 } from "./runtime.ts";
 
 /**
- * How long a resume may take to be reported back. A resume takes a minute or
+ * How long a wake may take to be reported back. A resume takes a minute or
  * two; past this the owner may be gone, and the thread's other commands wait
  * behind this one.
  */
 const RESUME_TIMEOUT = Duration.minutes(10);
-/** How long a device may take to reconnect to a sandbox once its owner reports it back. */
+/** How long a device may take to reconnect to a sandbox once its owner reports it awake. */
 const RECONNECT_TIMEOUT = Duration.minutes(2);
 
 /** Sandbox lifecycle commands, run against the environment that owns the sandbox. */
@@ -89,57 +89,61 @@ export const routeSandboxArchive = <A, E, R, B, E2, R2>(input: {
     ),
   );
 
-/** A sandbox in one of these comes back when asked to run; any other state is not a resume. */
-const RESUMABLE: ReadonlySet<string> = new Set(["stopping", "stopped", "resuming"]);
-
-const notBack = (message: string) => new SandboxError({ code: "not-ready", message });
+const notAwake = (message: string) => new SandboxError({ code: "not-ready", message });
 
 /**
- * Resolves once the owner reports the sandbox ready again, and fails once it
- * reports the resume went nowhere. The owner's list may still show the stop
- * the resume follows, so `stopped` ends the wait only after a resume showed.
+ * Resolves once the owner reports the sandbox running again, and fails once
+ * it reports the wake went nowhere. The owner's list may still show the sleep
+ * or failure the wake follows, so those end the wait only once it has shown
+ * the sandbox waking.
  */
 const awaitSandboxBack = (
   registrations: SandboxRegistrations.SandboxRegistrations["Service"],
   sandbox: { readonly ownerEnvironmentId: EnvironmentId; readonly sandboxId: SandboxId },
 ) =>
   SubscriptionRef.changes(registrations.owners).pipe(
-    Stream.map(
-      (owners) =>
-        owners.get(sandbox.ownerEnvironmentId)?.find((view) => view.id === sandbox.sandboxId)
-          ?.status._tag ?? "destroyed",
+    Stream.map((owners) =>
+      owners.get(sandbox.ownerEnvironmentId)?.find((view) => view.id === sandbox.sandboxId),
     ),
     Stream.mapAccum(
       () => false,
       (
-        resumed,
-        tag,
-      ): readonly [boolean, ReadonlyArray<SandboxStatus["_tag"] | "stopped-again">] => [
-        resumed || tag === "resuming",
-        [tag === "stopped" && resumed ? "stopped-again" : tag],
-      ],
+        woke,
+        view,
+      ): readonly [
+        boolean,
+        ReadonlyArray<{ readonly view: SandboxView | undefined; readonly settled: boolean }>,
+      ] => {
+        const presence = view === undefined ? "gone" : SandboxRegistrations.sandboxPresence(view);
+        const nowWoke = woke || presence === "waking";
+        const settled =
+          presence === "running" || presence === "gone" || (nowWoke && presence !== "waking");
+        return [nowWoke, [{ view, settled }]];
+      },
     ),
-    Stream.filter((tag) => !RESUMABLE.has(tag)),
+    Stream.filter(({ settled }) => settled),
     Stream.runHead,
     Effect.timeoutOrElse({
       duration: RESUME_TIMEOUT,
-      orElse: () =>
-        Effect.fail(
-          notBack(
-            "The sandbox was not back within 10 minutes, so the thread stays archived. Unarchive it again once the sandbox runs.",
-          ),
-        ),
+      orElse: () => Effect.fail(notAwake("The sandbox did not wake within 10 minutes.")),
     }),
-    Effect.flatMap((tag) =>
-      Option.getOrUndefined(tag) === "ready"
-        ? Effect.void
-        : Effect.fail(notBack("The sandbox did not come back, so the thread stays archived.")),
-    ),
+    Effect.flatMap((settled) => {
+      const view = Option.getOrUndefined(settled)?.view;
+      if (view === undefined) return Effect.fail(notAwake("The sandbox was deleted."));
+      switch (view.status._tag) {
+        case "ready":
+          return Effect.void;
+        case "failed":
+          return Effect.fail(notAwake(`The sandbox could not wake. ${view.status.message}`));
+        default:
+          return Effect.fail(notAwake("The sandbox stopped again before it woke."));
+      }
+    }),
   );
 
 /**
  * Runs `effect` in the environment once it has a session again, as it does
- * shortly after its sandbox is back.
+ * shortly after its sandbox wakes.
  */
 export const onceConnected = <A, E, R>(
   environmentId: EnvironmentId,
@@ -157,40 +161,84 @@ export const onceConnected = <A, E, R>(
           Effect.timeoutOrElse({ duration: RECONNECT_TIMEOUT, orElse: () => Effect.succeedNone }),
         );
         if (Option.isNone(session)) {
-          return yield* notBack("The sandbox is back, but this device could not reconnect to it.");
+          return yield* notAwake(
+            "The sandbox is awake, but this device could not reconnect to it.",
+          );
         }
         return yield* effect;
       }),
     );
   });
 
+/** Fails at once when the sandbox's owner cannot be asked, since only it can wake the sandbox. */
+const requireOwner = (ownerEnvironmentId: EnvironmentId) =>
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const connected = yield* registry
+      .run(
+        ownerEnvironmentId,
+        EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+          Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.session)),
+          Effect.map(Option.isSome),
+        ),
+      )
+      .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.succeed(false) }));
+    if (connected) return;
+    const owner = (yield* SubscriptionRef.get(registry.entries)).get(ownerEnvironmentId);
+    return yield* notAwake(
+      `${owner?.target.label ?? "The sandbox's owner"} is offline, so it cannot wake this sandbox.`,
+    );
+  });
+
 /**
- * Runs a thread's unarchive in its environment. In a sandbox that is stopped,
- * it asks the sandbox's owner to resume it and waits for it, then runs
- * `whenBack` instead, so the command stays pending until the thread is back.
+ * Whether work sent to a sandbox's environment wakes the sandbox first: it
+ * sleeps, was put away, failed on its way to running, or is already waking.
+ * A sandbox being deleted never wakes.
  */
-export const routeSandboxUnarchive = <A, E, R, A2, E2, R2, B, E3, R3>(input: {
+export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boolean {
+  if (view.desired === "destroyed") return false;
+  const presence = SandboxRegistrations.sandboxPresence(view);
+  return (
+    presence === "asleep" ||
+    presence === "put-away" ||
+    presence === "failed" ||
+    presence === "waking"
+  );
+}
+
+/**
+ * Wakes the sandbox an environment belongs to when work sent to it needs that
+ * (`wakesForWork`): asks the sandbox's owner to run it, unless a resume is
+ * already on its way, then waits for the owner to report it running and for
+ * this device's socket to it. Succeeds with whether it had to wake; any other
+ * environment is left alone.
+ */
+export const wakeSandbox = <B, E, R>(input: {
   readonly environmentId: EnvironmentId;
-  readonly run: Effect.Effect<A, E, R>;
-  readonly whenBack: Effect.Effect<A2, E2, R2>;
-  readonly toOwner: (change: SandboxOwnerChange) => Effect.Effect<B, E3, R3>;
+  readonly toOwner: (change: SandboxOwnerChange) => Effect.Effect<B, E, R>;
 }) =>
   Effect.gen(function* () {
     const registrations = yield* Effect.serviceOption(SandboxRegistrations.SandboxRegistrations);
-    if (Option.isNone(registrations)) return yield* input.run;
+    if (Option.isNone(registrations)) return false;
     const sandbox = SandboxRegistrations.sandboxIndex(
       yield* SubscriptionRef.get(registrations.value.owners),
     ).get(input.environmentId);
-    if (sandbox === undefined || !RESUMABLE.has(sandbox.view.status._tag)) {
-      return yield* input.run;
+    if (sandbox === undefined || !wakesForWork(sandbox.view)) return false;
+    const { status } = sandbox.view;
+    if (status._tag === "failed" && !status.retryable) {
+      return yield* notAwake(`The sandbox could not wake. ${status.message}`);
     }
-    yield* input.toOwner({
-      ownerEnvironmentId: sandbox.ownerEnvironmentId,
-      sandboxId: sandbox.sandboxId,
-      desired: "running",
-    });
+    if (SandboxRegistrations.sandboxPresence(sandbox.view) !== "waking") {
+      yield* requireOwner(sandbox.ownerEnvironmentId);
+      yield* input.toOwner({
+        ownerEnvironmentId: sandbox.ownerEnvironmentId,
+        sandboxId: sandbox.sandboxId,
+        desired: "running",
+      });
+    }
     yield* awaitSandboxBack(registrations.value, sandbox);
-    return yield* input.whenBack;
+    yield* onceConnected(input.environmentId, Effect.void);
+    return true;
   });
 
 /** Runs another command from inside a command's effect, keeping its permission checks. */

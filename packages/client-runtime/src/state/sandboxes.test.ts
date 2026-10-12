@@ -13,15 +13,18 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
-  isSandboxStopped,
   pendingSandboxThreads,
   sandboxAccountChoices,
   sandboxFailureMessage,
   sandboxLandingThreadId,
   sandboxLaunchStageIndex,
+  sandboxPresence,
   sandboxProject,
   sandboxRepositoryFor,
+  sandboxWakeLabel,
+  workGrantEnvironmentId,
 } from "./sandboxes.ts";
+import { sandboxIndex } from "../sandbox/sandboxRegistrations.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const REMOTE = "https://github.com/octocat/Hello-World.git";
@@ -92,18 +95,104 @@ describe("sandboxRepositoryFor", () => {
   });
 });
 
-describe("isSandboxStopped", () => {
-  it("counts a sandbox stopped while idle or by the provider, not only one asked to stop", () => {
+describe("sandboxPresence", () => {
+  it.each([
+    ["running", "running", { _tag: "ready" }],
+    ["asleep", "running", { _tag: "stopped", reason: "external" }],
+    ["asleep", "running", { _tag: "stopping", reason: "idle" }],
+    ["waking", "running", { _tag: "resuming" }],
+    ["put-away", "stopped", { _tag: "ready" }],
+    ["put-away", "stopped", { _tag: "stopped", reason: "requested" }],
+    ["launching", "running", { _tag: "booting" }],
+    [
+      "failed",
+      "running",
+      { _tag: "failed", step: "resume", message: "Boat refused", retryable: true },
+    ],
+    [
+      "failed",
+      "destroyed",
+      { _tag: "failed", step: "destroy", message: "Boat refused", retryable: true },
+    ],
+    ["gone", "destroyed", { _tag: "stopped", reason: "requested" }],
+    ["gone", "stopped", { _tag: "destroying" }],
+  ] as const)("reads %s when it should be %s and is %o", (presence, desired, status) => {
+    expect(sandboxPresence({ desired, status })).toBe(presence);
+  });
+});
+
+describe("sandboxWakeLabel", () => {
+  it.each([
+    ["asleep", "available", "Asleep"],
+    ["waking", "available", "Waking"],
+    ["running", "available", "Connecting"],
+    ["running", "connecting", "Connecting"],
+    ["running", "reconnecting", "Connecting"],
+    ["running", "connected", null],
+    ["running", "offline", null],
+    ["put-away", "available", null],
+    ["failed", "available", null],
+  ] as const)("shows %s while %s as %s", (presence, phase, label) => {
+    expect(sandboxWakeLabel(presence, phase)).toBe(label);
+  });
+});
+
+describe("workGrantEnvironmentId", () => {
+  const SANDBOX_ENVIRONMENT = EnvironmentId.make("environment-sandbox");
+  const index = (desired: SandboxView["desired"], status: SandboxStatus) =>
+    sandboxIndex(
+      new Map([
+        [
+          OWNER,
+          [
+            {
+              id: SandboxId.make("sbx-1"),
+              accountId: SandboxAccountId.make("work"),
+              title: "Fix the flaky test",
+              message: "Fix the flaky test",
+              repository: { remoteUrl: REMOTE, commit: HEAD },
+              threadId: ThreadId.make("thread-seed"),
+              desired,
+              status,
+              environmentId: SANDBOX_ENVIRONMENT,
+              httpBaseUrl: "https://sbx-1.boat.test",
+              createdAt: "2026-10-09T12:00:00.000Z",
+            },
+          ],
+        ],
+      ]),
+    );
+
+  it.each([
+    ["its owner's", "asleep", "running", { _tag: "stopped", reason: "external" }, OWNER],
+    ["its owner's", "waking", "running", { _tag: "resuming" }, OWNER],
+    [
+      "its owner's",
+      "failed on its way back",
+      "running",
+      { _tag: "failed", step: "resume", message: "Boat refused", retryable: true },
+      OWNER,
+    ],
+    ["its own", "running", "running", { _tag: "ready" }, SANDBOX_ENVIRONMENT],
+    [
+      "its own",
+      "being deleted",
+      "destroyed",
+      { _tag: "failed", step: "destroy", message: "Boat refused", retryable: true },
+      SANDBOX_ENVIRONMENT,
+    ],
+  ] as const)(
+    "reads %s grant for work sent to a sandbox that is %s",
+    (_grant, _state, desired, status, expected) => {
+      expect(workGrantEnvironmentId(index(desired, status), SANDBOX_ENVIRONMENT)).toBe(expected);
+    },
+  );
+
+  it("reads an environment's own grant when it is not a sandbox", () => {
+    const remote = EnvironmentId.make("environment-remote");
     expect(
-      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "idle" } }),
-    ).toBe(true);
-    expect(
-      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "external" } }),
-    ).toBe(true);
-    expect(
-      isSandboxStopped({ desired: "stopped", status: { _tag: "stopping", reason: "requested" } }),
-    ).toBe(true);
-    expect(isSandboxStopped({ desired: "running", status: { _tag: "ready" } })).toBe(false);
+      workGrantEnvironmentId(index("running", { _tag: "stopped", reason: "external" }), remote),
+    ).toBe(remote);
   });
 });
 
