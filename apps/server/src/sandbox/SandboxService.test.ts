@@ -596,8 +596,10 @@ describe("SandboxService", () => {
         yield* TestClock.adjust(Duration.hours(1));
         assert.strictEqual(world.resumes.length, 0);
 
-        yield* sandboxes.update({ id, desired: "running" });
-        yield* awaitStatus(id, "ready");
+        const accepted = yield* sandboxes.update({ id, desired: "running" });
+        assert.deepInclude(accepted, { revision: 2, settledRevision: 1 });
+        const resumed = yield* awaitStatus(id, "ready");
+        assert.deepInclude(resumed, { revision: 2, settledRevision: 2 });
         assert.strictEqual(world.resumes.length, 1);
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);

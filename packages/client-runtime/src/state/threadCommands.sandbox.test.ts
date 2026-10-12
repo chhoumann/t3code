@@ -50,7 +50,13 @@ const OWNER = EnvironmentId.make("environment-owner");
 const SANDBOX_ENV = EnvironmentId.make("environment-sandbox");
 const SANDBOX_ID = SandboxId.make("sbx-1");
 
-const sandboxView = (status: SandboxStatus, desired: SandboxView["desired"]): SandboxView => ({
+/** At request `revision`, showing the outcome of `settledRevision`. */
+const sandboxView = (
+  status: SandboxStatus,
+  desired: SandboxView["desired"],
+  revision = 1,
+  settledRevision = revision,
+): SandboxView => ({
   id: SANDBOX_ID,
   accountId: SandboxAccountId.make("work"),
   title: "Fix the bug",
@@ -62,6 +68,8 @@ const sandboxView = (status: SandboxStatus, desired: SandboxView["desired"]): Sa
   },
   threadId: ThreadId.make("thread-seed"),
   desired,
+  revision,
+  settledRevision,
   status,
   environmentId: SANDBOX_ENV,
   httpBaseUrl: "https://sbx-1.boat.test",
@@ -79,8 +87,12 @@ const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function*
   const owners = yield* SubscriptionRef.make<
     ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>
   >(new Map([[OWNER, [initial]]]));
-  const showStatus = (status: SandboxStatus) =>
-    SubscriptionRef.set(owners, new Map([[OWNER, [sandboxView(status, "running")]]]));
+  /** The owner's list once the wake's request, revision 2, shows `status` as the outcome of `settledRevision`. */
+  const showStatus = (status: SandboxStatus, settledRevision = 2) =>
+    SubscriptionRef.set(
+      owners,
+      new Map([[OWNER, [sandboxView(status, "running", 2, settledRevision)]]]),
+    );
   const asked: Array<SandboxUpdateInput> = [];
   const dispatched: Array<OrchestrationV2Command> = [];
   const ownerSession = {
@@ -88,7 +100,7 @@ const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function*
       [WS_METHODS.sandboxesUpdate]: (input: SandboxUpdateInput) =>
         Effect.sync(() => {
           asked.push(input);
-          return sandboxView(initial.status, input.desired);
+          return sandboxView(initial.status, input.desired, 2, 1);
         }),
     },
   } as unknown as RpcSession;
@@ -173,7 +185,7 @@ describe("thread commands in a sandbox", () => {
       yield* Effect.yieldNow;
       expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
 
-      yield* h.showStatus({ _tag: "resuming" });
+      yield* h.showStatus({ _tag: "resuming" }, 1);
       yield* h.showStatus({ _tag: "ready" });
       yield* h.connect;
       const results = yield* Effect.promise(() => Promise.all([first, second]));

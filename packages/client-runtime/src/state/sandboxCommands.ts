@@ -4,6 +4,7 @@ import {
   SandboxError,
   type SandboxId,
   type SandboxManagedByOwnerError,
+  type SandboxStatus,
   type SandboxView,
   WS_METHODS,
   isSandboxManagedByOwnerError,
@@ -91,45 +92,45 @@ export const routeSandboxArchive = <A, E, R, B, E2, R2>(input: {
 
 const notAwake = (message: string) => new SandboxError({ code: "not-ready", message });
 
+/** Statuses a sandbox rests in until it is asked for something else. */
+const OUTCOMES: ReadonlySet<SandboxStatus["_tag"]> = new Set([
+  "ready",
+  "stopped",
+  "failed",
+  "destroyed",
+]);
+
 /**
- * Resolves once the owner reports the sandbox running again, and fails once
- * it reports the wake went nowhere. The owner's list may still show the sleep
- * or failure the wake follows, so those end the wait only once it has shown
- * the sandbox waking.
+ * Resolves once the owner reports the sandbox running as the outcome of the
+ * request `revision` (`SandboxView.revision`), and fails once it reports that
+ * request ended any other way. The owner's list may still show where the
+ * sandbox stood before that request, which never ends the wait.
  */
 const awaitSandboxBack = (
   registrations: SandboxRegistrations.SandboxRegistrations["Service"],
   sandbox: { readonly ownerEnvironmentId: EnvironmentId; readonly sandboxId: SandboxId },
+  revision: number,
 ) =>
   SubscriptionRef.changes(registrations.owners).pipe(
     Stream.map((owners) =>
       owners.get(sandbox.ownerEnvironmentId)?.find((view) => view.id === sandbox.sandboxId),
     ),
-    Stream.mapAccum(
-      () => false,
-      (
-        woke,
-        view,
-      ): readonly [
-        boolean,
-        ReadonlyArray<{ readonly view: SandboxView | undefined; readonly settled: boolean }>,
-      ] => {
-        const presence = view === undefined ? "gone" : SandboxRegistrations.sandboxPresence(view);
-        const nowWoke = woke || presence === "waking";
-        const settled =
-          presence === "running" || presence === "gone" || (nowWoke && presence !== "waking");
-        return [nowWoke, [{ view, settled }]];
-      },
+    Stream.filter(
+      (view) =>
+        view === undefined ||
+        SandboxRegistrations.sandboxPresence(view) === "gone" ||
+        (view.settledRevision >= revision && OUTCOMES.has(view.status._tag)),
     ),
-    Stream.filter(({ settled }) => settled),
     Stream.runHead,
     Effect.timeoutOrElse({
       duration: RESUME_TIMEOUT,
       orElse: () => Effect.fail(notAwake("The sandbox did not wake within 10 minutes.")),
     }),
     Effect.flatMap((settled) => {
-      const view = Option.getOrUndefined(settled)?.view;
-      if (view === undefined) return Effect.fail(notAwake("The sandbox was deleted."));
+      const view = Option.getOrUndefined(settled);
+      if (view === undefined || SandboxRegistrations.sandboxPresence(view) === "gone") {
+        return Effect.fail(notAwake("The sandbox was deleted."));
+      }
       switch (view.status._tag) {
         case "ready":
           return Effect.void;
@@ -213,9 +214,10 @@ export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boo
  * this device's socket to it. Succeeds with whether it had to wake; any other
  * environment is left alone.
  */
-export const wakeSandbox = <B, E, R>(input: {
+export const wakeSandbox = <E, R>(input: {
   readonly environmentId: EnvironmentId;
-  readonly toOwner: (change: SandboxOwnerChange) => Effect.Effect<B, E, R>;
+  /** Asks the owner for the change, succeeding with the sandbox as the owner accepted it. */
+  readonly toOwner: (change: SandboxOwnerChange) => Effect.Effect<SandboxView, E, R>;
 }) =>
   Effect.gen(function* () {
     const registrations = yield* Effect.serviceOption(SandboxRegistrations.SandboxRegistrations);
@@ -228,15 +230,20 @@ export const wakeSandbox = <B, E, R>(input: {
     if (status._tag === "failed" && !status.retryable) {
       return yield* notAwake(`The sandbox could not wake. ${status.message}`);
     }
-    if (SandboxRegistrations.sandboxPresence(sandbox.view) !== "waking") {
-      yield* requireOwner(sandbox.ownerEnvironmentId);
-      yield* input.toOwner({
-        ownerEnvironmentId: sandbox.ownerEnvironmentId,
-        sandboxId: sandbox.sandboxId,
-        desired: "running",
-      });
-    }
-    yield* awaitSandboxBack(registrations.value, sandbox);
+    const revision =
+      SandboxRegistrations.sandboxPresence(sandbox.view) === "waking"
+        ? sandbox.view.revision
+        : yield* requireOwner(sandbox.ownerEnvironmentId).pipe(
+            Effect.andThen(
+              input.toOwner({
+                ownerEnvironmentId: sandbox.ownerEnvironmentId,
+                sandboxId: sandbox.sandboxId,
+                desired: "running",
+              }),
+            ),
+            Effect.map((accepted) => accepted.revision),
+          );
+    yield* awaitSandboxBack(registrations.value, sandbox, revision);
     yield* onceConnected(input.environmentId, Effect.void);
     return true;
   });

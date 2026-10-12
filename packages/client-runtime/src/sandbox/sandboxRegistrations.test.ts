@@ -47,6 +47,8 @@ const view = (
     },
     threadId: ThreadId.make("thread-seed"),
     desired,
+    revision: 1,
+    settledRevision: 1,
     status,
     environmentId,
     httpBaseUrl: environmentId === null ? null : "https://sbx-1.boat.test",

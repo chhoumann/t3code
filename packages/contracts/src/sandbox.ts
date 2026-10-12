@@ -1,6 +1,12 @@
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { GitRemote } from "./git.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
@@ -240,7 +246,14 @@ export const SandboxView = Schema.Struct({
   /** The thread the sandbox starts with, in its own environment. */
   threadId: ThreadId,
   desired: SandboxDesired,
+  /** Counts the changes of `desired`: each is a request the sandbox works toward. */
+  revision: NonNegativeInt,
   status: SandboxStatus,
+  /**
+   * The latest `revision` whose outcome `status` shows. It trails `revision`
+   * while a request is under way.
+   */
+  settledRevision: NonNegativeInt,
   /** Known once the sandbox's T3 server has answered for the first time. */
   environmentId: Schema.NullOr(EnvironmentId),
   httpBaseUrl: Schema.NullOr(Schema.String),

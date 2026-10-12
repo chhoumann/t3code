@@ -29,9 +29,12 @@ const OWNER = EnvironmentId.make("environment-owner");
 const SANDBOX_ENV = EnvironmentId.make("environment-sandbox");
 const SANDBOX_ID = SandboxId.make("sbx-1");
 
+/** At request `revision`, showing the outcome of `settledRevision`. */
 const sandboxView = (
   status: SandboxStatus,
   desired: SandboxView["desired"] = "running",
+  revision = 1,
+  settledRevision = revision,
 ): SandboxView => ({
   id: SANDBOX_ID,
   accountId: SandboxAccountId.make("work"),
@@ -44,7 +47,9 @@ const sandboxView = (
   },
   threadId: ThreadId.make("thread-seed"),
   desired,
+  revision,
   status,
+  settledRevision,
   environmentId: SANDBOX_ENV,
   httpBaseUrl: "https://sbx-1.boat.test",
   createdAt: "2026-10-09T12:00:00.000Z",
@@ -52,8 +57,16 @@ const sandboxView = (
 
 type Owners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
 
-const showStatus = (owners: SubscriptionRef.SubscriptionRef<Owners>, status: SandboxStatus) =>
-  SubscriptionRef.set(owners, new Map([[OWNER, [sandboxView(status)]]]));
+/** The owner's list once the wake's request, revision 2, shows `status` as the outcome of `settledRevision`. */
+const showStatus = (
+  owners: SubscriptionRef.SubscriptionRef<Owners>,
+  status: SandboxStatus,
+  settledRevision = 2,
+) =>
+  SubscriptionRef.set(
+    owners,
+    new Map([[OWNER, [sandboxView(status, "running", 2, settledRevision)]]]),
+  );
 
 const withOwners = (owners: SubscriptionRef.SubscriptionRef<Owners>) =>
   Effect.provideService(
@@ -108,7 +121,12 @@ const makeDevice = (view: SandboxView, options?: { readonly ownerConnected?: boo
     const changes: Array<SandboxOwnerChange> = [];
     const wake = wakeSandbox({
       environmentId: SANDBOX_ENV,
-      toOwner: (change) => Effect.sync(() => void changes.push(change)),
+      // The owner accepts the change as the sandbox's next request.
+      toOwner: (change) =>
+        Effect.sync(() => {
+          changes.push(change);
+          return sandboxView(view.status, change.desired, view.revision + 1, view.settledRevision);
+        }),
     }).pipe(
       withOwners(owners),
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
@@ -164,8 +182,8 @@ describe("wakeSandbox", () => {
         expect(device.changes).toEqual(ownerChange("running"));
 
         // The owner's list still shows the sleep it was asked to end, then the resume.
-        yield* showStatus(device.owners, stopped);
-        yield* showStatus(device.owners, resuming);
+        yield* showStatus(device.owners, stopped, 1);
+        yield* showStatus(device.owners, resuming, 1);
         yield* showStatus(device.owners, ready);
         yield* Effect.yieldNow;
         expect(pending.pollUnsafe()).toBeUndefined();
@@ -176,12 +194,25 @@ describe("wakeSandbox", () => {
 
   it.effect("joins a wake already on its way without asking the owner again", () =>
     Effect.gen(function* () {
-      const device = yield* makeDevice(sandboxView(resuming));
+      const device = yield* makeDevice(sandboxView(resuming, "running", 2, 1));
       const pending = yield* Effect.forkChild(device.wake);
       yield* Effect.yieldNow;
       yield* showStatus(device.owners, ready);
       yield* Effect.yieldNow;
       expect(pending.pollUnsafe()).toBeUndefined();
+      yield* device.connect;
+      expect(yield* Fiber.join(pending)).toBe(true);
+      expect(device.changes).toEqual([]);
+    }),
+  );
+
+  it.effect("waits out a resume nobody asked this owner for until the machine is up", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(resuming, "running", 1, 1));
+      const pending = yield* Effect.forkChild(device.wake);
+      yield* Effect.yieldNow;
+      expect(pending.pollUnsafe()).toBeUndefined();
+      yield* SubscriptionRef.set(device.owners, new Map([[OWNER, [sandboxView(ready)]]]));
       yield* device.connect;
       expect(yield* Fiber.join(pending)).toBe(true);
       expect(device.changes).toEqual([]);
@@ -221,12 +252,12 @@ describe("wakeSandbox", () => {
     }),
   );
 
-  it.effect("fails when the sandbox stops again after it showed waking", () =>
+  it.effect("fails when the owner settles the wake with the sandbox stopped", () =>
     Effect.gen(function* () {
       const device = yield* makeDevice(sandboxView(stopped));
       const pending = yield* Effect.forkChild(Effect.flip(device.wake));
       yield* Effect.yieldNow;
-      yield* showStatus(device.owners, resuming);
+      yield* showStatus(device.owners, resuming, 1);
       yield* showStatus(device.owners, stopped);
       expect(yield* Fiber.join(pending)).toMatchObject({
         _tag: "SandboxError",
@@ -258,7 +289,7 @@ describe("wakeSandbox", () => {
       const device = yield* makeDevice(sandboxView(stopped));
       const pending = yield* Effect.forkChild(Effect.flip(device.wake));
       yield* Effect.yieldNow;
-      yield* showStatus(device.owners, resuming);
+      yield* showStatus(device.owners, resuming, 1);
       yield* showStatus(device.owners, {
         _tag: "failed",
         step: "resume",
@@ -270,6 +301,47 @@ describe("wakeSandbox", () => {
         message: "The sandbox could not wake. The machine did not start in time.",
       });
     }),
+  );
+
+  it.effect("fails with the owner's reason when the wake fails before the machine resumes", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(stopped));
+      const pending = yield* Effect.forkChild(Effect.flip(device.wake));
+      yield* Effect.yieldNow;
+      yield* showStatus(device.owners, {
+        _tag: "failed",
+        step: "observe",
+        message: "Boat could not be reached.",
+        retryable: true,
+      });
+      expect(yield* Fiber.join(pending)).toMatchObject({
+        _tag: "SandboxError",
+        message: "The sandbox could not wake. Boat could not be reached.",
+      });
+    }),
+  );
+
+  it.effect(
+    "asks again after a failed wake, and the earlier failure does not end the new one",
+    () =>
+      Effect.gen(function* () {
+        const earlier: SandboxStatus = {
+          _tag: "failed",
+          step: "resume",
+          message: "The machine did not start in time.",
+          retryable: true,
+        };
+        const device = yield* makeDevice(sandboxView(earlier));
+        const pending = yield* Effect.forkChild(device.wake);
+        yield* Effect.yieldNow;
+        expect(device.changes).toEqual(ownerChange("running"));
+        yield* showStatus(device.owners, earlier, 1);
+        yield* Effect.yieldNow;
+        expect(pending.pollUnsafe()).toBeUndefined();
+        yield* showStatus(device.owners, ready);
+        yield* device.connect;
+        expect(yield* Fiber.join(pending)).toBe(true);
+      }),
   );
 
   it.effect(
