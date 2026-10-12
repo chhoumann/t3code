@@ -4,8 +4,10 @@ import {
   type PendingSandboxThread,
   SANDBOX_STATUS_LABEL,
   sandboxLaunchStatusLabel,
+  sandboxPresence,
 } from "@t3tools/client-runtime/state/sandboxes";
-import { CircleAlertIcon, CircleDashedIcon } from "lucide-react";
+import type { SandboxView } from "@t3tools/contracts";
+import { CircleAlertIcon, CircleDashedIcon, MoonIcon } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -18,9 +20,35 @@ import { deriveProjectIdentity } from "../../projectIdentity";
 import { ProjectMonogram } from "../ProjectMonogram";
 import { animateSidebarLayoutChanges, resolveSidebarRowAccessibility } from "../Sidebar.logic";
 
+/** Where a pending sandbox stands, as its row shows it. */
+function pendingStatus(view: SandboxView) {
+  switch (sandboxPresence(view)) {
+    case "failed":
+      return {
+        label: SANDBOX_STATUS_LABEL.failed,
+        icon: <CircleAlertIcon aria-hidden className="size-4 shrink-0" />,
+        className: "text-error",
+      };
+    case "asleep":
+      return {
+        label: "Asleep",
+        icon: <MoonIcon aria-hidden className="size-3.5 shrink-0" />,
+        className: "text-muted-foreground",
+      };
+    default:
+      return {
+        label: sandboxLaunchStatusLabel(view.status),
+        icon: <CircleDashedIcon aria-hidden className="size-4 shrink-0" />,
+        className: "text-info",
+      };
+  }
+}
+
 /**
- * A launching sandbox, shaped like the thread card that replaces it once the
- * sandbox's environment lists its thread. Opens the sandbox's launch view.
+ * A sandbox whose thread this device has yet to list, shaped like the thread
+ * card that replaces it once the sandbox's environment lists that thread:
+ * one on its way to its first thread, or one asleep that this device never
+ * loaded. Opens the sandbox's launch view.
  * Its icon is the monogram a new project shows until its favicon loads.
  * It sits in the sortable list so dragged rows move around it, but it cannot
  * be picked up.
@@ -42,15 +70,12 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
     animateLayoutChanges: animateSidebarLayoutChanges,
   });
   const projectIdentity = deriveProjectIdentity(props.projectTitle);
-  const failed = pending.view.status._tag === "failed";
-  const statusLabel = failed
-    ? SANDBOX_STATUS_LABEL.failed
-    : sandboxLaunchStatusLabel(pending.view.status);
+  const status = pendingStatus(pending.view);
   // Mirrors a working thread: background progress recedes until it needs the user.
-  const recede = !failed && !props.isActive;
+  const recede = sandboxPresence(pending.view) !== "failed" && !props.isActive;
   const accessibility = resolveSidebarRowAccessibility({
     title: pending.view.title,
-    statusLabel,
+    statusLabel: status.label,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -123,15 +148,11 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
             <span
               className={cn(
                 "ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-medium",
-                failed ? "text-error" : "text-info",
+                status.className,
               )}
             >
-              {failed ? (
-                <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
-              ) : (
-                <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
-              )}
-              <span role="status">{statusLabel}</span>
+              {status.icon}
+              <span role="status">{status.label}</span>
             </span>
           </div>
           <div

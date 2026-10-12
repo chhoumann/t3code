@@ -242,14 +242,15 @@ export interface PendingSandboxThread {
  * The sandboxes to list until their thread arrives, newest first. A sandbox
  * stops being pending once its environment lists the thread its launch view
  * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
- * Put-away sandboxes stand in for their threads under Settings, deleted ones
- * are gone, and asleep ones list their threads from cache, so none of those
- * is pending.
+ * An asleep sandbox lists its threads from cache, so it is pending only on a
+ * device that never loaded them. Put-away sandboxes stand in for their
+ * threads under Settings and deleted ones are gone, so neither is pending.
  */
 const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
   "launching",
   "running",
   "waking",
+  "asleep",
   "failed",
 ]);
 

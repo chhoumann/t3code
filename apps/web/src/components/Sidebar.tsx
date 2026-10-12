@@ -2773,7 +2773,7 @@ export default function Sidebar() {
           ),
     [scopedProjectGroup],
   );
-  // Launching sandboxes stand in for their threads until those arrive, under
+  // Sandboxes stand in for their threads until this device lists those, under
   // the project group and label their threads will show.
   const sandboxOwners = useAtomValue(sandboxes.ownersAtom);
   const pendingSandboxRows = useMemo(() => {

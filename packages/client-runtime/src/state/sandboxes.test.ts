@@ -580,6 +580,16 @@ describe("pendingSandboxThreads", () => {
     expect(ids(pendingSandboxThreads(owners, () => []))).toEqual(["environment-owner/resuming"]);
   });
 
+  it("lists an asleep sandbox only on a device that has yet to load its thread", () => {
+    const asleep = sandbox("asleep", "2026-10-09T12:00:00Z", {
+      status: { _tag: "stopped", reason: "external" },
+      environmentId: SANDBOX_ENVIRONMENT,
+    });
+    const owners = new Map([[OWNER, [asleep]]]);
+    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual(["environment-owner/asleep"]);
+    expect(pendingSandboxThreads(owners, () => [seed(asleep)])).toEqual([]);
+  });
+
   it("orders every owner's sandboxes newest first", () => {
     const otherOwner = EnvironmentId.make("environment-other-owner");
     const owners = new Map([
