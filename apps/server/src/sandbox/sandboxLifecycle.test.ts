@@ -24,6 +24,7 @@ import {
   type SandboxRecord,
 } from "./sandboxLifecycle.ts";
 import {
+  MAX_DEADLINE_SECONDS,
   ProviderMachineId,
   type ProviderMachineSetup,
   type ProviderMachineState,
@@ -150,6 +151,18 @@ const neverStops: SandboxRecord = {
   spec: {
     ...ready.spec,
     machine: { ...ready.spec.machine, stopAfterSeconds: null, ttlSeconds: null },
+  },
+};
+/** Stops after the longest stop time a user can pick, which is as far as the provider holds. */
+const stopsAfterAMonth: SandboxRecord = {
+  ...ready,
+  spec: {
+    ...ready.spec,
+    machine: {
+      ...ready.spec.machine,
+      stopAfterSeconds: 720 * 60 * 60,
+      ttlSeconds: startupTtlSeconds(720 * 60 * 60),
+    },
   },
 };
 const running = observed({ machine: machine("running") });
@@ -586,6 +599,21 @@ const cases: ReadonlyArray<Case> = [
     "a sandbox that never stops is not stopped when idle",
     neverStops,
     watched(null, idleSince(NOW - 10 * STOP_AFTER)),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a working sandbox that stops after a month asks for no stop past what the provider holds",
+    stopsAfterAMonth,
+    watched(null, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + MAX_DEADLINE_SECONDS * 1000 },
+    },
+  ],
+  [
+    "a working sandbox that stops after a month keeps the provider's capped stop for a while",
+    stopsAfterAMonth,
+    watched(NOW + MAX_DEADLINE_SECONDS * 1000 - MINUTE, busy),
     { status: { _tag: "ready" }, action: { _tag: "Watch" } },
   ],
   [

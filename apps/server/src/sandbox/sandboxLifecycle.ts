@@ -28,7 +28,11 @@ import * as Schema from "effect/Schema";
 
 import type { SandboxGuestActivity } from "./sandboxActivity.ts";
 import { SandboxT3Source } from "./sandboxBootScript.ts";
-import type { ProviderMachine, ProviderMachineId } from "./SandboxProvider.ts";
+import {
+  MAX_DEADLINE_SECONDS,
+  type ProviderMachine,
+  type ProviderMachineId,
+} from "./SandboxProvider.ts";
 
 /** Boat replays a create for the same key for 24 hours; stop trusting it an hour early. */
 export const CREATE_KEY_WINDOW_MS = 23 * 60 * 60 * 1000;
@@ -449,7 +453,11 @@ function planReady(
   if (observation.now - idleSince >= stopAfter) {
     return plan({ _tag: "stopping", reason: "idle" }, act("Stop"));
   }
-  const until = idleSince + stopAfter + BACKSTOP_GRACE_MS;
+  // A stop further out than the provider holds would be asked for again on every look.
+  const until = Math.min(
+    idleSince + stopAfter + BACKSTOP_GRACE_MS,
+    observation.now + MAX_DEADLINE_SECONDS * 1000,
+  );
   return machine.archiveAfter === null || machine.archiveAfter < until - BACKSTOP_GRACE_MS / 2
     ? plan(ready, { _tag: "ExtendDeadline", until })
     : plan(ready, act("Watch"));

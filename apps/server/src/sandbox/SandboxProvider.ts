@@ -30,6 +30,9 @@ export interface ProviderMachine {
   readonly archiveAfter: number | null;
 }
 
+/** The furthest a provider's own stop can be set, in seconds: Boat's 30 days. */
+export const MAX_DEADLINE_SECONDS = 30 * 24 * 60 * 60;
+
 export interface SandboxProviderAccount {
   readonly apiKey: Redacted.Redacted<string>;
 }

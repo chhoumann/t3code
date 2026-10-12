@@ -16,6 +16,7 @@ import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
+  MAX_DEADLINE_SECONDS,
   ProviderMachineId,
   SandboxProvider,
   SandboxProviderError,
@@ -123,12 +124,9 @@ function classifyBoatError(input: {
 const shouldRetry = (error: SandboxProviderError) =>
   error.kind === "transient" && (error.operation !== "exec" || error.code === "boat_starting");
 
-/** Boat takes an auto-stop TTL in whole seconds, up to 30 days. */
-const MAX_TTL_SECONDS = 30 * 24 * 60 * 60;
-
-/** A TTL Boat accepts: rounded up, so the machine never stops before it was asked to. */
+/** A TTL Boat accepts, in whole seconds: rounded up, so the machine never stops before it was asked to. */
 const boatTtlSeconds = (seconds: number | null) =>
-  seconds === null ? null : Math.min(MAX_TTL_SECONDS, Math.max(1, Math.ceil(seconds)));
+  seconds === null ? null : Math.min(MAX_DEADLINE_SECONDS, Math.max(1, Math.ceil(seconds)));
 
 const RETRY_SCHEDULE = Schedule.exponential(Duration.millis(500), 2);
 const RETRY_TIMES = 5;
