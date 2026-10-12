@@ -19,7 +19,7 @@ import { isElectron } from "../env";
 import { useSandboxActions } from "../hooks/useSandboxActions";
 import { useEnvironmentThreads } from "../state/entities";
 import { useEnvironment } from "../state/environments";
-import { sandboxes } from "../state/sandboxes";
+import { sandboxShellsAtom, sandboxes } from "../state/sandboxes";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
@@ -48,12 +48,14 @@ export function SandboxLaunchView(props: {
   const environmentId = view?.environmentId ?? null;
   const environment = useEnvironment(environmentId);
   const threads = useEnvironmentThreads(environmentId);
+  const shells = useAtomValue(sandboxShellsAtom);
   const action =
     view === null
       ? null
       : sandboxLaunchAction({
           view,
           landingThreadId: sandboxLandingThreadId(threads, view.threadId),
+          shell: environmentId === null ? null : (shells.get(environmentId) ?? null),
           connected: environment?.connection.phase === "connected",
         });
   useOpenThread(action);

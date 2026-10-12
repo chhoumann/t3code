@@ -29,6 +29,7 @@ import {
   workGrantEnvironmentId,
 } from "./sandboxes.ts";
 import { sandboxIndex } from "../sandbox/sandboxRegistrations.ts";
+import type { EnvironmentShellStatus } from "./shell.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const REMOTE = "https://github.com/octocat/Hello-World.git";
@@ -485,8 +486,30 @@ describe("sandboxLaunchAction", () => {
   };
   const ready = { ...asleep, status: { _tag: "ready" as const } };
 
+  it("wakes an asleep sandbox once this device knows it lists none of its threads", () => {
+    const decide = (shell: EnvironmentShellStatus | null, landingThreadId: ThreadId | null) =>
+      sandboxLaunchAction({ view: asleep, landingThreadId, connected: false, shell });
+    expect([
+      decide(null, null),
+      decide("empty", null),
+      decide("cached", null),
+      decide("synchronizing", null),
+      decide("live", null),
+      decide("cached", LANDING),
+    ]).toEqual([
+      { _tag: "Wake", environmentId: "environment-sandbox" },
+      { _tag: "Asleep" },
+      { _tag: "Wake", environmentId: "environment-sandbox" },
+      { _tag: "Wake", environmentId: "environment-sandbox" },
+      { _tag: "Wake", environmentId: "environment-sandbox" },
+      { _tag: "OpenThread", environmentId: "environment-sandbox", threadId: "thread-seed" },
+    ]);
+  });
+
   it("wakes an asleep sandbox whose thread this device never loaded", () => {
-    expect(sandboxLaunchAction({ view: asleep, landingThreadId: null, connected: false })).toEqual({
+    expect(
+      sandboxLaunchAction({ view: asleep, landingThreadId: null, connected: false, shell: "live" }),
+    ).toEqual({
       _tag: "Wake",
       environmentId: "environment-sandbox",
     });
@@ -495,13 +518,19 @@ describe("sandboxLaunchAction", () => {
         view: { ...asleep, status: { _tag: "stopping", reason: "external" } },
         landingThreadId: null,
         connected: false,
+        shell: "live",
       }),
     ).toEqual({ _tag: "Wake", environmentId: "environment-sandbox" });
   });
 
   it("opens an asleep sandbox's thread from cache without waking it", () => {
     expect(
-      sandboxLaunchAction({ view: asleep, landingThreadId: LANDING, connected: false }),
+      sandboxLaunchAction({
+        view: asleep,
+        landingThreadId: LANDING,
+        connected: false,
+        shell: "live",
+      }),
     ).toEqual({
       _tag: "OpenThread",
       environmentId: "environment-sandbox",
@@ -515,11 +544,21 @@ describe("sandboxLaunchAction", () => {
       desired: "stopped" as const,
       status: { _tag: "stopped" as const, reason: "requested" as const },
     };
-    expect(sandboxLaunchAction({ view: putAway, landingThreadId: null, connected: false })).toEqual(
-      { _tag: "OfferResume" },
-    );
     expect(
-      sandboxLaunchAction({ view: putAway, landingThreadId: LANDING, connected: false }),
+      sandboxLaunchAction({
+        view: putAway,
+        landingThreadId: null,
+        connected: false,
+        shell: "live",
+      }),
+    ).toEqual({ _tag: "OfferResume" });
+    expect(
+      sandboxLaunchAction({
+        view: putAway,
+        landingThreadId: LANDING,
+        connected: false,
+        shell: "live",
+      }),
     ).toEqual({ _tag: "OfferResume" });
   });
 
@@ -529,18 +568,35 @@ describe("sandboxLaunchAction", () => {
         view: { ...asleep, environmentId: null },
         landingThreadId: null,
         connected: false,
+        shell: "live",
       }),
     ).toEqual({ _tag: "OfferResume" });
   });
 
   it("opens a running sandbox's thread once this device is connected and lists it", () => {
-    expect(sandboxLaunchAction({ view: ready, landingThreadId: LANDING, connected: true })).toEqual(
-      { _tag: "OpenThread", environmentId: "environment-sandbox", threadId: "thread-seed" },
-    );
     expect(
-      sandboxLaunchAction({ view: ready, landingThreadId: LANDING, connected: false }),
+      sandboxLaunchAction({
+        view: ready,
+        landingThreadId: LANDING,
+        connected: true,
+        shell: "live",
+      }),
+    ).toEqual({
+      _tag: "OpenThread",
+      environmentId: "environment-sandbox",
+      threadId: "thread-seed",
+    });
+    expect(
+      sandboxLaunchAction({
+        view: ready,
+        landingThreadId: LANDING,
+        connected: false,
+        shell: "live",
+      }),
     ).toEqual({ _tag: "Follow" });
-    expect(sandboxLaunchAction({ view: ready, landingThreadId: null, connected: true })).toEqual({
+    expect(
+      sandboxLaunchAction({ view: ready, landingThreadId: null, connected: true, shell: "live" }),
+    ).toEqual({
       _tag: "Follow",
     });
   });
@@ -556,6 +612,7 @@ describe("sandboxLaunchAction", () => {
           view: { ...asleep, status },
           landingThreadId: null,
           connected: false,
+          shell: "live",
         }),
       ).toEqual({ _tag: "Follow" });
     }
@@ -578,6 +635,7 @@ describe("sandboxLaunchPanel", () => {
     expect([
       sandboxLaunchPanel({ view: view({ _tag: "booting" }), action: follow, wakeFailure: null }),
       sandboxLaunchPanel({ view: view(stopped), action: wake, wakeFailure: null }),
+      sandboxLaunchPanel({ view: view(stopped), action: { _tag: "Asleep" }, wakeFailure: null }),
       sandboxLaunchPanel({ view: view({ _tag: "resuming" }), action: follow, wakeFailure: null }),
       sandboxLaunchPanel({ view: view({ _tag: "ready" }), action: follow, wakeFailure: null }),
       sandboxLaunchPanel({
@@ -593,6 +651,7 @@ describe("sandboxLaunchPanel", () => {
     ]).toEqual([
       { _tag: "Stages", current: 1 },
       { _tag: "Status", label: "Resuming" },
+      { _tag: "Status", label: "Asleep" },
       { _tag: "Status", label: "Resuming" },
       { _tag: "Status", label: "Opening thread" },
       { _tag: "Resume", label: "Stopping", available: false },
@@ -700,14 +759,21 @@ describe("pendingSandboxThreads", () => {
       environmentId: SANDBOX_ENVIRONMENT,
     });
     const owners = new Map([[OWNER, [launching, readyNotSynced]]]);
-    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
-      "environment-owner/launching",
-      "environment-owner/ready",
-    ]);
     expect(
       ids(
-        pendingSandboxThreads(owners, (environmentId) =>
-          environmentId === SANDBOX_ENVIRONMENT ? [seed(readyNotSynced)] : [],
+        pendingSandboxThreads(
+          owners,
+          () => [],
+          () => "live",
+        ),
+      ),
+    ).toEqual(["environment-owner/launching", "environment-owner/ready"]);
+    expect(
+      ids(
+        pendingSandboxThreads(
+          owners,
+          (environmentId) => (environmentId === SANDBOX_ENVIRONMENT ? [seed(readyNotSynced)] : []),
+          () => "live",
         ),
       ),
     ).toEqual(["environment-owner/launching"]);
@@ -720,12 +786,22 @@ describe("pendingSandboxThreads", () => {
     });
     const owners = new Map([[OWNER, [ready]]]);
     const other = { ...seed(ready), id: ThreadId.make("thread-other") };
-    expect(pendingSandboxThreads(owners, () => [seed(ready, { archived: true }), other])).toEqual(
-      [],
-    );
-    expect(ids(pendingSandboxThreads(owners, () => [seed(ready, { archived: true })]))).toEqual([
-      "environment-owner/ready",
-    ]);
+    expect(
+      pendingSandboxThreads(
+        owners,
+        () => [seed(ready, { archived: true }), other],
+        () => "live",
+      ),
+    ).toEqual([]);
+    expect(
+      ids(
+        pendingSandboxThreads(
+          owners,
+          () => [seed(ready, { archived: true })],
+          () => "live",
+        ),
+      ),
+    ).toEqual(["environment-owner/ready"]);
   });
 
   it("keeps a failed sandbox until it is retried or deleted", () => {
@@ -735,10 +811,15 @@ describe("pendingSandboxThreads", () => {
         status: { _tag: "failed", step: "boot", message: "boom", retryable: true },
       });
     const owners = new Map([[OWNER, [failed("running"), failed("destroyed"), failed("stopped")]]]);
-    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
-      "environment-owner/failed-destroyed",
-      "environment-owner/failed-running",
-    ]);
+    expect(
+      ids(
+        pendingSandboxThreads(
+          owners,
+          () => [],
+          () => "live",
+        ),
+      ),
+    ).toEqual(["environment-owner/failed-destroyed", "environment-owner/failed-running"]);
   });
 
   it("leaves out sandboxes that are stopping, stopped, or deleted", () => {
@@ -770,7 +851,15 @@ describe("pendingSandboxThreads", () => {
         ],
       ],
     ]);
-    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual(["environment-owner/resuming"]);
+    expect(
+      ids(
+        pendingSandboxThreads(
+          owners,
+          () => [],
+          () => "live",
+        ),
+      ),
+    ).toEqual(["environment-owner/resuming"]);
   });
 
   it("lists an asleep sandbox only on a device that has yet to load its thread", () => {
@@ -779,8 +868,30 @@ describe("pendingSandboxThreads", () => {
       environmentId: SANDBOX_ENVIRONMENT,
     });
     const owners = new Map([[OWNER, [asleep]]]);
-    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual(["environment-owner/asleep"]);
-    expect(pendingSandboxThreads(owners, () => [seed(asleep)])).toEqual([]);
+    const listed = (
+      shell: EnvironmentShellStatus | null,
+      threads: ReadonlyArray<ReturnType<typeof seed>>,
+    ) =>
+      ids(
+        pendingSandboxThreads(
+          owners,
+          () => threads,
+          () => shell,
+        ),
+      );
+    expect([
+      listed(null, []),
+      listed("empty", []),
+      listed("cached", []),
+      listed("live", []),
+      listed("cached", [seed(asleep)]),
+    ]).toEqual([
+      ["environment-owner/asleep"],
+      [],
+      ["environment-owner/asleep"],
+      ["environment-owner/asleep"],
+      [],
+    ]);
   });
 
   it("orders every owner's sandboxes newest first", () => {
@@ -795,7 +906,15 @@ describe("pendingSandboxThreads", () => {
       ],
       [otherOwner, [sandbox("middle", "2026-10-09T12:00:00Z")]],
     ]);
-    expect(ids(pendingSandboxThreads(owners, () => []))).toEqual([
+    expect(
+      ids(
+        pendingSandboxThreads(
+          owners,
+          () => [],
+          () => "live",
+        ),
+      ),
+    ).toEqual([
       "environment-owner/newest",
       "environment-other-owner/middle",
       "environment-owner/oldest",

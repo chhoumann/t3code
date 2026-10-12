@@ -43,6 +43,7 @@ import {
   wakesForWork,
 } from "./sandboxCommands.ts";
 import { createEnvironmentSessionAtoms } from "./session.ts";
+import type { EnvironmentShellStatus } from "./shell.ts";
 
 export { SANDBOX_RECONNECT_TIMEOUT, sandboxPresence, wakesForWork };
 export type { SandboxIndexEntry, SandboxPresence };
@@ -234,12 +235,21 @@ export function sandboxLandingThreadId(
 }
 
 /**
+ * Whether this device has loaded which of an environment's threads it lists:
+ * at once for one it never registered (null), which lists none until it
+ * connects, and once the shell it cached has loaded for one it did.
+ */
+function threadsLoaded(shell: EnvironmentShellStatus | null): boolean {
+  return shell !== "empty";
+}
+
+/**
  * What a sandbox's launch view does on this device. It opens the thread the
  * sandbox lands on once this device can show it: an asleep sandbox's from
  * cache, since sending to it wakes the sandbox, and a running one's once
  * connected. It wakes an asleep sandbox whose thread this device never
- * loaded, and offers to resume one the user put away. Otherwise it follows
- * the sandbox as its owner reports it.
+ * loaded, and leaves one asleep until it knows that. It offers to resume one
+ * the user put away. Otherwise it follows the sandbox as its owner reports it.
  */
 export type SandboxLaunchAction =
   | {
@@ -248,6 +258,7 @@ export type SandboxLaunchAction =
       readonly threadId: ThreadId;
     }
   | { readonly _tag: "Wake"; readonly environmentId: EnvironmentId }
+  | { readonly _tag: "Asleep" }
   | { readonly _tag: "OfferResume" }
   | { readonly _tag: "Follow" };
 
@@ -255,6 +266,8 @@ export function sandboxLaunchAction(input: {
   readonly view: Pick<SandboxView, "desired" | "status" | "environmentId">;
   /** The thread the sandbox lands on, as this device lists it (`sandboxLandingThreadId`). */
   readonly landingThreadId: ThreadId | null;
+  /** This device's shell of the sandbox's environment; null when it never registered it. */
+  readonly shell: EnvironmentShellStatus | null;
   /** Whether this device has a socket to the sandbox's environment. */
   readonly connected: boolean;
 }): SandboxLaunchAction {
@@ -266,9 +279,10 @@ export function sandboxLaunchAction(input: {
     case "asleep":
       // A wake reaches a sandbox through its environment, which one that slept mid-launch lacks.
       if (environmentId === null) return { _tag: "OfferResume" };
-      return landingThreadId === null
-        ? { _tag: "Wake", environmentId }
-        : { _tag: "OpenThread", environmentId, threadId: landingThreadId };
+      if (landingThreadId !== null) {
+        return { _tag: "OpenThread", environmentId, threadId: landingThreadId };
+      }
+      return threadsLoaded(input.shell) ? { _tag: "Wake", environmentId } : { _tag: "Asleep" };
     case "running":
       return environmentId !== null && landingThreadId !== null && input.connected
         ? { _tag: "OpenThread", environmentId, threadId: landingThreadId }
@@ -330,13 +344,14 @@ export function sandboxLaunchPanel(input: {
   }
   const stage = sandboxLaunchStageIndex(view.status);
   if (stage !== null) return { _tag: "Stages", current: stage };
-  return {
-    _tag: "Status",
-    label:
-      action._tag === "Wake"
-        ? SANDBOX_STATUS_LABEL.resuming
-        : sandboxLaunchStatusLabel(view.status),
-  };
+  switch (action._tag) {
+    case "Wake":
+      return { _tag: "Status", label: SANDBOX_STATUS_LABEL.resuming };
+    case "Asleep":
+      return { _tag: "Status", label: "Asleep" };
+    default:
+      return { _tag: "Status", label: sandboxLaunchStatusLabel(view.status) };
+  }
 }
 
 /**
@@ -354,8 +369,9 @@ export interface PendingSandboxThread {
  * stops being pending once its environment lists the thread its launch view
  * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
  * An asleep sandbox lists its threads from cache, so it is pending only on a
- * device that never loaded them. Put-away sandboxes stand in for their
- * threads under Settings and deleted ones are gone, so neither is pending.
+ * device that never loaded them, once that device has loaded what it cached.
+ * Put-away sandboxes stand in for their threads under Settings and deleted
+ * ones are gone, so neither is pending.
  */
 const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
   "launching",
@@ -368,16 +384,18 @@ const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
 export function pendingSandboxThreads(
   owners: SandboxOwners,
   threadsOf: (environmentId: EnvironmentId) => ReadonlyArray<LandingCandidate>,
+  /** This device's shell of an environment; null when it never registered it. */
+  shellOf: (environmentId: EnvironmentId) => EnvironmentShellStatus | null,
 ): ReadonlyArray<PendingSandboxThread> {
   const pending: PendingSandboxThread[] = [];
   for (const [ownerEnvironmentId, views] of owners) {
     for (const view of views) {
-      if (!AWAITING_THREAD.has(sandboxPresence(view))) continue;
-      if (
-        view.environmentId !== null &&
-        sandboxLandingThreadId(threadsOf(view.environmentId), view.threadId) !== null
-      ) {
-        continue;
+      const presence = sandboxPresence(view);
+      if (!AWAITING_THREAD.has(presence)) continue;
+      const { environmentId } = view;
+      if (environmentId !== null) {
+        if (sandboxLandingThreadId(threadsOf(environmentId), view.threadId) !== null) continue;
+        if (presence === "asleep" && !threadsLoaded(shellOf(environmentId))) continue;
       }
       pending.push({ ownerEnvironmentId, view });
     }

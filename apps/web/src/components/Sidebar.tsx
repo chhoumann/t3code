@@ -149,7 +149,7 @@ import {
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import { useSandboxActions } from "../hooks/useSandboxActions";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { sandboxes } from "../state/sandboxes";
+import { sandboxShellsAtom, sandboxes } from "../state/sandboxes";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -2776,11 +2776,15 @@ export default function Sidebar() {
   // Sandboxes stand in for their threads until this device lists those, under
   // the project group and label their threads will show.
   const sandboxOwners = useAtomValue(sandboxes.ownersAtom);
+  const sandboxShells = useAtomValue(sandboxShellsAtom);
   const pendingSandboxRows = useMemo(() => {
-    const pending = pendingSandboxThreads(sandboxOwners, (environmentId) =>
-      threads
-        .filter((thread) => thread.environmentId === environmentId)
-        .map((thread) => thread.source),
+    const pending = pendingSandboxThreads(
+      sandboxOwners,
+      (environmentId) =>
+        threads
+          .filter((thread) => thread.environmentId === environmentId)
+          .map((thread) => thread.source),
+      (environmentId) => sandboxShells.get(environmentId) ?? null,
     );
     if (pending.length === 0) return EMPTY_PENDING_SANDBOX_ROWS;
     const rows = new Map<string, PendingSandboxRowData>();
@@ -2805,6 +2809,7 @@ export default function Sidebar() {
     projectGroupingSettings.sidebarProjectGroupingMode,
     projectGroups,
     sandboxOwners,
+    sandboxShells,
     scopedProjectGroup,
     threads,
   ]);
