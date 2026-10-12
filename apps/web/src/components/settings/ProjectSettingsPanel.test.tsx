@@ -77,6 +77,7 @@ vi.mock("~/state/entities", () => ({
   useProjects: () => state.projects,
   useThreadShells: () => [],
 }));
+vi.mock("~/state/sandboxes", () => ({ sandboxes: { templates: vi.fn() } }));
 vi.mock("~/state/projects", () => ({
   projectEnvironment: { update: "update", delete: "delete" },
 }));
@@ -211,7 +212,10 @@ const environments = [primaryId, remoteId].map((environmentId) => ({
   environmentId,
   label: environmentId,
   connection: { phase: "connected" },
-  serverConfig: { keybindings: DEFAULT_RESOLVED_KEYBINDINGS },
+  serverConfig: {
+    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+    environment: { capabilities: { sandboxes: false } },
+  },
 }));
 const session = (scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSessionState => ({
   authenticated: true,

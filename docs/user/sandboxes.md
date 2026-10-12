@@ -14,6 +14,12 @@ account. The key and any environment variable values stay in that
 environment's secret store, not in its settings. You can add more than one
 account, such as a personal and a work account.
 
+In the project's settings, use **Sandboxes** to choose a template for each
+account. The template menu lists the selected account's ready Boat snapshots.
+You can also override the account's machine size and stop time there.
+These defaults apply to new sandboxes for every checkout of that repository.
+Reset them to use the account defaults and start without a template.
+
 Environment variables reach T3 Code and the agents in the sandbox, so this is
 where a provider API key goes. Mark a variable **Setup only** to give it to the
 machine setup script alone and keep it out of the agents' environment. This is
@@ -39,7 +45,7 @@ automatically.
 ## Stop, resume, and delete
 
 Archiving a sandbox's last active thread stops the sandbox, and unarchiving one
-of its threads resumes it. A sandbox also stops on its own after the account's
+of its threads resumes it. A sandbox also stops on its own after its configured
 **Stop after** time. Stopped sandboxes, including ones that stopped on their
 own, are listed in **Settings → Archive** and **Settings → Sandboxes**, where
 you can resume them.

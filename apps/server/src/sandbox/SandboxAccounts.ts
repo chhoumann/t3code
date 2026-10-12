@@ -46,8 +46,6 @@ export interface SandboxAccount extends SandboxProviderAccount {
   }>;
   /** Run on every boot before T3 starts, with the env loaded. Must be idempotent. */
   readonly machineSetupScript: string | null;
-  /** A provider named snapshot to create machines from. */
-  readonly template: string | null;
   /** A provider secret bundle. Null creates machines with no provider-side secrets. */
   readonly providerEnvironment: string | null;
   readonly size: SandboxMachineSize;
@@ -183,7 +181,6 @@ const make = Effect.gen(function* () {
         apiKey: Redacted.make(apiKey.value),
         env,
         machineSetupScript: config.machineSetupScript,
-        template: config.template,
         providerEnvironment: config.providerEnvironment,
         size: config.size,
         stopAfterHours: config.stopAfterHours,
@@ -241,7 +238,6 @@ const make = Effect.gen(function* () {
         const config: SandboxAccountConfig = {
           label: input.label,
           provider: input.provider,
-          template: input.template,
           providerEnvironment: input.providerEnvironment,
           size: input.size,
           stopAfterHours: input.stopAfterHours,

@@ -36,6 +36,15 @@ const BoatSandbox = Schema.Struct({
 });
 type BoatSandbox = typeof BoatSandbox.Type;
 
+const BoatNamedSnapshots = Schema.Struct({
+  snapshots: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      status: Schema.Literals(["saving", "ready", "failed"]),
+    }),
+  ),
+});
+
 const BoatSandboxEnvelope = Schema.Struct({ sandbox: BoatSandbox });
 
 const BoatCommandResult = Schema.Struct({
@@ -297,6 +306,21 @@ const make = Effect.gen(function* () {
       Effect.withSpan("sandbox.boat.check-access"),
     );
 
+  const listTemplates: SandboxProvider["Service"]["listTemplates"] = (account) =>
+    send(
+      "list-templates",
+      account,
+      HttpClientRequest.get("/named-snapshots"),
+      BoatNamedSnapshots,
+    ).pipe(
+      Effect.map((body) =>
+        body.snapshots
+          .filter((snapshot) => snapshot.status === "ready")
+          .map((snapshot) => snapshot.name)
+          .sort(),
+      ),
+    );
+
   const sandboxPath = (id: ProviderMachineId, suffix = "") =>
     `/sandboxes/${encodeURIComponent(id)}${suffix}`;
 
@@ -390,6 +414,7 @@ const make = Effect.gen(function* () {
 
   return SandboxProvider.of({
     checkAccess,
+    listTemplates,
     create,
     inspect,
     exec,

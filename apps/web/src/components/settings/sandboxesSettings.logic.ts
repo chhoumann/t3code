@@ -32,7 +32,6 @@ export interface SandboxAccountDraft {
   readonly size: SandboxMachineSize;
   /** Empty never stops a machine on its own. */
   readonly stopAfterHours: string;
-  readonly template: string;
   readonly providerEnvironment: string;
   readonly machineSetupScript: string;
   readonly env: ReadonlyArray<SandboxEnvDraft>;
@@ -48,7 +47,6 @@ export function sandboxAccountDraft(
     size: account?.size ?? "small",
     stopAfterHours:
       account === null ? "8" : account.stopAfterHours === null ? "" : `${account.stopAfterHours}`,
-    template: account?.template ?? "",
     providerEnvironment: account?.providerEnvironment ?? "",
     machineSetupScript: account?.machineSetupScript ?? "",
     env: (account?.env ?? []).map((entry) => ({
@@ -95,7 +93,6 @@ export function sandboxAccountSaveInput(
       id,
       label,
       provider: "boat",
-      template: nullIfBlank(draft.template),
       providerEnvironment: nullIfBlank(draft.providerEnvironment),
       size: draft.size,
       stopAfterHours,

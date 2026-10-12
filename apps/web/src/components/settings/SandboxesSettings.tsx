@@ -46,6 +46,7 @@ import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { ProjectSandboxSettings } from "./ProjectSandboxSettings";
 import { searchableSetting } from "./settingsSearch";
 import {
   SANDBOX_SIZE_LABELS,
@@ -63,7 +64,7 @@ interface AccountEditor {
 }
 
 export function SandboxesSettings() {
-  const { environments } = useSettingsScope();
+  const { environments, scope } = useSettingsScope();
   const sandboxIndex = useAtomValue(sandboxes.indexAtom);
   // A sandbox runs T3 too, so it serves sandboxes; it is not where the user keeps accounts.
   const owners = environments.filter(
@@ -76,6 +77,17 @@ export function SandboxesSettings() {
   const canSave = useAtomValue(
     sandboxes.saveAccount.permissionAtom(defaultOwner?.environmentId ?? null),
   );
+  const repository =
+    scope.kind === "project" || scope.kind === "checkout"
+      ? scope.members[0]?.repositoryIdentity?.canonicalKey
+      : null;
+  if (repository) {
+    return (
+      <SettingsPageContainer>
+        <ProjectSandboxSettings key={repository} repository={repository} />
+      </SettingsPageContainer>
+    );
+  }
   return (
     <SettingsPageContainer>
       <SettingsSection
@@ -438,14 +450,6 @@ function SandboxAccountDialog(props: {
                 </Field>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Template" htmlFor="sandbox-account-template">
-                  <Input
-                    id="sandbox-account-template"
-                    placeholder="None"
-                    value={draft.template}
-                    onChange={(event) => update({ template: event.target.value })}
-                  />
-                </Field>
                 <Field label="Provider environment" htmlFor="sandbox-account-provider-env">
                   <Input
                     id="sandbox-account-provider-env"

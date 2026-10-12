@@ -37,6 +37,7 @@ const makeWorld = () => {
         world.checkedKeys.push(Redacted.value(account.apiKey));
         return world.missingActions;
       }),
+    listTemplates: unused,
     create: unused,
     inspect: unused,
     exec: unused,
@@ -99,7 +100,6 @@ const input = {
   id: ID,
   label: "Work",
   provider: "boat" as const,
-  template: null,
   providerEnvironment: null,
   size: "small" as const,
   stopAfterHours: 8,

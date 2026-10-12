@@ -10,7 +10,6 @@ const makeKey = () => `row-${keys++}`;
 const saved: SandboxAccountConfig = {
   label: "Work",
   provider: "boat",
-  template: null,
   providerEnvironment: null,
   size: "default",
   stopAfterHours: 4,
@@ -62,12 +61,10 @@ describe("sandboxAccountSaveInput", () => {
         ...sandboxAccountDraft(null, makeKey),
         label: "Personal",
         stopAfterHours: " ",
-        template: "  ",
       }),
     );
     expect(input).toMatchObject({
       stopAfterHours: null,
-      template: null,
       providerEnvironment: null,
       machineSetupScript: null,
     });

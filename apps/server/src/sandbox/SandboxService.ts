@@ -28,6 +28,7 @@ import {
   type SandboxLaunchInput,
   type SandboxView,
 } from "@t3tools/contracts";
+import { resolveSandboxProjectDefaults, sandboxProjectKey } from "@t3tools/shared/sandboxProject";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -51,6 +52,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   SANDBOX_T3_PORT,
   renderSandboxBootScript,
@@ -158,6 +160,12 @@ export const layerT3BuildFromConfig = Layer.effect(
 export class SandboxService extends Context.Service<
   SandboxService,
   {
+    readonly listTemplates: (
+      accountId: SandboxAccountId,
+    ) => Effect.Effect<
+      ReadonlyArray<string>,
+      SandboxAccounts.SandboxAccountNotFoundError | SandboxProviderError
+    >;
     /** Idempotent on `input.id`: a retried launch returns the sandbox the first one made. */
     readonly launch: (
       input: SandboxLaunchInput,
@@ -356,6 +364,7 @@ const make = Effect.gen(function* () {
   const provider = yield* SandboxProvider;
   const guest = yield* SandboxGuest.SandboxGuest;
   const accounts = yield* SandboxAccounts.SandboxAccounts;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const build = yield* SandboxT3Build;
   const ownerEnvironmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
@@ -774,6 +783,12 @@ const make = Effect.gen(function* () {
       yield* accounts.withAccount(input.accountId, (account) =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
+          const defaults = resolveSandboxProjectDefaults(
+            account,
+            (yield* settings.getSettings.pipe(Effect.orDie)).sandboxProjectDefaults[
+              sandboxProjectKey(input.accountId, input.repository.remoteUrl)
+            ],
+          );
           const record: SandboxRecord = {
             id: input.id,
             accountId: input.accountId,
@@ -787,12 +802,12 @@ const make = Effect.gen(function* () {
               runtimeMode: input.runtimeMode,
               interactionMode: input.interactionMode,
               machine: {
-                size: account.size,
+                size: defaults.size,
                 ttlSeconds:
-                  account.stopAfterHours === null
+                  defaults.stopAfterHours === null
                     ? null
-                    : Math.round(account.stopAfterHours * 3600),
-                template: account.template,
+                    : Math.round(defaults.stopAfterHours * 3600),
+                template: defaults.template,
                 providerEnvironment: account.providerEnvironment,
                 setupScript: renderSandboxBootScript({
                   t3: { kind: build.kind, version: build.version },
@@ -922,7 +937,10 @@ const make = Effect.gen(function* () {
       return { environmentId, httpBaseUrl, pairingCredential: Redacted.value(credential) };
     });
 
-  return SandboxService.of({ launch, update, list, subscribe, connect });
+  const listTemplates: SandboxService["Service"]["listTemplates"] = (accountId) =>
+    accounts.get(accountId).pipe(Effect.flatMap(provider.listTemplates));
+
+  return SandboxService.of({ launch, update, list, subscribe, connect, listTemplates });
 });
 
 export const layer = Layer.effect(SandboxService, make);

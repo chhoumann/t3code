@@ -46,6 +46,7 @@ export const RPC_REQUIRED_SCOPES = {
   // Read is enough to ask: the grant it mints carries only the caller's own scopes.
   // Clients call it only to pair a sandbox their owner lists, never from a user action.
   [WS_METHODS.sandboxesConnect]: AuthOrchestrationReadScope,
+  [WS_METHODS.sandboxesListTemplates]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: AuthOrchestrationReadScope,

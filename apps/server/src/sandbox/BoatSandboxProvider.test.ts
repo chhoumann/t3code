@@ -65,6 +65,46 @@ const run = <A, E>(
 };
 
 describe("BoatSandboxProvider", () => {
+  it.effect("lists only ready templates in name order using the selected account", () =>
+    Effect.gen(function* () {
+      const { exit, seen } = yield* run(
+        [
+          () =>
+            new Response(
+              JSON.stringify({
+                snapshots: [
+                  { name: "zeta", status: "ready" },
+                  { name: "saving-template", status: "saving" },
+                  { name: "alpha", status: "ready" },
+                  { name: "failed-template", status: "failed" },
+                ],
+              }),
+            ),
+        ],
+        (provider) => provider.listTemplates({ apiKey: Redacted.make("selected-account-key") }),
+      );
+      expect(exit._tag === "Success" && exit.value).toEqual(["alpha", "zeta"]);
+      expect(seen[0]).toMatchObject({
+        method: "GET",
+        url: "https://boat.dev/api/v1/named-snapshots",
+        headers: { authorization: "Bearer selected-account-key" },
+      });
+    }),
+  );
+
+  it.effect("reports a template permission failure instead of an empty list", () =>
+    Effect.gen(function* () {
+      const { exit, seen } = yield* run([() => boatError(403, "action_not_allowed")], (provider) =>
+        provider.listTemplates(account).pipe(Effect.flip),
+      );
+      expect(exit._tag === "Success" && exit.value).toMatchObject({
+        operation: "list-templates",
+        kind: "missing-scope",
+      });
+      expect(seen).toHaveLength(1);
+    }),
+  );
+
   it.effect("retries a create through Boat outages with the same idempotency key", () =>
     Effect.gen(function* () {
       const { exit, seen } = yield* run(

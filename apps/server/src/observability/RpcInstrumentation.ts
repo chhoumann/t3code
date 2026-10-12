@@ -83,6 +83,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverReportHostPowerState]: "server",
   [WS_METHODS.serverGetBackgroundPolicy]: "server",
   [WS_METHODS.sandboxesSubscribe]: "sandboxes",
+  [WS_METHODS.sandboxesListTemplates]: "sandboxes",
   [WS_METHODS.sandboxesLaunch]: "sandboxes",
   [WS_METHODS.sandboxesUpdate]: "sandboxes",
   [WS_METHODS.sandboxesConnect]: "sandboxes",

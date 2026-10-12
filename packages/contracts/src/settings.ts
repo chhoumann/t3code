@@ -18,7 +18,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
-import { SandboxAccountConfig, SandboxAccountId } from "./sandbox.ts";
+import { SandboxAccountConfig, SandboxAccountId, SandboxProjectDefaults } from "./sandbox.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1294,6 +1294,10 @@ export const ServerSettings = Schema.Struct({
   sandboxAccounts: Schema.Record(SandboxAccountId, SandboxAccountConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Repository/account bindings, keyed by sandboxProjectKey on the owning environment. */
+  sandboxProjectDefaults: Schema.Record(Schema.String, SandboxProjectDefaults).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /** Allows this server to read the Cursor CLI's macOS Keychain login for account usage. */
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
@@ -1486,6 +1490,10 @@ export const ServerSettingsPatch = Schema.Struct({
    */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
+  ),
+  /** Replaces each named binding; null removes it and restores account defaults. */
+  sandboxProjectDefaults: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(SandboxProjectDefaults)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),

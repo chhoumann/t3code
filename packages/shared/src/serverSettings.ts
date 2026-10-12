@@ -271,6 +271,7 @@ export function applyServerSettingsPatch(
     usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
+    sandboxProjectDefaults: sandboxProjectDefaultsPatch,
     // Already translated into `projectSettingsOverrides` above; the legacy
     // maps are derived views and must never be merged directly.
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
@@ -370,6 +371,14 @@ export function applyServerSettingsPatch(
     // Host replacement: deepMerge would keep a cleared account pin.
     ...(patch.github?.hosts !== undefined
       ? { github: { ...next.github, hosts: patch.github.hosts } }
+      : {}),
+    ...(sandboxProjectDefaultsPatch !== undefined
+      ? {
+          sandboxProjectDefaults: mergeSettingsEntries(
+            current.sandboxProjectDefaults,
+            sandboxProjectDefaultsPatch,
+          ),
+        }
       : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {

@@ -61,6 +61,7 @@ import * as SandboxAccounts from "../src/sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "../src/sandbox/SandboxGuest.ts";
 import { ProviderMachineId, SandboxProvider } from "../src/sandbox/SandboxProvider.ts";
 import * as SandboxService from "../src/sandbox/SandboxService.ts";
+import * as ServerSettings from "../src/serverSettings.ts";
 
 const { values: flags } = NodeUtil.parseArgs({
   options: {
@@ -689,6 +690,7 @@ const program = Effect.gen(function* () {
     Effect.scoped,
     Effect.provide(
       SandboxService.layer.pipe(
+        Layer.provide(ServerSettings.layerTest()),
         Layer.provide(
           Layer.succeed(SandboxService.SandboxT3Build, {
             kind: "tarball",

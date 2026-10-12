@@ -8,6 +8,7 @@ import {
   type SandboxStatus,
   type SandboxView,
 } from "@t3tools/contracts";
+import { sandboxProjectKey } from "@t3tools/shared/sandboxProject";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -22,6 +23,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
@@ -45,7 +47,9 @@ const makeWorld = () => {
   const machineByKey = new Map<string, ProviderMachineId>();
   const world = {
     machines,
+    templateKeys: [] as Array<string>,
     createKeys: [] as Array<string>,
+    createInputs: [] as Array<Parameters<SandboxProvider["Service"]["create"]>[1]>,
     resumes: 0,
     credentialRefreshes: 0,
     managedMarkers: [] as Array<ManagedSandboxMarker>,
@@ -71,9 +75,16 @@ const makeWorld = () => {
 
   const provider = SandboxProvider.of({
     checkAccess: () => Effect.succeed([]),
+    listTemplates: (account) =>
+      Effect.sync(() => {
+        const key = Redacted.value(account.apiKey);
+        world.templateKeys.push(key);
+        return [`${key}-template`];
+      }),
     create: (_account, input) =>
       Effect.gen(function* () {
         world.createKeys.push(input.idempotencyKey);
+        world.createInputs.push(input);
         const failure = world.failNextCreate;
         if (failure !== null) {
           world.failNextCreate = null;
@@ -186,11 +197,20 @@ const makeWorld = () => {
             { name: "TAILSCALE_AUTH_KEY", value: Redacted.make("tskey"), setupOnly: true },
           ],
           machineSetupScript: null,
-          template: null,
           providerEnvironment: null,
           size: "small",
           // One minute, so a machine stopped by the first watch is past its TTL.
           stopAfterHours: 1 / 60,
+        },
+        {
+          id: SandboxAccountId.make("boat-personal"),
+          provider: "boat",
+          apiKey: Redacted.make("personal-key"),
+          env: [],
+          machineSetupScript: null,
+          providerEnvironment: null,
+          size: "default",
+          stopAfterHours: 2,
         },
       ]),
     ),
@@ -204,6 +224,7 @@ const makeWorld = () => {
       }),
     ),
     Layer.provide(NodeCrypto.layer),
+    Layer.provideMerge(ServerSettings.layerTest()),
   );
 
   /** Starts the service in its own scope over the test's database; closing the scope is a crash. */
@@ -268,6 +289,70 @@ const advanceUntil = <A, E, R>(awaited: Effect.Effect<A, E, R>, step: Duration.I
   });
 
 describe("SandboxService", () => {
+  it.effect("lists templates from the requested account and refuses unknown accounts", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        assert.deepStrictEqual(yield* sandboxes.listTemplates(ACCOUNT_ID), ["boat-key-template"]);
+        assert.deepStrictEqual(
+          yield* sandboxes.listTemplates(SandboxAccountId.make("boat-personal")),
+          ["personal-key-template"],
+        );
+        const error = yield* sandboxes
+          .listTemplates(SandboxAccountId.make("missing"))
+          .pipe(Effect.flip);
+        assert.strictEqual(error._tag, "SandboxAccountNotFoundError");
+        assert.deepStrictEqual(world.templateKeys, ["boat-key", "personal-key"]);
+        assert.deepStrictEqual(world.createKeys, []);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "uses different project templates with one shared account and freezes each launch",
+    () =>
+      Effect.gen(function* () {
+        const { world, start } = makeWorld();
+        const started = yield* start;
+        yield* Effect.gen(function* () {
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const key = sandboxProjectKey(ACCOUNT_ID, launchInput("project-a").repository.remoteUrl);
+          yield* settings.updateSettings({
+            sandboxProjectDefaults: {
+              [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 2 },
+            },
+          });
+          const sandboxes = yield* service;
+          yield* sandboxes.launch(launchInput("project-a"));
+          yield* awaitStatus("project-a", "ready");
+          yield* sandboxes.launch({
+            ...launchInput("project-b"),
+            repository: {
+              remoteUrl: "https://github.com/octocat/website.git",
+              commit: null,
+            },
+          });
+          yield* awaitStatus("project-b", "ready");
+          assert.strictEqual(world.createInputs[0]?.template, "quickadd-dev");
+          assert.strictEqual(world.createInputs[0]?.size, "large");
+          assert.strictEqual(world.createInputs[0]?.ttlSeconds, 7200);
+          assert.strictEqual(world.createInputs[1]?.template, null);
+          assert.strictEqual(world.createInputs[1]?.size, "small");
+          assert.strictEqual(world.createInputs[1]?.ttlSeconds, 60);
+          assert.deepStrictEqual(world.bootEnvFiles[0], world.bootEnvFiles[1]);
+          yield* settings.updateSettings({
+            sandboxProjectDefaults: { [key]: { template: "updated" } },
+          });
+          yield* sandboxes.launch(launchInput("project-a"));
+          assert.strictEqual(world.createInputs.length, 2);
+        }).pipe(Effect.provide(started.context));
+        yield* Scope.close(started.scope, Exit.void);
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
   it.effect(
     "replays a create interrupted before its machine id was stored once, with the same key",
     () =>

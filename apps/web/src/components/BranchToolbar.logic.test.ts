@@ -895,7 +895,6 @@ describe("deriveSandboxRunChoices", () => {
   const account = (label: string): SandboxAccountConfig => ({
     label,
     provider: "boat",
-    template: null,
     providerEnvironment: null,
     size: "small",
     stopAfterHours: 8,

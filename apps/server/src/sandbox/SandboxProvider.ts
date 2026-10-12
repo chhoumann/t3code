@@ -54,6 +54,7 @@ export interface ExecResult {
 
 export const SandboxProviderOperation = Schema.Literals([
   "check-access",
+  "list-templates",
   "create",
   "inspect",
   "exec",
@@ -112,6 +113,10 @@ export class SandboxProvider extends Context.Service<
      * take, in the provider's own names. Changes nothing on the account.
      */
     readonly checkAccess: (
+      account: SandboxProviderAccount,
+    ) => Effect.Effect<ReadonlyArray<string>, SandboxProviderError>;
+    /** Names of templates that are ready to launch. */
+    readonly listTemplates: (
       account: SandboxProviderAccount,
     ) => Effect.Effect<ReadonlyArray<string>, SandboxProviderError>;
     readonly create: (

@@ -18,7 +18,11 @@ import { AsyncResult, type Atom, type AtomRegistry } from "effect/reactivity";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
-import { type AtomCommand, createEnvironmentRpcCommand } from "./runtime.ts";
+import {
+  type AtomCommand,
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+} from "./runtime.ts";
 
 /**
  * How long a resume may take to be reported back. A resume takes a minute or
@@ -34,6 +38,11 @@ export function createSandboxEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, E>,
 ) {
   return {
+    templates: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:sandbox:templates",
+      tag: WS_METHODS.sandboxesListTemplates,
+      staleTimeMs: 30_000,
+    }),
     launch: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:sandbox:launch",
       tag: WS_METHODS.sandboxesLaunch,

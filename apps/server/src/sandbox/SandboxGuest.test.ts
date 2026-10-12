@@ -128,6 +128,7 @@ describe("SandboxGuest", () => {
           SandboxProvider,
           SandboxProvider.of({
             checkAccess: unused,
+            listTemplates: unused,
             create: unused,
             inspect: unused,
             exec: () => Effect.succeed({ exitCode: 128, stdout: "", stderr, timedOut: false }),

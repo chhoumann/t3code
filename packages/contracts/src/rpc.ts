@@ -23,6 +23,7 @@ import {
 } from "./providerSetup.ts";
 import {
   SandboxAccountConfig,
+  SandboxAccountId,
   SandboxAccountRemoveInput,
   SandboxAccountSaveInput,
   SandboxConnectInput,
@@ -529,6 +530,7 @@ export const WS_METHODS = {
 
   // Sandboxes this environment owns
   sandboxesSubscribe: "sandboxes.subscribe",
+  sandboxesListTemplates: "sandboxes.listTemplates",
   sandboxesLaunch: "sandboxes.launch",
   sandboxesUpdate: "sandboxes.update",
   sandboxesConnect: "sandboxes.connect",
@@ -1817,6 +1819,12 @@ const WsSandboxesSubscribeRpc = Rpc.make(WS_METHODS.sandboxesSubscribe, {
   stream: true,
 });
 
+const WsSandboxesListTemplatesRpc = Rpc.make(WS_METHODS.sandboxesListTemplates, {
+  payload: Schema.Struct({ accountId: SandboxAccountId }),
+  success: Schema.Array(Schema.String),
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
 /** Idempotent on `id`. */
 const WsSandboxesLaunchRpc = Rpc.make(WS_METHODS.sandboxesLaunch, {
   payload: SandboxLaunchInput,
@@ -1964,6 +1972,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsSandboxesSubscribeRpc,
+  WsSandboxesListTemplatesRpc,
   WsSandboxesLaunchRpc,
   WsSandboxesUpdateRpc,
   WsSandboxesConnectRpc,

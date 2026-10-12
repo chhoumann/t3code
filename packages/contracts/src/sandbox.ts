@@ -85,6 +85,15 @@ export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
 export const SandboxMachineSize = Schema.Literals(["small", "default", "large", "xlarge"]);
 export type SandboxMachineSize = typeof SandboxMachineSize.Type;
 
+export const SandboxProjectDefaults = Schema.Struct({
+  template: Schema.NullOr(TrimmedNonEmptyString),
+  /** Omitted inherits the account's default. */
+  size: Schema.optionalKey(SandboxMachineSize),
+  /** Omitted inherits the account; null never stops automatically. */
+  stopAfterHours: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0)))),
+});
+export type SandboxProjectDefaults = typeof SandboxProjectDefaults.Type;
+
 /** A shell identifier, since the machine's env file is sourced by bash and systemd. */
 export const SandboxEnvName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/));
 export type SandboxEnvName = typeof SandboxEnvName.Type;
@@ -92,8 +101,6 @@ export type SandboxEnvName = typeof SandboxEnvName.Type;
 const SandboxAccountFields = {
   label: TrimmedNonEmptyString,
   provider: Schema.Literal("boat"),
-  /** A provider named snapshot machines start from. */
-  template: Schema.NullOr(TrimmedNonEmptyString),
   /** A provider secret bundle; null creates machines with no provider-side secrets. */
   providerEnvironment: Schema.NullOr(TrimmedNonEmptyString),
   size: SandboxMachineSize,

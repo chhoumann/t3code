@@ -478,6 +478,10 @@
     "./PtyAdapter": {
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
+    },
+    "./sandboxProject": {
+      "types": "./src/sandboxProject.ts",
+      "import": "./src/sandboxProject.ts"
     }
   },
   "scripts": {

@@ -2056,6 +2056,8 @@ const layerWsRpc = (
           ),
         [WS_METHODS.sandboxesSubscribe]: (_input) =>
           sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesListTemplates]: (input) =>
+          sandboxes.listTemplates(input.accountId).pipe(Effect.mapError(toSandboxError)),
         [WS_METHODS.sandboxesLaunch]: (input) =>
           sandboxes.launch(input).pipe(Effect.mapError(toSandboxError)),
         [WS_METHODS.sandboxesUpdate]: (input) =>

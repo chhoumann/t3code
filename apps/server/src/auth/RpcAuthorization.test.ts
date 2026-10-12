@@ -412,6 +412,7 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
 describe("sandbox RPC authorization", () => {
   const tested = [
     WS_METHODS.sandboxesSubscribe,
+    WS_METHODS.sandboxesListTemplates,
     WS_METHODS.sandboxesLaunch,
     WS_METHODS.sandboxesUpdate,
     WS_METHODS.sandboxesConnect,
@@ -442,7 +443,6 @@ describe("sandbox RPC authorization", () => {
   const account = {
     label: "Work",
     provider: "boat" as const,
-    template: null,
     providerEnvironment: null,
     size: "small" as const,
     stopAfterHours: 8,
@@ -458,6 +458,9 @@ describe("sandbox RPC authorization", () => {
           Layer.mergeAll(
             group.toLayerHandler(WS_METHODS.sandboxesSubscribe, () =>
               Stream.fromEffect(record("subscribe").pipe(Effect.as([view]))),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesListTemplates, () =>
+              record("listTemplates").pipe(Effect.as(["quickadd-dev"])),
             ),
             group.toLayerHandler(WS_METHODS.sandboxesLaunch, () =>
               record("launch").pipe(Effect.as(view)),
@@ -484,6 +487,7 @@ describe("sandbox RPC authorization", () => {
       );
       const calls = {
         subscribe: client[WS_METHODS.sandboxesSubscribe]({}).pipe(Stream.runCollect),
+        listTemplates: client[WS_METHODS.sandboxesListTemplates]({ accountId }),
         launch: client[WS_METHODS.sandboxesLaunch]({
           id,
           accountId,
@@ -512,6 +516,7 @@ describe("sandbox RPC authorization", () => {
       const { calls, handled } = yield* connect([AuthOrchestrationReadScope]);
       yield* calls.subscribe;
       yield* calls.connect;
+      expect(yield* calls.listTemplates).toEqual(["quickadd-dev"]);
       for (const call of [calls.launch, calls.update]) {
         expect(yield* Effect.flip(call)).toMatchObject({
           requiredPermission: AuthOrchestrationOperateScope,
@@ -522,7 +527,7 @@ describe("sandbox RPC authorization", () => {
           requiredPermission: AuthSettingsWriteScope,
         });
       }
-      expect(handled).toEqual(["subscribe", "connect"]);
+      expect(handled).toEqual(["subscribe", "connect", "listTemplates"]);
     }).pipe(Effect.scoped),
   );
 

@@ -24,6 +24,27 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("replaces or clears one sandbox binding without losing another project's defaults", () => {
+    const initial = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      sandboxProjectDefaults: {
+        quickadd: { template: "quickadd", size: "large", stopAfterHours: null },
+        website: { template: "node" },
+      },
+    });
+    const changed = applyServerSettingsPatch(initial, {
+      sandboxProjectDefaults: { quickadd: { template: "quickadd-v2" } },
+    });
+    expect(changed.sandboxProjectDefaults).toEqual({
+      quickadd: { template: "quickadd-v2" },
+      website: { template: "node" },
+    });
+    expect(
+      applyServerSettingsPatch(changed, {
+        sandboxProjectDefaults: { quickadd: null },
+      }).sandboxProjectDefaults,
+    ).toEqual({ website: { template: "node" } });
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },
