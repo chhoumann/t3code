@@ -231,6 +231,24 @@ describe("wakeSandbox", () => {
     }),
   );
 
+  it.effect("fails at once, without asking, when asking again cannot fix the sandbox", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(
+        sandboxView({
+          _tag: "failed",
+          step: "resume",
+          message: "The account's API key was revoked.",
+          retryable: false,
+        }),
+      );
+      expect(yield* Effect.flip(device.wake)).toMatchObject({
+        _tag: "SandboxError",
+        message: "The sandbox could not wake. The account's API key was revoked.",
+      });
+      expect(device.changes).toEqual([]);
+    }),
+  );
+
   it.effect("fails with the owner's reason when the machine does not come back", () =>
     Effect.gen(function* () {
       const device = yield* makeDevice(sandboxView(stopped));

@@ -224,6 +224,10 @@ export const wakeSandbox = <B, E, R>(input: {
       yield* SubscriptionRef.get(registrations.value.owners),
     ).get(input.environmentId);
     if (sandbox === undefined || !wakesForWork(sandbox.view)) return false;
+    const { status } = sandbox.view;
+    if (status._tag === "failed" && !status.retryable) {
+      return yield* notAwake(`The sandbox could not wake. ${status.message}`);
+    }
     if (SandboxRegistrations.sandboxPresence(sandbox.view) !== "waking") {
       yield* requireOwner(sandbox.ownerEnvironmentId);
       yield* input.toOwner({
