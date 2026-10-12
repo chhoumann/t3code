@@ -11,6 +11,7 @@ import {
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
+  setConnectionDormantInCatalog,
   setConnectionEnabledInCatalog,
   setRoutesInCatalog,
   replaceCatalogValue,
@@ -87,10 +88,12 @@ function persistenceError(
   operation:
     | "list-targets"
     | "list-disabled-targets"
+    | "list-dormant-targets"
     | "register-connection"
     | "set-connection-routes"
     | "remove-connection"
     | "set-connection-enabled"
+    | "set-connection-dormant"
     | "load-shell"
     | "save-shell"
     | "load-thread"
@@ -619,6 +622,10 @@ export const layer = Layer.effectContext(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
       ),
+      listDormant: catalog.read.pipe(
+        Effect.map((document) => document.dormantEnvironmentIds),
+        Effect.mapError((cause) => persistenceError("list-dormant-targets", cause)),
+      ),
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: (registration, routes) =>
@@ -637,6 +644,10 @@ export const layer = Layer.effectContext(
         catalog
           .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
           .pipe(Effect.mapError((cause) => persistenceError("set-connection-enabled", cause))),
+      setDormant: (environmentId, dormant) =>
+        catalog
+          .update((document) => setConnectionDormantInCatalog(document, environmentId, dormant))
+          .pipe(Effect.mapError((cause) => persistenceError("set-connection-dormant", cause))),
     });
     const profileStore = ProfileStore.make({
       get: (connectionId) =>

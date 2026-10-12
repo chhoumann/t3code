@@ -182,13 +182,17 @@ export class EnvironmentRegistry extends Context.Service<
     >;
     /**
      * Marks an environment dormant (see `ConnectionCatalogEntry.dormant`) or
-     * lets it dial again. A dormant environment stays enabled, with its cache,
-     * but drops its socket and stops retrying.
+     * lets it dial again, and persists so the next launch starts the same. A
+     * dormant environment stays enabled, with its cache, but drops its socket
+     * and stops retrying.
      */
     readonly setDormant: (
       environmentId: EnvironmentId,
       dormant: boolean,
-    ) => Effect.Effect<void, EnvironmentNotRegisteredError>;
+    ) => Effect.Effect<
+      void,
+      EnvironmentNotRegisteredError | Persistence.ConnectionPersistenceError
+    >;
     readonly setCompatibility: (
       environmentId: EnvironmentId,
       error: ConnectionBlockedError | null,
@@ -259,6 +263,7 @@ export const make = Effect.gen(function* () {
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
   const persistedTargets = yield* storage.list;
   const disabledEnvironmentIds = new Set(yield* storage.listDisabled);
+  const dormantEnvironmentIds = new Set(yield* storage.listDormant);
   const loadRoute = Effect.fn("EnvironmentRegistry.loadRoute")(function* (
     target: ConnectionTarget,
   ) {
@@ -298,6 +303,7 @@ export const make = Effect.gen(function* () {
               target: first.target,
               profile: first.profile,
               enabled: !disabledEnvironmentIds.has(environmentId),
+              ...(dormantEnvironmentIds.has(environmentId) ? { dormant: true as const } : {}),
             },
             routes,
           ),
@@ -1134,6 +1140,9 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const { dormant: previous, ...entry } = yield* getEntry(environmentId);
         if ((previous === true) === dormant) return;
+        if (!(yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+          yield* registrations.setDormant(environmentId, dormant);
+        }
         yield* switchLocked(dormant ? { ...entry, dormant: true } : entry);
       }),
     );

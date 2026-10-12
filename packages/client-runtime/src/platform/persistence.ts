@@ -21,10 +21,12 @@ export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPer
     operation: Schema.Literals([
       "list-targets",
       "list-disabled-targets",
+      "list-dormant-targets",
       "register-connection",
       "set-connection-routes",
       "remove-connection",
       "set-connection-enabled",
+      "set-connection-dormant",
       "load-shell",
       "save-shell",
       "load-thread",
@@ -48,6 +50,8 @@ export class ConnectionTargetStore extends Context.Service<
     readonly list: Effect.Effect<ReadonlyArray<ConnectionTarget>, ConnectionPersistenceError>;
     /** Saved environments the user switched off. See `ConnectionRegistrationStore.setEnabled`. */
     readonly listDisabled: Effect.Effect<ReadonlyArray<EnvironmentId>, ConnectionPersistenceError>;
+    /** Saved environments last marked dormant. See `ConnectionRegistrationStore.setDormant`. */
+    readonly listDormant: Effect.Effect<ReadonlyArray<EnvironmentId>, ConnectionPersistenceError>;
   }
 >()("@t3tools/client-runtime/platform/persistence/ConnectionTargetStore") {}
 
@@ -74,6 +78,11 @@ export class ConnectionRegistrationStore extends Context.Service<
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
+    ) => Effect.Effect<void, ConnectionPersistenceError>;
+    /** Remembers `ConnectionCatalogEntry.dormant` across launches. */
+    readonly setDormant: (
+      environmentId: EnvironmentId,
+      dormant: boolean,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
   }
 >()("@t3tools/client-runtime/platform/persistence/ConnectionRegistrationStore") {}

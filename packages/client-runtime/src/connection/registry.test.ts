@@ -164,6 +164,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       target: ConnectionTarget,
     ) => Effect.Effect<ConnectionBlockedError | undefined>;
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
+    readonly initialDormant?: ReadonlyArray<EnvironmentId>;
     /** Direct addresses the connected server reports. */
     readonly directEndpoints?: ServerConfig["directEndpoints"];
   },
@@ -203,9 +204,13 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   const storedDisabled = yield* Ref.make<ReadonlySet<EnvironmentId>>(
     new Set(options?.initialDisabled ?? []),
   );
+  const storedDormant = yield* Ref.make<ReadonlySet<EnvironmentId>>(
+    new Set(options?.initialDormant ?? []),
+  );
   const targetStore = Persistence.ConnectionTargetStore.of({
     list: Ref.get(storedTargets),
     listDisabled: Ref.get(storedDisabled).pipe(Effect.map((ids) => [...ids])),
+    listDormant: Ref.get(storedDormant).pipe(Effect.map((ids) => [...ids])),
   });
   const registrationStore = Persistence.ConnectionRegistrationStore.of({
     register: (registration, routes) =>
@@ -275,6 +280,16 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
           next.delete(environmentId);
         } else {
           next.add(environmentId);
+        }
+        return next;
+      }),
+    setDormant: (environmentId, dormant) =>
+      Ref.update(storedDormant, (current) => {
+        const next = new Set(current);
+        if (dormant) {
+          next.add(environmentId);
+        } else {
+          next.delete(environmentId);
         }
         return next;
       }),
@@ -476,6 +491,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     storedCredentials,
     storedRemoteTokens,
     storedDisabled,
+    storedDormant,
     disconnectedSshTargets,
     networkStatus,
     connectedRoutes,
@@ -1186,6 +1202,7 @@ describe("EnvironmentRegistry", () => {
           CACHED_SNAPSHOT,
         );
         expect((yield* Ref.get(harness.storedDisabled)).has(TARGET.environmentId)).toBe(false);
+        expect((yield* Ref.get(harness.storedDormant)).has(TARGET.environmentId)).toBe(true);
         expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
 
         // Switching it off and on, as Settings may, keeps it dormant.
@@ -1201,7 +1218,32 @@ describe("EnvironmentRegistry", () => {
           TARGET.environmentId,
           (state) => state.phase === "connected",
         );
+        expect((yield* Ref.get(harness.storedDormant)).has(TARGET.environmentId)).toBe(false);
       }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("an environment last marked dormant starts dormant on the next launch", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET], [], [], {
+        initialDormant: [TARGET.environmentId],
+      });
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId),
+        ).toMatchObject({ enabled: true, dormant: true });
+        expect((yield* registry.state(TARGET.environmentId)).phase).toBe("available");
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(0);
+
+        yield* registry.setDormant(TARGET.environmentId, false);
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );
 

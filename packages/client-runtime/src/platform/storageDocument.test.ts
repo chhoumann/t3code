@@ -32,6 +32,7 @@ import {
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
+  setConnectionDormantInCatalog,
   setConnectionEnabledInCatalog,
 } from "./storageDocument.ts";
 
@@ -349,6 +350,33 @@ describe("ConnectionCatalogDocument", () => {
     });
 
     expect(decoded.disabledEnvironmentIds).toEqual([]);
+    expect(decoded.dormantEnvironmentIds).toEqual([]);
+  });
+
+  it("remembers a saved environment as dormant until it is woken or removed", () => {
+    const registered = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+
+    const dormant = setConnectionDormantInCatalog(registered, ENVIRONMENT_ID, true);
+    expect(dormant.dormantEnvironmentIds).toEqual([ENVIRONMENT_ID]);
+    expect(dormant.disabledEnvironmentIds).toEqual([]);
+    expect(
+      setConnectionDormantInCatalog(dormant, ENVIRONMENT_ID, true).dormantEnvironmentIds,
+    ).toEqual([ENVIRONMENT_ID]);
+    expect(
+      setConnectionDormantInCatalog(dormant, ENVIRONMENT_ID, false).dormantEnvironmentIds,
+    ).toEqual([]);
+    expect(removeConnectionFromCatalog(dormant, ENVIRONMENT_ID).dormantEnvironmentIds).toEqual([]);
+    expect(
+      setConnectionDormantInCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT, ENVIRONMENT_ID, true)
+        .dormantEnvironmentIds,
+    ).toEqual([]);
   });
 
   it("switches a saved environment off and back on without touching its records", () => {

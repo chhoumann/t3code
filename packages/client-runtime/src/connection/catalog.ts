@@ -78,8 +78,8 @@ export interface ConnectionCatalogEntry {
   /**
    * Set while the environment cannot answer for a known reason, such as a
    * sandbox whose machine sleeps: it stays in the workspace from its cache,
-   * but nothing dials it. Never persisted; whoever knows the reason sets it
-   * again after each launch.
+   * but nothing dials it. Persisted, so a relaunch does not dial it either
+   * before whoever knows the reason says otherwise.
    */
   readonly dormant?: true;
   /** Discovery rejection stays visible while the saved connection is switched off. */
