@@ -1,7 +1,8 @@
 /**
  * SandboxGuest - what an owner environment does to the T3 server inside one
  * of its sandboxes: mint the owner's admin session, prepare the checkout,
- * launch the seed thread, and mint client pairing grants.
+ * launch the seed thread, read what its agents are doing, and mint client
+ * pairing grants.
  *
  * The guest is reached over its public HTTP API and RPC socket with the
  * admin bearer, the same seams any remote client uses. Its MCP endpoint is
@@ -16,8 +17,10 @@ import {
   EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
   type EnvironmentId,
+  ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   WsRpcGroup,
   defaultInstanceIdForDriver,
   type MessageId,
@@ -62,6 +65,7 @@ import {
   renderRefreshCredentialsCommand,
   shellQuote,
 } from "./sandboxBootScript.ts";
+import { guestActivity, type SandboxGuestActivity } from "./sandboxActivity.ts";
 import {
   SandboxProvider,
   type ProviderMachineId,
@@ -116,6 +120,7 @@ export const SandboxGuestOperation = Schema.Literals([
   "create-project",
   "launch-thread",
   "issue-pairing",
+  "read-activity",
 ]);
 export type SandboxGuestOperation = typeof SandboxGuestOperation.Type;
 
@@ -127,6 +132,7 @@ const OPERATION_SUMMARY: Record<SandboxGuestOperation, string> = {
   "create-project": "create the sandbox project",
   "launch-thread": "launch the sandbox thread",
   "issue-pairing": "issue a pairing grant for the sandbox",
+  "read-activity": "read what the agents in the sandbox are doing",
 };
 
 export class SandboxGuestError extends Schema.TaggedError<SandboxGuestError>()(
@@ -163,6 +169,8 @@ const decodeIssuedSession = Schema.decodeEffect(
 const GUEST_CALL_TIMEOUT = Duration.seconds(60);
 // Boat's edge can hold a request to a port with no listener yet for minutes.
 const READINESS_TIMEOUT = Duration.seconds(5);
+/** Short, because the sandbox's loop waits on it once a minute. */
+const ACTIVITY_TIMEOUT = Duration.seconds(10);
 const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const CLONE_TIMEOUT_SECONDS = 600;
 const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
@@ -290,6 +298,10 @@ export class SandboxGuest extends Context.Service<
         readonly seed: SandboxSeedThread;
       },
     ) => Effect.Effect<void, SandboxGuestError>;
+    /** Whether the guest's agents are working, from its shell snapshot. */
+    readonly readActivity: (
+      target: SandboxGuestTarget,
+    ) => Effect.Effect<SandboxGuestActivity, SandboxGuestError>;
     /** A one-time grant a client exchanges for its own session on the guest. */
     readonly issuePairingCredential: (
       target: SandboxGuestTarget,
@@ -508,6 +520,21 @@ const make = Effect.gen(function* () {
       yield* launchThread(target, input.seed);
     });
 
+  const readActivity: SandboxGuest["Service"]["readActivity"] = (target) =>
+    httpApi(target.baseUrl).pipe(
+      Effect.flatMap((client) =>
+        client.orchestration.shellSnapshot({
+          headers: {
+            ...bearer(target),
+            [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          },
+        }),
+      ),
+      Effect.timeout(ACTIVITY_TIMEOUT),
+      Effect.map(guestActivity),
+      Effect.mapError(sessionCallError("read-activity")),
+    );
+
   const issuePairingCredential: SandboxGuest["Service"]["issuePairingCredential"] = (
     target,
     grant,
@@ -534,6 +561,7 @@ const make = Effect.gen(function* () {
     mintAdminSession,
     cloneCheckout,
     launchSeedThread,
+    readActivity,
     issuePairingCredential,
   });
 });

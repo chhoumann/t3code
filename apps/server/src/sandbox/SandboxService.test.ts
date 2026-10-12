@@ -197,6 +197,7 @@ const makeWorld = () => {
     cloneCheckout: () => Effect.succeed([]),
     launchSeedThread: (_target, input) =>
       Effect.sync(() => void world.launchedThreads.push(input.seed.threadId)),
+    readActivity: () => Effect.die("unused"),
     issuePairingCredential: (target, grant) =>
       world.adminTokens.has(Redacted.value(target.token))
         ? Effect.sync(() => {
