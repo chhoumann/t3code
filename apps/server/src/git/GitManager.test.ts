@@ -1148,6 +1148,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(status).toEqual({
         isRepo: false,
         hasPrimaryRemote: false,
+        remotes: [],
         isDefaultRef: false,
         refName: null,
         hasWorkingTreeChanges: false,
@@ -1179,6 +1180,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(status).toEqual({
         isRepo: false,
         hasPrimaryRemote: false,
+        remotes: [],
         isDefaultRef: false,
         refName: null,
         hasWorkingTreeChanges: false,
@@ -1252,7 +1254,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("local status names the tracked remote from the config it already reads", () =>
+  it.effect("local status lists the remotes and names the one the branch tracks", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
@@ -1274,9 +1276,13 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       gitConfigReads.length = 0;
       const onFork = yield* manager.localStatus({ cwd: repoDir });
 
-      expect(unpushed.trackedRemoteUrl).toBeUndefined();
-      expect(onFork.trackedRemoteUrl).toBe(forkDir);
-      expect(gitConfigReads).toEqual(["branch.feature/on-fork.remote", "remote.fork/mirror.url"]);
+      expect(unpushed.trackedRemote).toBeUndefined();
+      expect(onFork.trackedRemote).toBe("fork/mirror");
+      expect(onFork.remotes).toEqual([
+        { name: "fork/mirror", url: forkDir },
+        { name: "origin", url: originDir },
+      ]);
+      expect(gitConfigReads).toEqual(["branch.feature/on-fork.remote"]);
     }),
   );
 

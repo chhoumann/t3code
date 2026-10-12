@@ -31,7 +31,8 @@ const HEAD = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d";
 const pushed: VcsStatusResult = {
   isRepo: true,
   hasPrimaryRemote: true,
-  trackedRemoteUrl: REMOTE,
+  remotes: [{ name: "origin", url: REMOTE }],
+  trackedRemote: "origin",
   isDefaultRef: true,
   refName: "main",
   headCommit: HEAD,
@@ -62,7 +63,16 @@ describe("sandboxRepositoryFor", () => {
   });
 
   it("clones the fork a branch tracks, where its commit is, and keeps the project's remote", () => {
-    const onFork = { ...pushed, isDefaultRef: false, refName: "fix", trackedRemoteUrl: FORK };
+    const onFork = {
+      ...pushed,
+      remotes: [
+        { name: "origin", url: REMOTE },
+        { name: "fork", url: FORK },
+      ],
+      trackedRemote: "fork",
+      isDefaultRef: false,
+      refName: "fix",
+    };
     expect(sandboxRepositoryFor({ projectRemoteUrl: REMOTE, status: onFork })).toEqual({
       _tag: "Ready",
       repository: { remoteUrl: FORK, projectRemoteUrl: REMOTE, commit: HEAD },
@@ -71,7 +81,7 @@ describe("sandboxRepositoryFor", () => {
 
   it.each([
     ["not-a-repository", null, { ...pushed, isRepo: false }],
-    ["no-remote", null, { ...pushed, trackedRemoteUrl: undefined }],
+    ["no-remote", null, { ...pushed, remotes: [], trackedRemote: undefined }],
     ["no-commit", REMOTE, { ...pushed, headCommit: undefined }],
     ["uncommitted-changes", REMOTE, { ...pushed, hasWorkingTreeChanges: true }],
     [
@@ -80,9 +90,9 @@ describe("sandboxRepositoryFor", () => {
       { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: true },
     ],
     ["not-pushed", REMOTE, { ...pushed, aheadCount: 1 }],
-    ["not-pushed", REMOTE, { ...pushed, hasUpstream: false, trackedRemoteUrl: undefined }],
+    ["not-pushed", REMOTE, { ...pushed, hasUpstream: false, trackedRemote: undefined }],
     // A branch that tracks another local branch has an upstream but no remote.
-    ["not-pushed", REMOTE, { ...pushed, trackedRemoteUrl: undefined }],
+    ["not-pushed", REMOTE, { ...pushed, trackedRemote: undefined }],
   ] as const)("refuses with %s", (problem, projectRemoteUrl, status) => {
     expect(sandboxRepositoryFor({ projectRemoteUrl, status })).toEqual({
       _tag: "Refused",

@@ -1606,15 +1606,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null));
   });
 
+  const listRemoteFetchUrls: GitVcsDriver.GitVcsDriver["Service"]["listRemoteFetchUrls"] = (cwd) =>
+    runGitStdout("GitVcsDriver.listRemoteFetchUrls", cwd, ["remote", "-v"]).pipe(
+      Effect.map(parseRemoteFetchUrls),
+    );
+
   const ensureRemote: GitVcsDriver.GitVcsDriver["Service"]["ensureRemote"] = Effect.fn(
     "ensureRemote",
   )(function* (input) {
     const preferredName = sanitizeRemoteName(input.preferredName);
     const normalizedTargetUrl = normalizeGitRemoteUrl(input.url);
-    const remotes = yield* runGitStdout("GitVcsDriver.ensureRemote.listRemoteUrls", input.cwd, [
-      "remote",
-      "-v",
-    ]).pipe(Effect.map(parseRemoteFetchUrls));
+    const remotes = yield* listRemoteFetchUrls(input.cwd);
 
     const existing = remotes.find(
       (remote) => normalizeGitRemoteUrl(remote.url) === normalizedTargetUrl,
@@ -4086,6 +4088,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     refreshCheckedOutBranch: (input) =>
       withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input)),
     ensureRemote: (input) => withListRefsInvalidation(input.cwd, ensureRemote(input)),
+    listRemoteFetchUrls,
     resolvePrimaryRemoteName,
     resolveDefaultBranchName,
     fetchRemote: (input) => withListRefsInvalidation(input.cwd, fetchRemote(input)),

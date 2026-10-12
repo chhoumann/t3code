@@ -12,6 +12,7 @@ import { ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
+  type GitRemote,
   VcsProcessExitError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
@@ -372,6 +373,8 @@ export class GitVcsDriver extends Context.Service<
       input: GitRefreshCheckedOutBranchInput,
     ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
     readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
+    /** Every remote and its fetch URL, as `git remote -v` lists them. */
+    readonly listRemoteFetchUrls: (cwd: string) => Effect.Effect<GitRemote[], GitCommandError>;
     readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
     readonly resolveDefaultBranchName: (
       cwd: string,

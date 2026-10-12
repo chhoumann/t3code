@@ -290,12 +290,13 @@ export function sandboxRepositoryFor(input: {
   // output, so only edits to tracked files block a launch.
   if (status.hasTrackedChanges ?? status.hasWorkingTreeChanges)
     return refuse("uncommitted-changes");
-  if (status.trackedRemoteUrl === undefined || !status.hasUpstream || status.aheadCount > 0)
+  const tracked = status.remotes?.find((remote) => remote.name === status.trackedRemote);
+  if (tracked === undefined || !status.hasUpstream || status.aheadCount > 0)
     return refuse("not-pushed");
   return {
     _tag: "Ready",
     repository: {
-      remoteUrl: status.trackedRemoteUrl,
+      remoteUrl: tracked.url,
       projectRemoteUrl,
       commit: status.headCommit,
     },

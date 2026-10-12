@@ -235,8 +235,10 @@ const VcsStatusLocalShape = {
   isRepo: Schema.Boolean,
   sourceControlProvider: Schema.optional(SourceControlProviderInfo),
   hasPrimaryRemote: Schema.Boolean,
-  /** The fetch URL of the remote the checked-out branch tracks. Absent without one and on older servers. */
-  trackedRemoteUrl: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Every remote, as `git remote -v` lists it. Absent on older servers. */
+  remotes: Schema.optional(Schema.Array(GitRemote)),
+  /** The remote the checked-out branch tracks, by name; one of `remotes`. Absent without one. */
+  trackedRemote: Schema.optional(TrimmedNonEmptyStringSchema),
   isDefaultRef: Schema.Boolean,
   refName: Schema.NullOr(TrimmedNonEmptyStringSchema),
   /** The checked-out commit. Absent before the first commit and on older servers. */
