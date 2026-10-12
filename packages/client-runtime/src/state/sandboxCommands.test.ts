@@ -1,8 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
-  CommandId,
   EnvironmentId,
-  OrchestrationV2DispatchCommandError,
   SandboxAccountId,
   SandboxId,
   SandboxManagedByOwnerError,
@@ -23,22 +21,25 @@ import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
 import {
   onceConnected,
   routeSandboxArchive,
-  routeSandboxUnarchive,
   type SandboxOwnerChange,
+  wakeSandbox,
 } from "./sandboxCommands.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const SANDBOX_ENV = EnvironmentId.make("environment-sandbox");
 const SANDBOX_ID = SandboxId.make("sbx-1");
 
-const sandboxView = (status: SandboxStatus): SandboxView => ({
+const sandboxView = (
+  status: SandboxStatus,
+  desired: SandboxView["desired"] = "running",
+): SandboxView => ({
   id: SANDBOX_ID,
   accountId: SandboxAccountId.make("work"),
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
   repository: { remoteUrl: "https://example.test/repo.git", commit: null },
   threadId: ThreadId.make("thread-seed"),
-  desired: "running",
+  desired,
   status,
   environmentId: SANDBOX_ENV,
   httpBaseUrl: "https://sbx-1.boat.test",
@@ -46,10 +47,6 @@ const sandboxView = (status: SandboxStatus): SandboxView => ({
 });
 
 type Owners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
-
-/** The client's view of the owner's sandboxes, which a test moves along by hand. */
-const makeOwners = (status: SandboxStatus | null) =>
-  SubscriptionRef.make<Owners>(new Map(status === null ? [] : [[OWNER, [sandboxView(status)]]]));
 
 const showStatus = (owners: SubscriptionRef.SubscriptionRef<Owners>, status: SandboxStatus) =>
   SubscriptionRef.set(owners, new Map([[OWNER, [sandboxView(status)]]]));
@@ -66,19 +63,59 @@ const ownerChange = (desired: SandboxOwnerChange["desired"]): ReadonlyArray<Sand
 
 const ready: SandboxStatus = { _tag: "ready" };
 const resuming: SandboxStatus = { _tag: "resuming" };
-const stopped: SandboxStatus = { _tag: "stopped", reason: "requested" };
+const stopped: SandboxStatus = { _tag: "stopped", reason: "external" };
 
-/** Unarchives in the sandbox; `whenBack` records that it ran after a resume. */
-const unarchive = (owners: SubscriptionRef.SubscriptionRef<Owners>) => {
-  const changes: Array<SandboxOwnerChange> = [];
-  const run = routeSandboxUnarchive({
-    environmentId: SANDBOX_ENV,
-    run: Effect.succeed("unarchived"),
-    whenBack: Effect.succeed("unarchived after resume"),
-    toOwner: (change) => Effect.sync(() => void changes.push(change)),
-  }).pipe(withOwners(owners));
-  return { run, changes };
-};
+/**
+ * A device that follows the owner's sandbox list. Its socket to the owner is
+ * open unless `ownerConnected` is false; its socket to the sandbox opens only
+ * when the test calls `connect`.
+ */
+const makeDevice = (view: SandboxView, options?: { readonly ownerConnected?: boolean }) =>
+  Effect.gen(function* () {
+    const owners = yield* SubscriptionRef.make<Owners>(new Map([[OWNER, [view]]]));
+    const sessions = new Map([
+      [
+        OWNER,
+        yield* SubscriptionRef.make(
+          options?.ownerConnected === false
+            ? Option.none<RpcSession>()
+            : Option.some({} as RpcSession),
+        ),
+      ],
+      [SANDBOX_ENV, yield* SubscriptionRef.make(Option.none<RpcSession>())],
+    ]);
+    const run: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] = (
+      environmentId,
+      effect,
+    ) =>
+      Effect.provideService(
+        effect,
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        EnvironmentSupervisor.EnvironmentSupervisor.of({
+          session: sessions.get(environmentId)!,
+        } as EnvironmentSupervisor.EnvironmentSupervisor["Service"]),
+      );
+    const registry = {
+      entries: yield* SubscriptionRef.make(
+        new Map([[OWNER, { target: { label: "Work laptop" } }]]),
+      ),
+      run,
+    } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"];
+    const changes: Array<SandboxOwnerChange> = [];
+    const wake = wakeSandbox({
+      environmentId: SANDBOX_ENV,
+      toOwner: (change) => Effect.sync(() => void changes.push(change)),
+    }).pipe(
+      withOwners(owners),
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
+    );
+    return {
+      owners,
+      wake,
+      changes,
+      connect: SubscriptionRef.set(sessions.get(SANDBOX_ENV)!, Option.some({} as RpcSession)),
+    };
+  });
 
 describe("routeSandboxArchive", () => {
   it.effect("an archive the sandbox refuses as its last active thread stops the sandbox", () =>
@@ -112,52 +149,104 @@ describe("routeSandboxArchive", () => {
   );
 });
 
-describe("routeSandboxUnarchive", () => {
-  it.effect("resumes a stopped sandbox and unarchives only once it is back", () =>
-    Effect.gen(function* () {
-      const owners = yield* makeOwners(stopped);
-      const { run, changes } = unarchive(owners);
-      const pending = yield* Effect.forkChild(run);
-      yield* Effect.yieldNow;
-      expect(changes).toEqual(ownerChange("running"));
-      expect(pending.pollUnsafe()).toBeUndefined();
+describe("wakeSandbox", () => {
+  it.effect(
+    "asks the owner to run an asleep sandbox, then resolves once it is back and connected",
+    () =>
+      Effect.gen(function* () {
+        const device = yield* makeDevice(sandboxView(stopped));
+        const pending = yield* Effect.forkChild(device.wake);
+        yield* Effect.yieldNow;
+        expect(device.changes).toEqual(ownerChange("running"));
 
-      // The owner's list still shows the stop it was asked to undo, then the resume.
-      yield* showStatus(owners, stopped);
-      yield* showStatus(owners, resuming);
+        // The owner's list still shows the sleep it was asked to end, then the resume.
+        yield* showStatus(device.owners, stopped);
+        yield* showStatus(device.owners, resuming);
+        yield* showStatus(device.owners, ready);
+        yield* Effect.yieldNow;
+        expect(pending.pollUnsafe()).toBeUndefined();
+        yield* device.connect;
+        expect(yield* Fiber.join(pending)).toBe(true);
+      }),
+  );
+
+  it.effect("joins a wake already on its way without asking the owner again", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(resuming));
+      const pending = yield* Effect.forkChild(device.wake);
+      yield* Effect.yieldNow;
+      yield* showStatus(device.owners, ready);
       yield* Effect.yieldNow;
       expect(pending.pollUnsafe()).toBeUndefined();
-      yield* showStatus(owners, ready);
-      expect(yield* Fiber.join(pending)).toBe("unarchived after resume");
+      yield* device.connect;
+      expect(yield* Fiber.join(pending)).toBe(true);
+      expect(device.changes).toEqual([]);
     }),
   );
 
-  it.effect("fails when the resumed sandbox fails instead of coming back", () =>
+  it.effect("wakes a put-away sandbox, as unarchiving its thread does", () =>
     Effect.gen(function* () {
-      const owners = yield* makeOwners(stopped);
-      const { run } = unarchive(owners);
-      const pending = yield* Effect.forkChild(Effect.flip(run));
+      const device = yield* makeDevice(
+        sandboxView({ _tag: "stopped", reason: "requested" }, "stopped"),
+      );
+      const pending = yield* Effect.forkChild(device.wake);
       yield* Effect.yieldNow;
-      yield* showStatus(owners, resuming);
-      yield* showStatus(owners, {
+      expect(device.changes).toEqual(ownerChange("running"));
+      yield* showStatus(device.owners, ready);
+      yield* device.connect;
+      expect(yield* Fiber.join(pending)).toBe(true);
+    }),
+  );
+
+  it.effect("leaves a running sandbox alone", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(ready));
+      expect(yield* device.wake).toBe(false);
+      expect(device.changes).toEqual([]);
+    }),
+  );
+
+  it.effect("fails at once, without asking, when the owner is offline", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(stopped), { ownerConnected: false });
+      expect(yield* Effect.flip(device.wake)).toMatchObject({
+        _tag: "SandboxError",
+        message: "Work laptop is offline, so it cannot wake this sandbox.",
+      });
+      expect(device.changes).toEqual([]);
+    }),
+  );
+
+  it.effect("fails when the sandbox stops again after it showed waking", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(stopped));
+      const pending = yield* Effect.forkChild(Effect.flip(device.wake));
+      yield* Effect.yieldNow;
+      yield* showStatus(device.owners, resuming);
+      yield* showStatus(device.owners, stopped);
+      expect(yield* Fiber.join(pending)).toMatchObject({
+        _tag: "SandboxError",
+        message: "The sandbox stopped again before it woke.",
+      });
+    }),
+  );
+
+  it.effect("fails with the owner's reason when the machine does not come back", () =>
+    Effect.gen(function* () {
+      const device = yield* makeDevice(sandboxView(stopped));
+      const pending = yield* Effect.forkChild(Effect.flip(device.wake));
+      yield* Effect.yieldNow;
+      yield* showStatus(device.owners, resuming);
+      yield* showStatus(device.owners, {
         _tag: "failed",
         step: "resume",
         message: "The machine did not start in time.",
         retryable: true,
       });
-      expect(yield* Fiber.join(pending)).toMatchObject({ _tag: "SandboxError", code: "not-ready" });
-    }),
-  );
-
-  it.effect("fails when the sandbox stops again after its resume showed", () =>
-    Effect.gen(function* () {
-      const owners = yield* makeOwners(stopped);
-      const { run } = unarchive(owners);
-      const pending = yield* Effect.forkChild(Effect.flip(run));
-      yield* Effect.yieldNow;
-      yield* showStatus(owners, resuming);
-      yield* showStatus(owners, stopped);
-      expect(yield* Fiber.join(pending)).toMatchObject({ _tag: "SandboxError", code: "not-ready" });
+      expect(yield* Fiber.join(pending)).toMatchObject({
+        _tag: "SandboxError",
+        message: "The sandbox could not wake. The machine did not start in time.",
+      });
     }),
   );
 
@@ -165,38 +254,16 @@ describe("routeSandboxUnarchive", () => {
     "stops waiting, so the thread's next command can run, when the owner never reports back",
     () =>
       Effect.gen(function* () {
-        const { run } = unarchive(yield* makeOwners(stopped));
-        const pending = yield* Effect.forkChild(Effect.flip(run));
+        const device = yield* makeDevice(sandboxView(stopped));
+        const pending = yield* Effect.forkChild(Effect.flip(device.wake));
         yield* TestClock.adjust("9 minutes");
         expect(pending.pollUnsafe()).toBeUndefined();
         yield* TestClock.adjust("1 minute");
         expect(yield* Fiber.join(pending)).toMatchObject({
           _tag: "SandboxError",
-          code: "not-ready",
-          message: expect.stringContaining("Unarchive it again"),
+          message: "The sandbox did not wake within 10 minutes.",
         });
       }).pipe(Effect.provide(TestClock.layer())),
-  );
-
-  it.effect("unarchives in a running sandbox, or outside one, right away", () =>
-    Effect.gen(function* () {
-      const running = unarchive(yield* makeOwners(ready));
-      expect(yield* running.run).toBe("unarchived");
-      expect(running.changes).toEqual([]);
-
-      const failure = new OrchestrationV2DispatchCommandError({
-        commandId: CommandId.make("unarchive"),
-        commandType: "thread.unarchive",
-        message: "Failed",
-      });
-      const outside = yield* routeSandboxUnarchive({
-        environmentId: SANDBOX_ENV,
-        run: Effect.fail(failure),
-        whenBack: Effect.void,
-        toOwner: () => Effect.void,
-      }).pipe(withOwners(yield* makeOwners(null)), Effect.flip);
-      expect(outside).toBe(failure);
-    }),
   );
 });
 

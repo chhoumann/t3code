@@ -12,10 +12,9 @@ import {
 import {
   type SandboxOwnerChange,
   createSandboxEnvironmentAtoms,
-  onceConnected,
   routeSandboxArchive,
-  routeSandboxUnarchive,
   runAtomCommand,
+  wakeSandbox,
 } from "./sandboxCommands.ts";
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
@@ -164,7 +163,19 @@ export function createThreadEnvironmentAtoms<R, E>(
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
       JSON.stringify([environmentId, input.threadId]),
   };
+  const wake = createEnvironmentCommand(runtime, {
+    label: "environment-data:commands:thread:wake",
+    execute: (_input: void, registry, environmentId) =>
+      wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }),
+    scheduler,
+    // Everything one device sends while a sandbox wakes shares one wake, so its owner is asked once.
+    concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+  });
+  /** Wakes the environment's sandbox when it sleeps; succeeds with whether it had to. */
+  const wakeFirst = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) =>
+    runAtomCommand(wake, registry, { environmentId, input: undefined });
   const commands = {
+    wake,
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),
@@ -190,13 +201,15 @@ export function createThreadEnvironmentAtoms<R, E>(
     unarchive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unarchive",
       execute: (input: UnarchiveThreadInput, registry, environmentId) =>
-        routeSandboxUnarchive({
-          environmentId,
-          run: unarchiveThread(input),
-          // A sandbox that stopped at its TTL kept its threads active.
-          whenBack: onceConnected(environmentId, unarchiveThreadIfArchived(input)),
-          toOwner: (change) => updateSandbox(registry, change),
-        }),
+        wakeFirst(registry, environmentId).pipe(
+          // Archiving a sandbox's last thread puts the sandbox away and keeps the thread
+          // active, and a sandbox that only slept kept its threads as they were.
+          Effect.flatMap((woke) =>
+            woke
+              ? unarchiveThreadIfArchived(input).pipe(Effect.asVoid)
+              : unarchiveThread(input).pipe(Effect.asVoid),
+          ),
+        ),
       scheduler,
       concurrency,
     }),
@@ -304,7 +317,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     startTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:start-turn",
-      execute: (input: StartThreadTurnInput) => startThreadTurn(input),
+      execute: (input: StartThreadTurnInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(startThreadTurn(input))),
       scheduler,
       concurrency,
     }),
@@ -316,19 +330,22 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     respondToApproval: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:respond-to-approval",
-      execute: (input: RespondToThreadApprovalInput) => respondToThreadApproval(input),
+      execute: (input: RespondToThreadApprovalInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(respondToThreadApproval(input))),
       scheduler,
       concurrency,
     }),
     respondToUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:respond-to-user-input",
-      execute: (input: RespondToThreadUserInputInput) => respondToThreadUserInput(input),
+      execute: (input: RespondToThreadUserInputInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(respondToThreadUserInput(input))),
       scheduler,
       concurrency,
     }),
     dismissUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:dismiss-user-input",
-      execute: (input: DismissThreadUserInputInput) => dismissThreadUserInput(input),
+      execute: (input: DismissThreadUserInputInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(dismissThreadUserInput(input))),
       scheduler,
       concurrency,
     }),
@@ -365,7 +382,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     resumeThreadQueue: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resume-queue",
-      execute: (input: ThreadCommandInput) => resumeThreadQueue(input),
+      execute: (input: ThreadCommandInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(resumeThreadQueue(input))),
       scheduler,
       concurrency,
     }),
@@ -377,7 +395,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     promoteQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:promote-queued-run",
-      execute: (input: PromoteQueuedRunInput) => promoteQueuedRun(input),
+      execute: (input: PromoteQueuedRunInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(promoteQueuedRun(input))),
       scheduler,
       concurrency,
     }),
@@ -395,7 +414,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     editQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:edit-queued-run",
-      execute: (input: EditQueuedRunInput) => editQueuedRun(input),
+      execute: (input: EditQueuedRunInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(editQueuedRun(input))),
       scheduler,
       concurrency,
     }),
