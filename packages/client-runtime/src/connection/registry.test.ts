@@ -2213,6 +2213,58 @@ describe("EnvironmentRegistry routes", () => {
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       }),
     );
+
+    it.effect("a route the user paired dials again once the owner that slept it is gone", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET, USER_TARGET, RELAY_TARGET],
+          [MANAGED_PROFILE, USER_PROFILE],
+          [
+            [MANAGED_TARGET.connectionId, BEARER_CREDENTIAL],
+            [USER_TARGET.connectionId, BEARER_CREDENTIAL],
+          ],
+          { initialDormant: [SANDBOX] },
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          expect((yield* registry.state(SANDBOX)).phase).toBe("available");
+          yield* registry.remove(OWNER);
+
+          yield* awaitConnectionState(registry, SANDBOX, (state) => state.phase === "connected");
+          const sandbox = (yield* SubscriptionRef.get(registry.entries)).get(SANDBOX);
+          expect({ target: sandbox?.target, dormant: sandbox?.dormant }).toEqual({
+            target: USER_TARGET,
+            dormant: undefined,
+          });
+          expect(yield* Ref.get(harness.storedDormant)).toEqual(new Set());
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
+
+    it.effect("a platform owner that goes away takes the routes it contributed", () =>
+      Effect.gen(function* () {
+        const platformManaged = new BearerConnectionProfile({
+          ...MANAGED_PROFILE,
+          managedBy: TARGET.environmentId,
+        });
+        const harness = yield* makeHarness(
+          [MANAGED_TARGET],
+          [platformManaged],
+          [[MANAGED_TARGET.connectionId, BEARER_CREDENTIAL]],
+          { initialDormant: [SANDBOX] },
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+          yield* registry.reconcilePlatform([]);
+
+          expect([...(yield* SubscriptionRef.get(registry.entries)).keys()]).toEqual([]);
+          expect(yield* Ref.get(harness.storedTargets)).toEqual([]);
+          expect(yield* Ref.get(harness.cacheClears)).toEqual([TARGET.environmentId, SANDBOX]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+    );
   });
 
   it.effect("removing the last route forgets the environment", () =>

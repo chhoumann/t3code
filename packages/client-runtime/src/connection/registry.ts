@@ -105,8 +105,10 @@ export class EnvironmentRegistry extends Context.Service<
     /**
      * Drops the routes `source` contributed to an environment (see
      * `BearerConnectionProfile.managedBy`), and the environment with them
-     * when no other route is left. Removing `source` itself does this for
-     * every environment it contributed to.
+     * when no other route is left. A route left behind dials again, since
+     * only the contributor held the environment dormant.
+     * `source` leaving the registry, by any removal, does this for every
+     * environment it contributed to.
      */
     readonly removeContributed: (
       source: EnvironmentId,
@@ -832,6 +834,7 @@ export const make = Effect.gen(function* () {
             ],
             { concurrency: "unbounded", discard: true },
           );
+          yield* withdrawContributions(environmentId);
         }),
       );
     },
@@ -908,13 +911,20 @@ export const make = Effect.gen(function* () {
       }
     }
 
+    yield* withdrawContributions(environmentId);
+  });
+
+  /** Drops the routes an environment that left the registry contributed to others. */
+  const withdrawContributions = Effect.fn("EnvironmentRegistry.withdrawContributions")(function* (
+    source: EnvironmentId,
+  ) {
     const contributedTo = [...(yield* SubscriptionRef.get(entries)).values()]
-      .filter((candidate) => contributedRouteIds(candidate, environmentId).length > 0)
+      .filter((candidate) => contributedRouteIds(candidate, source).length > 0)
       .map((candidate) => candidate.target.environmentId);
     yield* Effect.forEach(
       contributedTo,
       (contributedId) =>
-        removeContributed(environmentId, contributedId).pipe(
+        removeContributed(source, contributedId).pipe(
           Effect.catch((error) =>
             Effect.logWarning("Could not remove routes a removed environment contributed.", {
               environmentId: contributedId,
@@ -944,7 +954,9 @@ export const make = Effect.gen(function* () {
         if (removedIds.length === 0) return;
         const remaining = removedIds.reduce(routesAfterRemoving, connectionRoutes(entry));
         if (remaining.length === 0) return yield* removeLocked(environmentId);
-        yield* replaceRoutesLocked(entry, remaining);
+        const { dormant, ...awake } = entry;
+        if (dormant === true) yield* registrations.setDormant(environmentId, false);
+        yield* replaceRoutesLocked(awake, remaining);
       }),
     ).pipe(Effect.withSpan("EnvironmentRegistry.removeContributed"));
 
