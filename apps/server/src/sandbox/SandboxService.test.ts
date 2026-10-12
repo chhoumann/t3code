@@ -65,6 +65,8 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     deadlines: [] as Array<number>,
     /** Every deadline move fails like this; null lets them through. */
     refuseDeadlines: null as SandboxProviderErrorKind | null,
+    /** Every inspect fails like this; null lets them through. */
+    failInspects: null as SandboxProviderErrorKind | null,
     /** Stops the owner asked for; the provider's own deadline is not one. */
     stops: 0,
     /** What the guest's agents report; null when the guest does not answer. */
@@ -135,6 +137,12 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
           world.inspectGate = null;
           yield* Deferred.succeed(gate.entered, undefined);
           yield* Deferred.await(gate.release);
+        }
+        if (world.failInspects !== null) {
+          return yield* new SandboxProviderError({
+            operation: "inspect",
+            kind: world.failInspects,
+          });
         }
         const machine = machines.get(id);
         if (machine === undefined) return null;
@@ -667,6 +675,54 @@ describe("SandboxService", () => {
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "tells a waiting client how a retried wake ended when it fails the same way again",
+    () =>
+      Effect.gen(function* () {
+        const { world, start } = makeWorld();
+        const started = yield* start;
+        yield* Effect.gen(function* () {
+          const sandboxes = yield* service;
+          const id = SandboxId.make("sbx-same-failure");
+          yield* sandboxes.launch(launchInput(id));
+          yield* awaitStatus(id, "ready");
+          world.failInspects = "unauthorized";
+          const failed = yield* advanceUntil(awaitStatus(id, "failed"), Duration.minutes(1));
+          assert.deepInclude(failed, { revision: 1, settledRevision: 1 });
+
+          // Subscribed before the retry, so only what the owner publishes can end the wait.
+          const subscribed = yield* Deferred.make<void>();
+          const waiting = yield* Effect.forkChild(
+            sandboxes.subscribe().pipe(
+              Stream.tap(() => Deferred.succeed(subscribed, undefined)),
+              Stream.map((views) => views.find((view) => view.id === id)),
+              Stream.filter((view) => view !== undefined && view.settledRevision >= 2),
+              Stream.runHead,
+            ),
+          );
+          yield* Deferred.await(subscribed);
+          const accepted = yield* sandboxes.update({ id, desired: "running" });
+          assert.deepInclude(accepted, { revision: 2, settledRevision: 1 });
+
+          const settled = yield* advanceUntil(
+            Fiber.join(waiting).pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.minutes(10),
+                orElse: () => Effect.die(new Error("the retry's outcome was never published")),
+              }),
+            ),
+            Duration.minutes(1),
+          );
+          assert.deepInclude(Option.getOrThrow(settled), {
+            revision: 2,
+            settledRevision: 2,
+            status: failed.status,
+          });
+        }).pipe(Effect.provide(started.context));
+        yield* Scope.close(started.scope, Exit.void);
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 
   it.effect("leaves a sandbox whose T3 does not answer to Boat's own stop, as external", () =>

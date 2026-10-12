@@ -395,8 +395,10 @@ const make = Effect.gen(function* () {
       yield* sql`UPDATE sandboxes SET ${sql.update({ ...columns, updated_at: updatedAt })} WHERE sandbox_id = ${record.id}`.pipe(
         persistence,
       );
+      // A settle that leaves the status as it was still ends a client's wait on its request.
       if (
         statusKey(next.status) !== statusKey(record.status) ||
+        next.settledRevision !== record.settledRevision ||
         next.environmentId !== record.environmentId ||
         next.httpBaseUrl !== record.httpBaseUrl
       ) {
