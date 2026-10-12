@@ -147,7 +147,9 @@ function accountSummary(account: SandboxAccountConfig): string {
   return [
     "Boat",
     SANDBOX_SIZE_LABELS[account.size],
-    account.stopAfterHours === null ? "Never stops" : `Stops after ${account.stopAfterHours} h`,
+    account.stopAfterHours === null
+      ? "Never stops"
+      : `Stops after ${account.stopAfterHours} h of inactivity`,
   ].join(" · ");
 }
 
@@ -439,7 +441,7 @@ function SandboxAccountDialog(props: {
                     </SelectPopup>
                   </Select>
                 </Field>
-                <Field label="Stop after (hours)" htmlFor="sandbox-account-stop-after">
+                <Field label="Stop after inactivity (hours)" htmlFor="sandbox-account-stop-after">
                   <Input
                     id="sandbox-account-stop-after"
                     inputMode="decimal"

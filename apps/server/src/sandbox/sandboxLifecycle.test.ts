@@ -12,11 +12,13 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   ANSWER_DEADLINE_MS,
+  BACKSTOP_GRACE_MS,
   CREATE_KEY_WINDOW_MS,
   FIRST_BOOT_DEADLINE_MS,
   INFLIGHT_GRACE_MS,
   TRANSITION_DEADLINE_MS,
   planNext,
+  startupTtlSeconds,
   type SandboxObservation,
   type SandboxPlan,
   type SandboxRecord,
@@ -30,7 +32,8 @@ import {
 const NOW = 1_800_000_000_000;
 const MINUTE = 60_000;
 const ENV = EnvironmentId.make("env-guest");
-const TTL_SECONDS = 2 * 60 * 60;
+const STOP_AFTER_SECONDS = 2 * 60 * 60;
+const STOP_AFTER = STOP_AFTER_SECONDS * 1000;
 
 const fresh: SandboxRecord = {
   id: SandboxId.make("sbx-1"),
@@ -46,7 +49,8 @@ const fresh: SandboxRecord = {
     interactionMode: "default",
     machine: {
       size: "small",
-      ttlSeconds: TTL_SECONDS,
+      stopAfterSeconds: STOP_AFTER_SECONDS,
+      ttlSeconds: startupTtlSeconds(STOP_AFTER_SECONDS),
       template: null,
       providerEnvironment: null,
       setupScript: "#!/usr/bin/env bash",
@@ -95,6 +99,11 @@ const ready: SandboxRecord = {
   settledRevision: 1,
 };
 const stopRequested: SandboxRecord = { ...ready, desired: "stopped", desiredRevision: 2 };
+const stopIssued: SandboxRecord = {
+  ...stopRequested,
+  status: { _tag: "stopping", reason: "requested" },
+  inflight: { op: "stop", startedAt: NOW - MINUTE },
+};
 const stopped: SandboxRecord = {
   ...stopRequested,
   status: { _tag: "stopped", reason: "requested" },
@@ -108,17 +117,37 @@ const resumed: SandboxRecord = {
   credentialsStale: true,
 };
 
-const machine = (state: ProviderMachineState, setup: ProviderMachineSetup = null) => ({
+const machine = (
+  state: ProviderMachineState,
+  setup: ProviderMachineSetup = null,
+  archiveAfter: number | null = null,
+) => ({
   id: ProviderMachineId.make("bx_test"),
   state,
   setup,
+  archiveAfter,
 });
 const observed = (overrides: Partial<SandboxObservation> = {}): SandboxObservation => ({
   now: NOW,
   machine: null,
   environmentId: null,
+  activity: null,
   ...overrides,
 });
+const busy = { busy: true, lastActivityAt: NOW - 30 * MINUTE };
+const idleSince = (at: number) => ({ busy: false, lastActivityAt: at });
+/** Running, with the provider's own stop at `archiveAfter`, and the guest's agents doing `activity`. */
+const watched = (archiveAfter: number | null, activity: SandboxObservation["activity"]) =>
+  observed({ machine: machine("running", null, archiveAfter), activity });
+/** Ready for long enough that only its agents' activity decides when it is idle. */
+const longReady: SandboxRecord = { ...ready, runningSince: NOW - 10 * STOP_AFTER };
+const neverStops: SandboxRecord = {
+  ...ready,
+  spec: {
+    ...ready.spec,
+    machine: { ...ready.spec.machine, stopAfterSeconds: null, ttlSeconds: null },
+  },
+};
 const running = observed({ machine: machine("running") });
 const answering = observed({ machine: machine("running"), environmentId: ENV });
 
@@ -269,7 +298,7 @@ const cases: ReadonlyArray<Case> = [
     "a stop requested mid-boot stops once the environment is recorded",
     { ...launching, desired: "stopped", desiredRevision: 2 },
     answering,
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
 
   // Stop.
@@ -277,23 +306,23 @@ const cases: ReadonlyArray<Case> = [
     "stop while ready",
     stopRequested,
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
   [
     "an issued stop not yet visible waits",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    stopIssued,
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "Wait" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
   ],
   [
     "an issued stop lost past the grace is cleared and re-planned",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - INFLIGHT_GRACE_MS } },
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - INFLIGHT_GRACE_MS } },
     running,
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
   ],
   [
     "a stop past its deadline fails",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS } },
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS } },
     observed({ machine: machine("stopping") }),
     failed("stop", true),
   ],
@@ -331,7 +360,7 @@ const cases: ReadonlyArray<Case> = [
       inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
     },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
   ],
   [
     "a resume asked for after a stop failed past its deadline issues the stop again first",
@@ -344,13 +373,13 @@ const cases: ReadonlyArray<Case> = [
       inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
     },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Stop" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Stop" } },
   ],
   [
     "a stopped machine resolves the stop",
-    { ...stopRequested, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    stopIssued,
     observed({ machine: machine("stopped") }),
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
   ],
   [
     "stopped as asked",
@@ -360,14 +389,9 @@ const cases: ReadonlyArray<Case> = [
   ],
   [
     "a resume requested during a stop waits for the stop to land",
-    {
-      ...stopRequested,
-      desired: "running",
-      desiredRevision: 3,
-      inflight: { op: "stop", startedAt: NOW - MINUTE },
-    },
+    { ...stopIssued, desired: "running", desiredRevision: 3 },
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Wait" } },
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
   ],
 
   // Resume.
@@ -472,45 +496,136 @@ const cases: ReadonlyArray<Case> = [
     failed("observe", false),
   ],
 
+  // Idle stop and the provider's own deadline.
+  [
+    "a working sandbox gets a provider deadline past its stop time when it has none",
+    ready,
+    watched(null, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a working sandbox whose provider deadline trails by less than half the grace is left alone",
+    ready,
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS - 4 * MINUTE, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a working sandbox whose provider deadline trails by more than half the grace moves it",
+    ready,
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS - 6 * MINUTE, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a sandbox idle for less than its stop time keeps running",
+    longReady,
+    watched(NOW + 2 * BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER + MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox idle for its stop time is stopped by its owner, with running still asked for",
+    longReady,
+    watched(NOW + BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER)),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "an idle sandbox's provider deadline is moved to its stop time plus the grace",
+    longReady,
+    watched(NOW, idleSince(NOW - 30 * MINUTE)),
+    {
+      status: { _tag: "ready" },
+      action: {
+        _tag: "ExtendDeadline",
+        until: NOW - 30 * MINUTE + STOP_AFTER + BACKSTOP_GRACE_MS,
+      },
+    },
+  ],
+  [
+    "a resumed sandbox counts idle time from its resume, not from its last activity before",
+    { ...ready, runningSince: NOW - MINUTE },
+    watched(
+      NOW - MINUTE + startupTtlSeconds(STOP_AFTER_SECONDS)! * 1000,
+      idleSince(NOW - 10 * STOP_AFTER),
+    ),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox that never stops gets no provider deadline while working",
+    neverStops,
+    watched(null, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox that never stops is not stopped when idle",
+    neverStops,
+    watched(null, idleSince(NOW - 10 * STOP_AFTER)),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a guest that cannot say what its agents do is neither stopped nor given more time",
+    ready,
+    watched(NOW + MINUTE, null),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+
   // Stops the provider made on its own.
   [
-    "a provider stop in progress while ready is tracked, so it gets a deadline",
+    "a provider stop in progress while ready is tracked as external, so it gets a deadline",
     ready,
     observed({ machine: machine("stopping") }),
-    { status: { _tag: "stopping" }, action: { _tag: "Track", op: "stop" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Track", op: "stop" } },
   ],
   [
-    "a tracked provider stop that lands settles as the provider's stop",
-    { ...ready, inflight: { op: "stop", startedAt: NOW - MINUTE } },
+    "a tracked provider stop that lands stays external",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "external" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
     observed({ machine: machine("stopped") }),
-    { status: { _tag: "stopping" }, action: { _tag: "ClearInflight" } },
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "ClearInflight" } },
   ],
   [
-    "stopped past the TTL while ready is expired, not resumed",
-    { ...ready, runningSince: NOW - TTL_SECONDS * 1000 },
-    observed({ machine: machine("stopped") }),
-    settle({ _tag: "stopped", reason: "expired" }),
-  ],
-  [
-    "stopped before the TTL while ready is external",
-    ready,
+    "a stop this owner did not issue settles as external, however long the sandbox ran",
+    { ...ready, runningSince: NOW - 10 * STOP_AFTER },
     observed({ machine: machine("stopped") }),
     settle({ _tag: "stopped", reason: "external" }),
   ],
   [
-    "an expired sandbox stays stopped until asked again",
-    { ...ready, status: { _tag: "stopped", reason: "expired" } },
+    "an idle stop that landed settles as idle, with running still asked for",
+    { ...ready, status: { _tag: "stopping", reason: "idle" } },
     observed({ machine: machine("stopped") }),
-    settle({ _tag: "stopped", reason: "expired" }),
+    settle({ _tag: "stopped", reason: "idle" }),
   ],
   [
-    "asking for running again resumes an expired sandbox",
-    { ...ready, status: { _tag: "stopped", reason: "expired" }, desiredRevision: 2 },
+    "an idle stop keeps its reason while it lands",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "idle" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "an idle sandbox stays stopped until asked again",
+    { ...ready, status: { _tag: "stopped", reason: "idle" } },
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "idle" }),
+  ],
+  [
+    "asking for running again resumes an idle sandbox",
+    { ...ready, status: { _tag: "stopped", reason: "idle" }, desiredRevision: 2 },
     observed({ machine: machine("stopped") }),
     { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
   ],
   [
-    "a resume never issued before a crash is issued, not mistaken for an expiry",
+    "a resume never issued before a crash is issued, not mistaken for a stop from outside",
     { ...resumeRequested, status: { _tag: "resuming" } },
     observed({ machine: machine("stopped") }),
     { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
@@ -732,6 +847,47 @@ const settleAgainstStuckMachine = (start: SandboxRecord, state: ProviderMachineS
 };
 
 describe("planNext over time", () => {
+  it("keeps a turn longer than the stop time running, then stops it itself once idle", () => {
+    let archiveAfter: number | null = null;
+    let extensions = 0;
+    const turnEnds = NOW + 3 * STOP_AFTER;
+    for (let now = NOW; now < turnEnds; now += MINUTE) {
+      // The provider has not stopped it on its own.
+      expect(archiveAfter === null || archiveAfter > now).toBe(true);
+      const next = planNext(
+        ready,
+        observed({ now, machine: machine("running", null, archiveAfter), activity: busy }),
+      );
+      expect(next.status).toEqual({ _tag: "ready" });
+      if (next.action._tag === "ExtendDeadline") {
+        archiveAfter = next.action.until;
+        extensions += 1;
+      } else {
+        expect(next.action).toEqual({ _tag: "Watch" });
+      }
+    }
+    // Once on the first look, then every sixth minute: past half the grace behind.
+    expect(extensions).toBe(60);
+
+    let stoppedAt: number | null = null;
+    for (let now = turnEnds; stoppedAt === null; now += MINUTE) {
+      const next = planNext(
+        ready,
+        observed({
+          now,
+          machine: machine("running", null, archiveAfter),
+          activity: idleSince(turnEnds),
+        }),
+      );
+      if (next.action._tag === "Stop") stoppedAt = now;
+      else if (next.action._tag === "ExtendDeadline") archiveAfter = next.action.until;
+      else expect(next.action).toEqual({ _tag: "Watch" });
+    }
+    expect(stoppedAt - turnEnds).toBe(STOP_AFTER);
+    // Its owner stops it before the provider's own deadline would.
+    expect(archiveAfter !== null && archiveAfter > stoppedAt).toBe(true);
+  });
+
   it("fails again, instead of waiting forever, when a retried stop never lands", () => {
     const retried: SandboxRecord = {
       ...stopRequested,

@@ -10,9 +10,10 @@ branch there, and starts a thread with your message. Sandboxes run on
 Open **Settings → Sandboxes** and choose **Add account**. Paste a Boat API key.
 T3 Code checks that the key can create, read, stop, resume, and delete
 sandboxes, run commands, write files, and host ports before it saves the
-account. The key and any environment variable values stay in that
-environment's secret store, not in its settings. You can add more than one
-account, such as a personal and a work account.
+account. The key must also be allowed to update sandboxes, so T3 Code can push
+back Boat's own stop time while agents work. The key and any environment
+variable values stay in that environment's secret store, not in its settings.
+You can add more than one account, such as a personal and a work account.
 
 In the project's settings, use **Sandboxes** to choose a template for each
 account. The template menu lists the selected account's ready Boat snapshots.
@@ -45,10 +46,23 @@ automatically.
 ## Stop, resume, and delete
 
 Archiving a sandbox's last active thread stops the sandbox, and unarchiving one
-of its threads resumes it. A sandbox also stops on its own after its configured
-**Stop after** time. Stopped sandboxes, including ones that stopped on their
-own, are listed in **Settings → Archive** and **Settings → Sandboxes**, where
-you can resume them.
+of its threads resumes it. A sandbox also stops on its own once no agent in it
+has worked for its **Stop after inactivity** time. An agent that is running, or
+waiting for your answer, counts as working, so a sandbox does not stop in the
+middle of a turn. A sandbox set to **Never** runs until you stop it. Stopped
+sandboxes, including ones that stopped on their own, are listed in
+**Settings → Archive** and **Settings → Sandboxes**, where you can resume them.
+
+The environment that owns the sandbox checks on it about once a minute and stops
+it once it has been idle long enough. This has two limits:
+
+- A message sent in the few seconds between that check and the machine stopping
+  can be cut off.
+- While the owning environment is offline, such as on a laptop that is asleep,
+  Boat stops the sandbox on its own, even in the middle of a turn. It does so
+  within 10 minutes after the stop time runs out, counted from the last agent
+  activity the owning environment saw, and no sooner than 40 minutes after the
+  sandbox started or resumed.
 
 **Delete sandbox**, in a sandbox thread's menu or in Settings, destroys the
 machine and everything on it, including its threads.

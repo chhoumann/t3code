@@ -93,14 +93,16 @@ describe("sandboxRepositoryFor", () => {
 });
 
 describe("isSandboxStopped", () => {
-  it("counts a sandbox stopped at its TTL or by the provider, not only one asked to stop", () => {
+  it("counts a sandbox stopped while idle or by the provider, not only one asked to stop", () => {
     expect(
-      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "expired" } }),
+      isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "idle" } }),
     ).toBe(true);
     expect(
       isSandboxStopped({ desired: "running", status: { _tag: "stopped", reason: "external" } }),
     ).toBe(true);
-    expect(isSandboxStopped({ desired: "stopped", status: { _tag: "stopping" } })).toBe(true);
+    expect(
+      isSandboxStopped({ desired: "stopped", status: { _tag: "stopping", reason: "requested" } }),
+    ).toBe(true);
     expect(isSandboxStopped({ desired: "running", status: { _tag: "ready" } })).toBe(false);
   });
 });
@@ -294,7 +296,7 @@ describe("pendingSandboxThreads", () => {
         [
           sandbox("stopping", "2026-10-09T12:00:00Z", {
             desired: "stopped",
-            status: { _tag: "stopping" },
+            status: { _tag: "stopping", reason: "requested" },
           }),
           sandbox("archived", "2026-10-09T12:00:00Z", {
             desired: "stopped",

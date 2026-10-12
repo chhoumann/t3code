@@ -66,6 +66,7 @@ import {
   SandboxSpec,
   isParked,
   planNext,
+  startupTtlSeconds,
   type SandboxAction,
   type SandboxObservation,
   type SandboxRecord,
@@ -74,7 +75,7 @@ import { ProviderMachineId, SandboxProvider, SandboxProviderError } from "./Sand
 
 /** How often a sandbox in transition is looked at again. */
 const POLL_INTERVAL = Duration.seconds(2);
-/** How often a ready sandbox is checked for a stop the provider made on its own. */
+/** How often a ready sandbox is checked for idle agents and for stops from outside. */
 const WATCH_INTERVAL = Duration.minutes(1);
 /** Between restarts of a sandbox's loop after a failure it could not handle. */
 const RESTART_BACKOFF = Schedule.min([
@@ -173,7 +174,7 @@ export class SandboxService extends Context.Service<
       SandboxView,
       SandboxAccounts.SandboxAccountNotFoundError | SandboxPersistenceError
     >;
-    /** Asking for the current desired state again retries a failed or expired sandbox. */
+    /** Asking for the current desired state again retries a failed sandbox, or resumes one that stopped on its own. */
     readonly update: (input: {
       readonly id: SandboxId;
       readonly desired: SandboxDesired;
@@ -328,6 +329,7 @@ const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   Stop: "stop",
   Resume: "resume",
   Destroy: "destroy",
+  ExtendDeadline: "observe",
   ClearInflight: "observe",
   Track: "observe",
   Wait: "observe",
@@ -462,6 +464,23 @@ const make = Effect.gen(function* () {
     };
   };
 
+  /**
+   * What the guest's agents are doing, or null when the guest cannot say. The
+   * provider's own deadline stops the machine if that lasts.
+   */
+  const readActivity = (record: SandboxRecord, machineId: ProviderMachineId, baseUrl: string) =>
+    accounts.get(record.accountId).pipe(
+      Effect.flatMap((account) =>
+        asOwner(record, account, machineId, (token) => guest.readActivity({ baseUrl, token })),
+      ),
+      Effect.tapError((error) =>
+        Effect.logDebug("sandbox activity unavailable").pipe(
+          Effect.annotateLogs({ sandboxId: record.id, error }),
+        ),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+
   const observe = (record: SandboxRecord) =>
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
@@ -479,7 +498,14 @@ const make = Effect.gen(function* () {
         record.status._tag !== "ready"
           ? yield* guest.readEnvironmentId(record.httpBaseUrl)
           : null;
-      return { now, machine, environmentId } satisfies SandboxObservation;
+      const activity =
+        machine?.state === "running" &&
+        record.httpBaseUrl !== null &&
+        record.status._tag === "ready" &&
+        record.spec.machine.stopAfterSeconds !== null
+          ? yield* readActivity(record, machine.id, record.httpBaseUrl)
+          : null;
+      return { now, machine, environmentId, activity } satisfies SandboxObservation;
     });
 
   /** Runs one action. Returns the record as the action left it. */
@@ -614,7 +640,9 @@ const make = Effect.gen(function* () {
             runningSince: now,
             credentialsStale: true,
           });
-          yield* provider.resume(resolved, yield* machineId);
+          yield* provider.resume(resolved, yield* machineId, {
+            ttlSeconds: startupTtlSeconds(record.spec.machine.stopAfterSeconds),
+          });
           return next;
         }
         case "Destroy": {
@@ -626,6 +654,13 @@ const make = Effect.gen(function* () {
           yield* provider.destroy(resolved, yield* machineId);
           return next;
         }
+        case "ExtendDeadline":
+          yield* provider.setDeadline(
+            yield* account(),
+            yield* machineId,
+            (action.until - now) / 1000,
+          );
+          return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
         case "ClearInflight":
           return yield* writeFacts(record, { status, inflight: null });
         case "Track":
@@ -698,6 +733,7 @@ const make = Effect.gen(function* () {
         case "Wait":
           return "wait" as const;
         case "Watch":
+        case "ExtendDeadline":
           return "watch" as const;
         case "Settle":
           return next.status._tag === "destroyed" ? ("done" as const) : ("park" as const);
@@ -789,6 +825,8 @@ const make = Effect.gen(function* () {
               sandboxProjectKey(input.accountId, input.repository.remoteUrl)
             ],
           );
+          const stopAfterSeconds =
+            defaults.stopAfterHours === null ? null : defaults.stopAfterHours * 3600;
           const record: SandboxRecord = {
             id: input.id,
             accountId: input.accountId,
@@ -803,10 +841,8 @@ const make = Effect.gen(function* () {
               interactionMode: input.interactionMode,
               machine: {
                 size: defaults.size,
-                ttlSeconds:
-                  defaults.stopAfterHours === null
-                    ? null
-                    : Math.round(defaults.stopAfterHours * 3600),
+                stopAfterSeconds,
+                ttlSeconds: startupTtlSeconds(stopAfterSeconds),
                 template: defaults.template,
                 providerEnvironment: account.providerEnvironment,
                 setupScript: renderSandboxBootScript({
