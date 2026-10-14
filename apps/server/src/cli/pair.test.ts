@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises Node HTTP and filesystem boundaries.
+// @effect-diagnostics anyUnknownInErrorContext:off - tsc-rs 0.7 can type runCli's requirements as `any` once the program is large; tsgo with the same plugin types them correctly.
 import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";

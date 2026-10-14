@@ -7,7 +7,10 @@ import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
-import { filterComposerPullRequestMatches } from "@t3tools/shared/composerPullRequestMatches";
+import {
+  composerPullRequestsFromLinks,
+  filterComposerPullRequestMatches,
+} from "@t3tools/shared/composerPullRequestMatches";
 import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
 import { elementContextToPreviewAnnotation } from "../../lib/elementContext";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
@@ -248,7 +251,11 @@ import { THREAD_CONTEXT_DROP_EVENT, threadContextDropTargetProps } from "./threa
 import { readThreadShell, useThreadShells } from "~/state/entities";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import type { ComposerContextClipboardFragment, ComposerContextRecord } from "@t3tools/contracts";
+import type {
+  ComposerContextClipboardFragment,
+  ComposerContextRecord,
+  ThreadPullRequestLink,
+} from "@t3tools/contracts";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import { assetEnvironment } from "~/state/assets";
 import { readPreparedConnection } from "~/state/session";
@@ -1630,6 +1637,8 @@ export interface ChatComposerProps {
   gitCwd: string | null;
   pullRequestProjectId: ProjectId | null;
   pullRequestRepository: string | null;
+  /** The thread's linked pull requests, offered in `#` suggestions from any repository. */
+  threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
   restingControlsHost: HTMLDivElement | null;
   restingControlsHaveLeadingContext: boolean;
   onRestingControlsVisibilityChange: (visible: boolean) => void;
@@ -1776,6 +1785,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     gitCwd,
     pullRequestProjectId,
     pullRequestRepository,
+    threadPullRequests,
     restingControlsHost,
     restingControlsHaveLeadingContext,
     onRestingControlsVisibilityChange,
@@ -2689,6 +2699,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }),
   );
 
+  const linkedPullRequests = useMemo(
+    () =>
+      pullRequestProjectId === null
+        ? []
+        : composerPullRequestsFromLinks(threadPullRequests ?? [], pullRequestProjectId),
+    [pullRequestProjectId, threadPullRequests],
+  );
+
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
@@ -2800,6 +2818,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const matches = /^\d*$/u.test(composerTrigger.query)
         ? filterComposerPullRequestMatches({
             entries: [...exactPullRequest, ...(pullRequestLookup.data?.entries ?? [])],
+            linked: linkedPullRequests,
             projectId: pullRequestProjectId,
             repository: pullRequestRepository,
             query: composerTrigger.query,
@@ -2836,7 +2855,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           isDraft: pullRequest.isDraft,
         },
         label: `#${pullRequest.number}`,
-        description: pullRequest.title,
+        description:
+          pullRequest.repository.trim().toLowerCase() === pullRequestRepository.trim().toLowerCase()
+            ? pullRequest.title
+            : `${pullRequest.repository} · ${pullRequest.title}`,
       }));
     }
     return [];
@@ -2847,6 +2869,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     environmentId,
     environmentThreadShells,
     exactPullRequestLookup.data,
+    linkedPullRequests,
     planModeUiEnabled,
     pullRequestLookup.data,
     pullRequestProjectId,
@@ -4355,6 +4378,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }),
     );
   }, [phase, settings.followUpBehavior, submitComposer]);
+  // A question or approval took the editor while a citation comment was
+  // unsaved. Keep the comment in the prompt that comes back afterward.
+  const saveCitationDraftToPrompt = useCallback(
+    (replacedValue: string, savedValue: string) => {
+      if (replacedValue !== prompt) return;
+      if (promptRef.current === replacedValue) promptRef.current = savedValue;
+      setPrompt(savedValue);
+    },
+    [prompt, promptRef, setPrompt],
+  );
   const compactThreadContext = useCallback(() => {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -6866,6 +6899,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : !isComposerCollapsedMobile && pendingUserInputs.length > 0 ? (
                   <ComposerPendingUserInputPanel
                     pendingUserInputs={pendingUserInputs}
+                    cwd={gitCwd ?? undefined}
+                    threadRef={routeThreadRef}
                     disabled={!canOperateThread}
                     respondingRequestIds={
                       activePendingIsResponding && activePendingUserInput
@@ -6887,6 +6922,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <div data-chat-composer-collapsed-controls="true">
                     <ComposerPendingUserInputPanel
                       pendingUserInputs={pendingUserInputs}
+                      cwd={gitCwd ?? undefined}
+                      threadRef={routeThreadRef}
                       disabled={!canOperateThread}
                       respondingRequestIds={
                         activePendingIsResponding && activePendingUserInput
@@ -7584,6 +7621,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onPageScrollKeyUp={onPageScrollKeyUp}
                     onPageScrollRelease={onPageScrollRelease}
                     onCitationSubmitAndSend={submitCitationAndSend}
+                    onCitationDraftSave={saveCitationDraftToPrompt}
                     onPaste={onComposerPaste}
                     placeholder={
                       isComposerApprovalState

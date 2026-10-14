@@ -153,11 +153,15 @@ it.effect("launches an installed editor with platform-safe arguments", () =>
     );
 
     assert.ok(spawned);
-    assert.equal(spawned.command, '^"C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD^"');
-    assert.deepEqual(spawned.args, [
-      '^"--goto^"',
-      '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
-    ]);
+    assert.equal(
+      spawned.command,
+      [
+        '^"C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD^"',
+        '^"--goto^"',
+        '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
+      ].join(" "),
+    );
+    assert.deepEqual(spawned.args, []);
     assert.equal(spawned.options.shell, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
@@ -241,12 +245,16 @@ it.effect("launches Cursor in classic IDE mode through the Windows command shim"
     );
 
     assert.ok(spawned);
-    assert.equal(spawned.command, '^"C:\\Program^ Files\\Cursor\\bin\\cursor.CMD^"');
-    assert.deepEqual(spawned.args, [
-      '^"--classic^"',
-      '^"--goto^"',
-      '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
-    ]);
+    assert.equal(
+      spawned.command,
+      [
+        '^"C:\\Program^ Files\\Cursor\\bin\\cursor.CMD^"',
+        '^"--classic^"',
+        '^"--goto^"',
+        '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
+      ].join(" "),
+    );
+    assert.deepEqual(spawned.args, []);
     assert.equal(spawned.options.shell, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
@@ -1033,12 +1041,54 @@ for (const { platform, installPath, editor, args } of [
           ),
         );
         assert.ok(spawned);
+        const shim = executable.endsWith(".cmd");
         assert.equal(
           spawned.command,
-          executable.endsWith(".cmd") ? `^"${executable.replaceAll(" ", "^ ")}^"` : executable,
+          shim ? [`^"${executable.replaceAll(" ", "^ ")}^"`, ...args].join(" ") : executable,
         );
-        assert.deepEqual(spawned.args, args);
-        assert.equal(spawned.options.shell, executable.endsWith(".cmd"));
+        assert.deepEqual(spawned.args, shim ? [] : args);
+        assert.equal(spawned.options.shell, shim);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}
+
+for (const cwd of ["/workspace with spaces/", "/workspace with spaces/file.ts:12:4"]) {
+  it.effect.skipIf(windowsHost)(
+    `opens ${cwd} with the macOS Zed bundle when another zed is on PATH`,
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-zed-collision-" });
+        const executable = path.join(home, "Applications/Zed.app/Contents/MacOS/cli");
+        const binDir = path.join(home, "zfs/bin");
+        yield* fs.makeDirectory(path.dirname(executable), { recursive: true });
+        yield* fs.makeDirectory(binDir, { recursive: true });
+        for (const command of [executable, path.join(binDir, "zed")]) {
+          yield* fs.writeFileString(command, "#!/bin/sh\n");
+          yield* fs.chmod(command, 0o755);
+        }
+
+        let spawned: ChildProcess.StandardCommand | undefined;
+        yield* Effect.gen(function* () {
+          const launcher = yield* ExternalLauncher.ExternalLauncher;
+          assert.include(yield* launcher.resolveAvailableEditors(), "zed");
+          yield* launcher.launchEditor({ editor: "zed", cwd });
+        }).pipe(
+          Effect.provide(
+            layerTest({
+              platform: "darwin",
+              env: { HOME: home, PATH: binDir },
+              onSpawn: (command) => {
+                spawned = command;
+              },
+            }),
+          ),
+        );
+        assert.ok(spawned);
+        assert.equal(spawned.command, executable);
+        assert.deepEqual(spawned.args, [cwd]);
+        assert.equal(spawned.options.shell, false);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 }
@@ -1435,10 +1485,12 @@ it.effect("starts a Windows command shim for unicode paths with cmd metacharacte
     assert.isTrue(Exit.isSuccess(exit));
     assert.ok(spawned);
     assert.equal(spawned.options.shell, true);
-    assert.deepEqual(spawned.args, [
-      '^"--goto^"',
-      '^"C:\\Users\\jö\\R^&D^ ^(100^%^)\\naïve^ ^^file^!.ts:3:7^"',
-    ]);
+    assert.deepEqual(spawned.args, []);
+    assert.isTrue(
+      spawned.command.endsWith(
+        ' ^"--goto^" ^"C:\\Users\\jö\\R^&D^ ^(100^%^)\\naïve^ ^^file^!.ts:3:7^"',
+      ),
+    );
   }),
 );
 

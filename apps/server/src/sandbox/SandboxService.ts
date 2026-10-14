@@ -370,7 +370,7 @@ const make = Effect.gen(function* () {
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
 
-  const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
+  const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
   const persistence = Effect.mapError((cause: unknown) => new SandboxPersistenceError({ cause }));
 
   const readRecord = (id: SandboxId) =>

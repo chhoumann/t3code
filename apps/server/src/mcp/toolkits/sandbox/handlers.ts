@@ -27,7 +27,7 @@ export const layer = McpToolAccess.toLayer(
         (params) => params,
         (params, modes) =>
           Effect.gen(function* () {
-            const id = params.id ?? SandboxId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+            const id = params.id ?? SandboxId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie));
             return yield* sandboxes
               .launch({ ...params, ...modes, id })
               .pipe(Effect.mapError(toFailure));
