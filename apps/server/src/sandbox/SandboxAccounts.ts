@@ -76,7 +76,7 @@ export class SandboxAccountInvalidError extends Schema.TaggedError<SandboxAccoun
       case "api-key-required":
         return "A new sandbox account needs an API key.";
       case "env-value-required":
-        return `The new env variable ${this.envName} needs a value.`;
+        return `The env variable ${this.envName} needs a value.`;
       case "duplicate-env-name":
         return `The env variable ${this.envName} is listed twice.`;
     }
