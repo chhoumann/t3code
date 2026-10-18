@@ -12,7 +12,6 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   memo,
-  useCallback,
 } from "react";
 
 import { cn } from "~/lib/utils";
@@ -79,26 +78,20 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
-  const handleKeyDown = useCallback(
-    (event: ReactKeyboardEvent) => {
-      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-        event.preventDefault();
-        const rect = event.currentTarget.getBoundingClientRect();
-        onContextMenu(pending, { x: rect.left, y: rect.bottom });
-      } else if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onNavigate(pending);
-      }
-    },
-    [onContextMenu, onNavigate, pending],
-  );
-  const handleContextMenu = useCallback(
-    (event: ReactMouseEvent) => {
+  const handleKeyDown = (event: ReactKeyboardEvent) => {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault();
-      onContextMenu(pending, { x: event.clientX, y: event.clientY });
-    },
-    [onContextMenu, pending],
-  );
+      const rect = event.currentTarget.getBoundingClientRect();
+      onContextMenu(pending, { x: rect.left, y: rect.bottom });
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onNavigate(pending);
+    }
+  };
+  const handleContextMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    onContextMenu(pending, { x: event.clientX, y: event.clientY });
+  };
 
   return (
     <li

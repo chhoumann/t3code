@@ -10,7 +10,6 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback } from "react";
 
 import { readCanSendWork } from "./sandboxes";
 import { readEnvironmentScope } from "./session";
@@ -25,22 +24,19 @@ function useGuardedCommand<W extends { readonly environmentId: EnvironmentId }, 
   allowed: (environmentId: EnvironmentId) => boolean,
 ): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
   const run = useAtomCommand(command, options);
-  return useCallback(
-    async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> => {
-      if (!allowed(value.environmentId)) {
-        return AsyncResult.failure(
-          Cause.fail(
-            new EnvironmentAuthorizationError({
-              requiredScope: AuthOrchestrationOperateScope,
-              message: ORCHESTRATION_OPERATE_DENIED_MESSAGE,
-            }),
-          ),
-        );
-      }
-      return run(value);
-    },
-    [allowed, run],
-  );
+  return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> => {
+    if (!allowed(value.environmentId)) {
+      return AsyncResult.failure(
+        Cause.fail(
+          new EnvironmentAuthorizationError({
+            requiredScope: AuthOrchestrationOperateScope,
+            message: ORCHESTRATION_OPERATE_DENIED_MESSAGE,
+          }),
+        ),
+      );
+    }
+    return run(value);
+  };
 }
 
 const readOperateScope = (environmentId: EnvironmentId) =>
