@@ -15,6 +15,15 @@ import {
   heldWorkStep,
 } from "./heldSandboxWork";
 
+/** How the composer's sends and resumes reach an environment whose sandbox may sleep. */
+export interface SandboxWorkGate {
+  readonly delivery: WorkDelivery;
+  /** Whether work is held right now, which turns other sends and resumes away. */
+  readonly isHolding: () => boolean;
+  /** Holds work until the sandbox wakes, then sends it. */
+  readonly hold: (work: HeldWork) => void;
+}
+
 /** How long a thread may take to load from its sandbox once the sandbox is awake. */
 const THREAD_LOAD_AFTER_WAKE_MS = 30_000;
 

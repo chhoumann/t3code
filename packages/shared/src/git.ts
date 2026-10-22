@@ -406,10 +406,14 @@ export function repositoryIdentityFromRemotes(
     ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
     ...(owner ? { owner } : {}),
     ...(repositoryName ? { name: repositoryName } : {}),
-    ...(originKey === canonicalKey
+    ...(originUrl === undefined || originKey === canonicalKey
       ? {}
       : {
-          origin: { canonicalKey: originKey, ...(originPath ? { displayName: originPath } : {}) },
+          origin: {
+            canonicalKey: originKey,
+            remoteUrl: originUrl,
+            ...(originPath ? { displayName: originPath } : {}),
+          },
         }),
   };
 }
