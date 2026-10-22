@@ -147,54 +147,54 @@ const awaitSandboxBack = (
  * shortly after its sandbox wakes. A device that never saw the sandbox awake
  * pairs with it only then, so the environment may register while this waits.
  */
-export const onceConnected = <A, E, R>(
+export const onceConnected = Effect.fn("SandboxCommands.onceConnected")(function* <A, E, R>(
   environmentId: EnvironmentId,
   effect: Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    const session = yield* registry
-      .followStream(
-        environmentId,
-        Stream.unwrap(
-          EnvironmentSupervisor.EnvironmentSupervisor.pipe(
-            Effect.map((supervisor) => SubscriptionRef.changes(supervisor.session)),
-          ),
+) {
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const session = yield* registry
+    .followStream(
+      environmentId,
+      Stream.unwrap(
+        EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+          Effect.map((supervisor) => SubscriptionRef.changes(supervisor.session)),
         ),
-      )
-      .pipe(
-        Stream.filter(Option.isSome),
-        Stream.runHead,
-        Effect.timeoutOrElse({
-          duration: SANDBOX_RECONNECT_TIMEOUT,
-          orElse: () => Effect.succeedNone,
-        }),
-      );
-    if (Option.isNone(session)) {
-      return yield* notAwake("The sandbox is awake, but this device could not reconnect to it.");
-    }
-    return yield* registry.run(environmentId, effect);
-  });
+      ),
+    )
+    .pipe(
+      Stream.filter(Option.isSome),
+      Stream.runHead,
+      Effect.timeoutOrElse({
+        duration: SANDBOX_RECONNECT_TIMEOUT,
+        orElse: () => Effect.succeedNone,
+      }),
+    );
+  if (Option.isNone(session)) {
+    return yield* notAwake("The sandbox is awake, but this device could not reconnect to it.");
+  }
+  return yield* registry.run(environmentId, effect);
+});
 
 /** Fails at once when the sandbox's owner cannot be asked, since only it can wake the sandbox. */
-const requireOwner = (ownerEnvironmentId: EnvironmentId) =>
-  Effect.gen(function* () {
-    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    const connected = yield* registry
-      .run(
-        ownerEnvironmentId,
-        EnvironmentSupervisor.EnvironmentSupervisor.pipe(
-          Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.session)),
-          Effect.map(Option.isSome),
-        ),
-      )
-      .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.succeed(false) }));
-    if (connected) return;
-    const owner = (yield* SubscriptionRef.get(registry.entries)).get(ownerEnvironmentId);
-    return yield* notAwake(
-      `${owner?.target.label ?? "The sandbox's owner"} is offline, so it cannot wake this sandbox.`,
-    );
-  });
+const requireOwner = Effect.fn("SandboxCommands.requireOwner")(function* (
+  ownerEnvironmentId: EnvironmentId,
+) {
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const connected = yield* registry
+    .run(
+      ownerEnvironmentId,
+      EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+        Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.session)),
+        Effect.map(Option.isSome),
+      ),
+    )
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.succeed(false) }));
+  if (connected) return;
+  const owner = (yield* SubscriptionRef.get(registry.entries)).get(ownerEnvironmentId);
+  return yield* notAwake(
+    `${owner?.target.label ?? "The sandbox's owner"} is offline, so it cannot wake this sandbox.`,
+  );
+});
 
 /**
  * Whether work sent to a sandbox's environment wakes the sandbox first: it
@@ -220,44 +220,43 @@ export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boo
  * still waits for that socket, which a wake that timed out on it never got.
  * Succeeds with whether it had to wake; any other environment is left alone.
  */
-export const wakeSandbox = <E, R>(input: {
+export const wakeSandbox = Effect.fn("SandboxCommands.wakeSandbox")(function* <E, R>(input: {
   readonly environmentId: EnvironmentId;
   /** Asks the owner for the change, succeeding with the sandbox as the owner accepted it. */
   readonly toOwner: (change: SandboxOwnerChange) => Effect.Effect<SandboxView, E, R>;
-}) =>
-  Effect.gen(function* () {
-    const registrations = yield* Effect.serviceOption(SandboxRegistrations.SandboxRegistrations);
-    if (Option.isNone(registrations)) return false;
-    const sandbox = SandboxRegistrations.sandboxIndex(
-      yield* SubscriptionRef.get(registrations.value.owners),
-    ).get(input.environmentId);
-    if (sandbox === undefined) return false;
-    if (SandboxRegistrations.sandboxPresence(sandbox.view) === "running") {
-      yield* onceConnected(input.environmentId, Effect.void);
-      return false;
-    }
-    if (!wakesForWork(sandbox.view)) return false;
-    const { status } = sandbox.view;
-    if (status._tag === "failed" && !status.retryable) {
-      return yield* notAwake(`The sandbox could not wake. ${status.message}`);
-    }
-    const revision =
-      SandboxRegistrations.sandboxPresence(sandbox.view) === "waking"
-        ? sandbox.view.revision
-        : yield* requireOwner(sandbox.ownerEnvironmentId).pipe(
-            Effect.andThen(
-              input.toOwner({
-                ownerEnvironmentId: sandbox.ownerEnvironmentId,
-                sandboxId: sandbox.sandboxId,
-                desired: "running",
-              }),
-            ),
-            Effect.map((accepted) => accepted.revision),
-          );
-    yield* awaitSandboxBack(registrations.value, sandbox, revision);
+}) {
+  const registrations = yield* Effect.serviceOption(SandboxRegistrations.SandboxRegistrations);
+  if (Option.isNone(registrations)) return false;
+  const sandbox = SandboxRegistrations.sandboxIndex(
+    yield* SubscriptionRef.get(registrations.value.owners),
+  ).get(input.environmentId);
+  if (sandbox === undefined) return false;
+  if (SandboxRegistrations.sandboxPresence(sandbox.view) === "running") {
     yield* onceConnected(input.environmentId, Effect.void);
-    return true;
-  });
+    return false;
+  }
+  if (!wakesForWork(sandbox.view)) return false;
+  const { status } = sandbox.view;
+  if (status._tag === "failed" && !status.retryable) {
+    return yield* notAwake(`The sandbox could not wake. ${status.message}`);
+  }
+  const revision =
+    SandboxRegistrations.sandboxPresence(sandbox.view) === "waking"
+      ? sandbox.view.revision
+      : yield* requireOwner(sandbox.ownerEnvironmentId).pipe(
+          Effect.andThen(
+            input.toOwner({
+              ownerEnvironmentId: sandbox.ownerEnvironmentId,
+              sandboxId: sandbox.sandboxId,
+              desired: "running",
+            }),
+          ),
+          Effect.map((accepted) => accepted.revision),
+        );
+  yield* awaitSandboxBack(registrations.value, sandbox, revision);
+  yield* onceConnected(input.environmentId, Effect.void);
+  return true;
+});
 
 /** Runs another command from inside a command's effect, keeping its permission checks. */
 export const runAtomCommand = <W, A, E>(

@@ -383,29 +383,31 @@ const make = Effect.gen(function* () {
       persistence,
     );
 
-  const writeFacts = (record: SandboxRecord, facts: ReconcilerFacts) =>
-    Effect.gen(function* () {
-      const next: SandboxRecord = { ...record, ...facts };
-      const columns = reconcilerColumnsOf(next);
-      const unchanged = Object.entries(columns).every(
-        ([column, value]) => reconcilerColumnsOf(record)[column as keyof typeof columns] === value,
-      );
-      if (unchanged) return next;
-      const updatedAt = yield* Clock.currentTimeMillis;
-      yield* sql`UPDATE sandboxes SET ${sql.update({ ...columns, updated_at: updatedAt })} WHERE sandbox_id = ${record.id}`.pipe(
-        persistence,
-      );
-      // A settle that leaves the status as it was still ends a client's wait on its request.
-      if (
-        statusKey(next.status) !== statusKey(record.status) ||
-        next.settledRevision !== record.settledRevision ||
-        next.environmentId !== record.environmentId ||
-        next.httpBaseUrl !== record.httpBaseUrl
-      ) {
-        yield* PubSub.publish(changesPubSub, toView(next));
-      }
-      return next;
-    });
+  const writeFacts = Effect.fn("SandboxService.writeFacts")(function* (
+    record: SandboxRecord,
+    facts: ReconcilerFacts,
+  ) {
+    const next: SandboxRecord = { ...record, ...facts };
+    const columns = reconcilerColumnsOf(next);
+    const unchanged = Object.entries(columns).every(
+      ([column, value]) => reconcilerColumnsOf(record)[column as keyof typeof columns] === value,
+    );
+    if (unchanged) return next;
+    const updatedAt = yield* Clock.currentTimeMillis;
+    yield* sql`UPDATE sandboxes SET ${sql.update({ ...columns, updated_at: updatedAt })} WHERE sandbox_id = ${record.id}`.pipe(
+      persistence,
+    );
+    // A settle that leaves the status as it was still ends a client's wait on its request.
+    if (
+      statusKey(next.status) !== statusKey(record.status) ||
+      next.settledRevision !== record.settledRevision ||
+      next.environmentId !== record.environmentId ||
+      next.httpBaseUrl !== record.httpBaseUrl
+    ) {
+      yield* PubSub.publish(changesPubSub, toView(next));
+    }
+    return next;
+  });
 
   const getAdminToken = (
     record: SandboxRecord,
@@ -480,274 +482,273 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
 
-  const observe = (record: SandboxRecord) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      const machineId = record.machineId;
-      const machine =
-        machineId === null
-          ? null
-          : yield* accounts
-              .get(record.accountId)
-              .pipe(Effect.flatMap((account) => provider.inspect(account, machineId)));
-      // A ready sandbox stays ready while its server restarts; only the machine state matters then.
-      const environmentId =
-        machine?.state === "running" &&
-        record.httpBaseUrl !== null &&
-        record.status._tag !== "ready"
-          ? yield* guest.readEnvironmentId(record.httpBaseUrl)
-          : null;
-      const activity =
-        machine?.state === "running" &&
-        record.httpBaseUrl !== null &&
-        record.status._tag === "ready" &&
-        record.spec.machine.stopAfterSeconds !== null
-          ? yield* readActivity(record, machine.id, record.httpBaseUrl)
-          : null;
-      return { now, machine, environmentId, activity } satisfies SandboxObservation;
-    });
+  const observe = Effect.fn("SandboxService.observe")(function* (record: SandboxRecord) {
+    const now = yield* Clock.currentTimeMillis;
+    const machineId = record.machineId;
+    const machine =
+      machineId === null
+        ? null
+        : yield* accounts
+            .get(record.accountId)
+            .pipe(Effect.flatMap((account) => provider.inspect(account, machineId)));
+    // A ready sandbox stays ready while its server restarts; only the machine state matters then.
+    const environmentId =
+      machine?.state === "running" && record.httpBaseUrl !== null && record.status._tag !== "ready"
+        ? yield* guest.readEnvironmentId(record.httpBaseUrl)
+        : null;
+    const activity =
+      machine?.state === "running" &&
+      record.httpBaseUrl !== null &&
+      record.status._tag === "ready" &&
+      record.spec.machine.stopAfterSeconds !== null
+        ? yield* readActivity(record, machine.id, record.httpBaseUrl)
+        : null;
+    return { now, machine, environmentId, activity } satisfies SandboxObservation;
+  });
 
   /** Runs one action. Returns the record as the action left it. */
-  const runAction = (record: SandboxRecord, status: SandboxStatus, action: SandboxAction) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      // The planner only picks a machine action once the machine id is stored.
-      const machineId = Effect.suspend(() =>
-        record.machineId === null
-          ? Effect.die(new Error(`${action._tag} planned without a machine id.`))
-          : Effect.succeed(record.machineId),
-      );
-      const account = () => accounts.get(record.accountId);
-      switch (action._tag) {
-        case "Create": {
-          const resolved = yield* account();
-          const started = yield* writeFacts(record, {
-            status,
-            inflight: { op: "create", startedAt: now },
-            createFirstAttemptAt: record.createFirstAttemptAt ?? now,
-            runningSince: now,
-          });
-          const created = yield* provider
-            .create(resolved, {
-              idempotencyKey: record.createKey,
-              size: record.spec.machine.size,
-              ttlSeconds: record.spec.machine.ttlSeconds,
-              template: record.spec.machine.template,
-              providerEnvironment: record.spec.machine.providerEnvironment,
-              setupScript: record.spec.machine.setupScript,
-            })
-            .pipe(
-              Effect.tapError((error) =>
-                isDefinitiveRefusal(error)
-                  ? // Nothing was created, so the next attempt must not replay this refusal.
-                    uuid.pipe(
-                      Effect.flatMap((key) =>
-                        writeFacts(started, {
-                          inflight: null,
-                          createFirstAttemptAt: null,
-                          createKey: `t3-sandbox-${record.id}-${key}`,
-                        }),
-                      ),
-                    )
-                  : Effect.void,
-              ),
-            );
-          return yield* writeFacts(started, {
-            machineId: created.id,
-            inflight: null,
-            createFirstAttemptAt: null,
-          });
-        }
-        case "WriteInputs": {
-          const resolved = yield* account();
-          const tarball =
-            record.spec.t3.kind === "npm"
-              ? null
-              : build.kind === "tarball" && build.version === record.spec.t3.version
-                ? build.bytes
-                : yield* new SandboxBuildUnavailableError({ version: record.spec.t3.version });
-          yield* guest.writeBootInputs(resolved, yield* machineId, {
-            ...machineCredentials(resolved),
-            tarball,
-            managed: {
-              ownerEnvironmentId,
-              sandboxId: record.id,
-            },
-          });
-          return yield* writeFacts(record, {
-            status,
-            inputsWrittenAt: now,
-          });
-        }
-        case "Host": {
-          const baseUrl = yield* provider.host(yield* account(), yield* machineId, SANDBOX_T3_PORT);
-          return yield* writeFacts(record, { status, httpBaseUrl: baseUrl });
-        }
-        case "RecordEnvironment":
-          return yield* writeFacts(record, { status, environmentId: action.environmentId });
-        case "LaunchSeed": {
-          const resolved = yield* account();
-          const baseUrl =
-            record.httpBaseUrl ??
-            (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
-          const { repository } = record.spec;
-          const checkout = {
-            ...repository,
-            sandboxId: record.id,
-            branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-            path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
-          };
-          const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
-          yield* asOwner(record, resolved, yield* machineId, (token) =>
-            guest.launchSeedThread(
-              { baseUrl, token },
-              {
-                checkout,
-                scripts,
-                seed: {
-                  ...record.seed,
-                  title: record.spec.title,
-                  message: record.spec.message,
-                  driver: record.spec.driver,
-                  model: record.spec.model,
-                  runtimeMode: record.spec.runtimeMode,
-                  interactionMode: record.spec.interactionMode,
-                },
-              },
+  const runAction = Effect.fn("SandboxService.runAction")(function* (
+    record: SandboxRecord,
+    status: SandboxStatus,
+    action: SandboxAction,
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    // The planner only picks a machine action once the machine id is stored.
+    const machineId = Effect.suspend(() =>
+      record.machineId === null
+        ? Effect.die(new Error(`${action._tag} planned without a machine id.`))
+        : Effect.succeed(record.machineId),
+    );
+    const account = () => accounts.get(record.accountId);
+    switch (action._tag) {
+      case "Create": {
+        const resolved = yield* account();
+        const started = yield* writeFacts(record, {
+          status,
+          inflight: { op: "create", startedAt: now },
+          createFirstAttemptAt: record.createFirstAttemptAt ?? now,
+          runningSince: now,
+        });
+        const created = yield* provider
+          .create(resolved, {
+            idempotencyKey: record.createKey,
+            size: record.spec.machine.size,
+            ttlSeconds: record.spec.machine.ttlSeconds,
+            template: record.spec.machine.template,
+            providerEnvironment: record.spec.machine.providerEnvironment,
+            setupScript: record.spec.machine.setupScript,
+          })
+          .pipe(
+            Effect.tapError((error) =>
+              isDefinitiveRefusal(error)
+                ? // Nothing was created, so the next attempt must not replay this refusal.
+                  uuid.pipe(
+                    Effect.flatMap((key) =>
+                      writeFacts(started, {
+                        inflight: null,
+                        createFirstAttemptAt: null,
+                        createKey: `t3-sandbox-${record.id}-${key}`,
+                      }),
+                    ),
+                  )
+                : Effect.void,
             ),
           );
-          return yield* writeFacts(record, { status, seedLaunchedAt: now });
-        }
-        case "RefreshCredentials": {
-          const resolved = yield* account();
-          yield* guest.refreshCredentials(resolved, yield* machineId, machineCredentials(resolved));
-          return yield* writeFacts(record, { status, credentialsStale: false });
-        }
-        case "Stop": {
-          const resolved = yield* account();
-          const next = yield* writeFacts(record, {
-            status,
-            inflight: { op: "stop", startedAt: now },
-          });
-          yield* provider.stop(resolved, yield* machineId);
-          return next;
-        }
-        case "Resume": {
-          const resolved = yield* account();
-          const next = yield* writeFacts(record, {
-            status,
-            inflight: { op: "resume", startedAt: now },
-            runningSince: now,
-            credentialsStale: true,
-          });
-          yield* provider.resume(resolved, yield* machineId, {
-            ttlSeconds: startupTtlSeconds(record.spec.machine.stopAfterSeconds),
-          });
-          return next;
-        }
-        case "Destroy": {
-          const resolved = yield* account();
-          const next = yield* writeFacts(record, {
-            status,
-            inflight: { op: "destroy", startedAt: now },
-          });
-          yield* provider.destroy(resolved, yield* machineId);
-          return next;
-        }
-        case "ExtendDeadline": {
-          // A refused extension leaves Boat's deadline in charge; the machine still runs.
-          const resolved = yield* account();
-          const extended = yield* provider
-            .setDeadline(resolved, yield* machineId, (action.until - now) / 1000)
-            .pipe(Effect.result);
-          if (extended._tag === "Failure") {
-            if (!isDefinitiveRefusal(extended.failure)) return yield* extended.failure;
-            yield* Effect.logWarning("sandbox deadline not extended").pipe(
-              Effect.annotateLogs({ sandboxId: record.id, error: extended.failure.message }),
-            );
-          }
-          return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
-        }
-        case "ClearInflight":
-          return yield* writeFacts(record, { status, inflight: null });
-        case "Track":
-          return yield* writeFacts(record, { status, inflight: { op: action.op, startedAt: now } });
-        case "Wait":
-          return yield* writeFacts(record, { status });
-        case "Watch":
-        case "Settle": {
-          if (status._tag === "destroyed") {
-            yield* secrets.remove(adminSecretName(record.id)).pipe(Effect.ignore({ log: true }));
-          }
-          return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
-        }
+        return yield* writeFacts(started, {
+          machineId: created.id,
+          inflight: null,
+          createFirstAttemptAt: null,
+        });
       }
-    });
+      case "WriteInputs": {
+        const resolved = yield* account();
+        const tarball =
+          record.spec.t3.kind === "npm"
+            ? null
+            : build.kind === "tarball" && build.version === record.spec.t3.version
+              ? build.bytes
+              : yield* new SandboxBuildUnavailableError({ version: record.spec.t3.version });
+        yield* guest.writeBootInputs(resolved, yield* machineId, {
+          ...machineCredentials(resolved),
+          tarball,
+          managed: {
+            ownerEnvironmentId,
+            sandboxId: record.id,
+          },
+        });
+        return yield* writeFacts(record, {
+          status,
+          inputsWrittenAt: now,
+        });
+      }
+      case "Host": {
+        const baseUrl = yield* provider.host(yield* account(), yield* machineId, SANDBOX_T3_PORT);
+        return yield* writeFacts(record, { status, httpBaseUrl: baseUrl });
+      }
+      case "RecordEnvironment":
+        return yield* writeFacts(record, { status, environmentId: action.environmentId });
+      case "LaunchSeed": {
+        const resolved = yield* account();
+        const baseUrl =
+          record.httpBaseUrl ??
+          (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
+        const { repository } = record.spec;
+        const checkout = {
+          ...repository,
+          sandboxId: record.id,
+          branch: `t3/sandbox-${record.id.slice(0, 8)}`,
+          path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
+        };
+        const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
+        yield* asOwner(record, resolved, yield* machineId, (token) =>
+          guest.launchSeedThread(
+            { baseUrl, token },
+            {
+              checkout,
+              scripts,
+              seed: {
+                ...record.seed,
+                title: record.spec.title,
+                message: record.spec.message,
+                driver: record.spec.driver,
+                model: record.spec.model,
+                runtimeMode: record.spec.runtimeMode,
+                interactionMode: record.spec.interactionMode,
+              },
+            },
+          ),
+        );
+        return yield* writeFacts(record, { status, seedLaunchedAt: now });
+      }
+      case "RefreshCredentials": {
+        const resolved = yield* account();
+        yield* guest.refreshCredentials(resolved, yield* machineId, machineCredentials(resolved));
+        return yield* writeFacts(record, { status, credentialsStale: false });
+      }
+      case "Stop": {
+        const resolved = yield* account();
+        const next = yield* writeFacts(record, {
+          status,
+          inflight: { op: "stop", startedAt: now },
+        });
+        yield* provider.stop(resolved, yield* machineId);
+        return next;
+      }
+      case "Resume": {
+        const resolved = yield* account();
+        const next = yield* writeFacts(record, {
+          status,
+          inflight: { op: "resume", startedAt: now },
+          runningSince: now,
+          credentialsStale: true,
+        });
+        yield* provider.resume(resolved, yield* machineId, {
+          ttlSeconds: startupTtlSeconds(record.spec.machine.stopAfterSeconds),
+        });
+        return next;
+      }
+      case "Destroy": {
+        const resolved = yield* account();
+        const next = yield* writeFacts(record, {
+          status,
+          inflight: { op: "destroy", startedAt: now },
+        });
+        yield* provider.destroy(resolved, yield* machineId);
+        return next;
+      }
+      case "ExtendDeadline": {
+        // A refused extension leaves Boat's deadline in charge; the machine still runs.
+        const resolved = yield* account();
+        const extended = yield* provider
+          .setDeadline(resolved, yield* machineId, (action.until - now) / 1000)
+          .pipe(Effect.result);
+        if (extended._tag === "Failure") {
+          if (!isDefinitiveRefusal(extended.failure)) return yield* extended.failure;
+          yield* Effect.logWarning("sandbox deadline not extended").pipe(
+            Effect.annotateLogs({ sandboxId: record.id, error: extended.failure.message }),
+          );
+        }
+        return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
+      }
+      case "ClearInflight":
+        return yield* writeFacts(record, { status, inflight: null });
+      case "Track":
+        return yield* writeFacts(record, { status, inflight: { op: action.op, startedAt: now } });
+      case "Wait":
+        return yield* writeFacts(record, { status });
+      case "Watch":
+      case "Settle": {
+        if (status._tag === "destroyed") {
+          yield* secrets.remove(adminSecretName(record.id)).pipe(Effect.ignore({ log: true }));
+        }
+        return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
+      }
+    }
+  });
 
   /** Plans and runs one step; returns how the loop goes on. */
-  const step = (id: SandboxId) =>
-    Effect.gen(function* () {
-      const found = yield* readRecord(id);
-      // A destroyed sandbox only ever settles destroyed again, so its loop ends.
-      if (
-        Option.isNone(found) ||
-        (isParked(found.value) && found.value.status._tag === "destroyed")
-      ) {
-        return "done" as const;
+  const step = Effect.fn("SandboxService.step")(function* (id: SandboxId) {
+    const found = yield* readRecord(id);
+    // A destroyed sandbox only ever settles destroyed again, so its loop ends.
+    if (
+      Option.isNone(found) ||
+      (isParked(found.value) && found.value.status._tag === "destroyed")
+    ) {
+      return "done" as const;
+    }
+    if (isParked(found.value)) return "park" as const;
+    const record = found.value;
+    const observation = yield* observe(record).pipe(Effect.result);
+    // A provider hiccup while looking changes nothing; look again later.
+    if (
+      observation._tag === "Failure" &&
+      isProviderError(observation.failure) &&
+      observation.failure.kind === "transient"
+    ) {
+      return record.status._tag === "ready" ? ("watch" as const) : ("wait" as const);
+    }
+    const next =
+      observation._tag === "Failure"
+        ? {
+            status: failedStatus("observe", observation.failure),
+            action: { _tag: "Settle" } as const,
+          }
+        : planNext(record, observation.success);
+    yield* Effect.logDebug("sandbox step").pipe(
+      Effect.annotateLogs({ sandboxId: id, status: next.status._tag, action: next.action._tag }),
+    );
+    const outcome = yield* runAction(record, next.status, next.action).pipe(Effect.result);
+    if (outcome._tag === "Failure") {
+      const error = outcome.failure;
+      if (error._tag === "SandboxPersistenceError") return yield* error;
+      // The provider may yet act, and a machine that vanished under a call is
+      // seen as gone by the next look: neither proves the request failed.
+      if (isProviderError(error) && (error.kind === "transient" || error.kind === "not-found")) {
+        return "wait" as const;
       }
-      if (isParked(found.value)) return "park" as const;
-      const record = found.value;
-      const observation = yield* observe(record).pipe(Effect.result);
-      // A provider hiccup while looking changes nothing; look again later.
-      if (
-        observation._tag === "Failure" &&
-        isProviderError(observation.failure) &&
-        observation.failure.kind === "transient"
-      ) {
-        return record.status._tag === "ready" ? ("watch" as const) : ("wait" as const);
+      const current = yield* readRecord(id);
+      if (Option.isSome(current)) {
+        yield* writeFacts(current.value, {
+          status: failedStatus(FAILED_STEP[next.action._tag], error),
+          settledRevision: record.desiredRevision,
+          // A refused call had no effect, so asking again need not wait for it to show.
+          ...(isDefinitiveRefusal(error) ? { inflight: null } : {}),
+        });
       }
-      const next =
-        observation._tag === "Failure"
-          ? {
-              status: failedStatus("observe", observation.failure),
-              action: { _tag: "Settle" } as const,
-            }
-          : planNext(record, observation.success);
-      yield* Effect.logDebug("sandbox step").pipe(
-        Effect.annotateLogs({ sandboxId: id, status: next.status._tag, action: next.action._tag }),
-      );
-      const outcome = yield* runAction(record, next.status, next.action).pipe(Effect.result);
-      if (outcome._tag === "Failure") {
-        const error = outcome.failure;
-        if (error._tag === "SandboxPersistenceError") return yield* error;
-        // The provider may yet act, and a machine that vanished under a call is
-        // seen as gone by the next look: neither proves the request failed.
-        if (isProviderError(error) && (error.kind === "transient" || error.kind === "not-found")) {
-          return "wait" as const;
-        }
-        const current = yield* readRecord(id);
-        if (Option.isSome(current)) {
-          yield* writeFacts(current.value, {
-            status: failedStatus(FAILED_STEP[next.action._tag], error),
-            settledRevision: record.desiredRevision,
-            // A refused call had no effect, so asking again need not wait for it to show.
-            ...(isDefinitiveRefusal(error) ? { inflight: null } : {}),
-          });
-        }
-        return "park" as const;
-      }
-      switch (next.action._tag) {
-        case "Wait":
-          return "wait" as const;
-        case "Watch":
-        case "ExtendDeadline":
-          return "watch" as const;
-        case "Settle":
-          return next.status._tag === "destroyed" ? ("done" as const) : ("park" as const);
-        default:
-          return "continue" as const;
-      }
-    });
+      return "park" as const;
+    }
+    switch (next.action._tag) {
+      case "Wait":
+        return "wait" as const;
+      case "Watch":
+      case "ExtendDeadline":
+        return "watch" as const;
+      case "Settle":
+        return next.status._tag === "destroyed" ? ("done" as const) : ("park" as const);
+      default:
+        return "continue" as const;
+    }
+  });
 
   /**
    * One sandbox's loop, until it is destroyed. Between steps it waits on
@@ -815,8 +816,8 @@ const make = Effect.gen(function* () {
   /** Wakes the sandbox's loop, starting it on the first request. */
   const kick = (id: SandboxId) => Queue.offer(kicks, id).pipe(Effect.asVoid);
 
-  const launch: SandboxService["Service"]["launch"] = (input) =>
-    Effect.gen(function* () {
+  const launch: SandboxService["Service"]["launch"] = Effect.fn("SandboxService.launch")(
+    function* (input) {
       const existing = yield* readRecord(input.id);
       if (Option.isSome(existing)) {
         yield* kick(input.id);
@@ -896,10 +897,11 @@ const make = Effect.gen(function* () {
       yield* PubSub.publish(changesPubSub, toView(stored.value));
       yield* kick(input.id);
       return toView(stored.value);
-    });
+    },
+  );
 
-  const update: SandboxService["Service"]["update"] = ({ id, desired }) =>
-    Effect.gen(function* () {
+  const update: SandboxService["Service"]["update"] = Effect.fn("SandboxService.update")(
+    function* ({ id, desired }) {
       const now = yield* Clock.currentTimeMillis;
       // Leaving `destroyed` is refused in the same statement, so a racing resume cannot undo a delete.
       const updated = yield* sql`
@@ -913,7 +915,8 @@ const make = Effect.gen(function* () {
       yield* PubSub.publish(changesPubSub, toView(record.value));
       yield* kick(id);
       return toView(record.value);
-    });
+    },
+  );
 
   // A destroyed row stays as a tombstone, so a late retry of its launch finds it, but is never listed.
   const list: SandboxService["Service"]["list"] = () =>
@@ -960,8 +963,8 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const connect: SandboxService["Service"]["connect"] = ({ id, scopes }) =>
-    Effect.gen(function* () {
+  const connect: SandboxService["Service"]["connect"] = Effect.fn("SandboxService.connect")(
+    function* ({ id, scopes }) {
       const found = yield* readRecord(id);
       if (Option.isNone(found)) return yield* new SandboxNotFoundError({ sandboxId: id });
       const record = found.value;
@@ -982,7 +985,8 @@ const make = Effect.gen(function* () {
         ),
       );
       return { environmentId, httpBaseUrl, pairingCredential: Redacted.value(credential) };
-    });
+    },
+  );
 
   const listTemplates: SandboxService["Service"]["listTemplates"] = (accountId) =>
     accounts.get(accountId).pipe(Effect.flatMap(provider.listTemplates));

@@ -78,7 +78,13 @@ interface GuardedThread {
  * with no active top-level thread: `change` removes the threads `removes`
  * picks from those `activeTopLevelThreads` reads.
  */
-export const guardLastActiveThread = <A, E, R, E2, R2>(
+export const guardLastActiveThread = Effect.fn("ManagedSandbox.guardLastActiveThread")(function* <
+  A,
+  E,
+  R,
+  E2,
+  R2,
+>(
   managed: ManagedSandboxGuest | null,
   input: {
     readonly operation: SandboxManagedByOwnerError["operation"];
@@ -86,26 +92,25 @@ export const guardLastActiveThread = <A, E, R, E2, R2>(
     readonly removes: (thread: GuardedThread) => boolean;
   },
   change: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | E2 | SandboxManagedByOwnerError, R | R2> =>
-  Effect.gen(function* () {
-    if (managed === null || (yield* CommandCaller)?.subject === SANDBOX_OWNER_SUBJECT) {
+) {
+  if (managed === null || (yield* CommandCaller)?.subject === SANDBOX_OWNER_SUBJECT) {
+    return yield* change;
+  }
+  return yield* managed.lock.withPermits(1)(
+    Effect.gen(function* () {
+      const active = yield* input.activeTopLevelThreads;
+      const remaining = active.filter((thread) => !input.removes(thread));
+      if (remaining.length < active.length && remaining.length === 0) {
+        return yield* new SandboxManagedByOwnerError({
+          ownerEnvironmentId: managed.marker.ownerEnvironmentId,
+          sandboxId: managed.marker.sandboxId,
+          operation: input.operation,
+        });
+      }
       return yield* change;
-    }
-    return yield* managed.lock.withPermits(1)(
-      Effect.gen(function* () {
-        const active = yield* input.activeTopLevelThreads;
-        const remaining = active.filter((thread) => !input.removes(thread));
-        if (remaining.length < active.length && remaining.length === 0) {
-          return yield* new SandboxManagedByOwnerError({
-            ownerEnvironmentId: managed.marker.ownerEnvironmentId,
-            sandboxId: managed.marker.sandboxId,
-            operation: input.operation,
-          });
-        }
-        return yield* change;
-      }),
-    );
-  });
+    }),
+  );
+});
 
 export const layer = Layer.effect(
   ManagedSandbox,

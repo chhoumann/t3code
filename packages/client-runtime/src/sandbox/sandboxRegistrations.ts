@@ -218,108 +218,109 @@ export interface SandboxOwnerAccess<E> {
 const RETRY = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")]);
 
 /** Once started, follows every registered environment's sandboxes for as long as the scope lives. */
-export const makeReconciler = <E>(access: SandboxOwnerAccess<E>) =>
-  Effect.gen(function* () {
-    const scope = yield* Scope.Scope;
-    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    const owners = yield* SubscriptionRef.make<
-      ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>
-    >(new Map());
-    const followers = yield* FiberMap.make<EnvironmentId>();
-    const followed = new Set<EnvironmentId>();
+export const makeReconciler = Effect.fn("SandboxRegistrations.makeReconciler")(function* <E>(
+  access: SandboxOwnerAccess<E>,
+) {
+  const scope = yield* Scope.Scope;
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const owners = yield* SubscriptionRef.make<
+    ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>
+  >(new Map());
+  const followers = yield* FiberMap.make<EnvironmentId>();
+  const followed = new Set<EnvironmentId>();
 
-    const apply = Effect.fn("SandboxRegistrations.apply")(function* (
-      owner: EnvironmentId,
-      action: SandboxRegistrationAction,
-    ) {
-      switch (action._tag) {
-        case "Pair":
-          yield* access.pair(owner, action.sandboxId);
-          return;
-        case "SetEnabled":
-          return yield* registry.setEnabled(action.environmentId, action.enabled);
-        case "SetDormant":
-          return yield* registry.setDormant(action.environmentId, action.dormant);
-        case "Remove":
-          return yield* registry.removeContributed(owner, action.environmentId);
-      }
-    });
+  const apply = Effect.fn("SandboxRegistrations.apply")(function* (
+    owner: EnvironmentId,
+    action: SandboxRegistrationAction,
+  ) {
+    switch (action._tag) {
+      case "Pair":
+        yield* access.pair(owner, action.sandboxId);
+        return;
+      case "SetEnabled":
+        return yield* registry.setEnabled(action.environmentId, action.enabled);
+      case "SetDormant":
+        return yield* registry.setDormant(action.environmentId, action.dormant);
+      case "Remove":
+        return yield* registry.removeContributed(owner, action.environmentId);
+    }
+  });
 
-    const reconcile = Effect.fn("SandboxRegistrations.reconcile")(function* (
-      owner: EnvironmentId,
-      views: ReadonlyArray<SandboxView>,
-    ) {
-      yield* SubscriptionRef.update(owners, (current) => new Map(current).set(owner, views));
-      const entries = yield* SubscriptionRef.get(registry.entries);
-      const registered = new Map(
-        [...entries].map(([environmentId, entry]) => [
-          environmentId,
-          {
-            contributed: contributedBy(entry, owner),
-            enabled: entry.enabled,
-            dormant: entry.dormant === true,
-          },
-        ]),
-      );
-      // Every change is tried; the first failure fails the reconcile so it is retried.
-      const results = yield* Effect.forEach(
-        planSandboxRegistrations({ views, registered }),
-        (action) =>
-          apply(owner, action).pipe(
-            Effect.tapError((error) =>
-              Effect.logWarning("Could not apply a sandbox registration change.", {
-                owner,
-                action: action._tag,
-                environmentId: action.environmentId,
-                error,
-              }),
-            ),
-            Effect.result,
+  const reconcile = Effect.fn("SandboxRegistrations.reconcile")(function* (
+    owner: EnvironmentId,
+    views: ReadonlyArray<SandboxView>,
+  ) {
+    yield* SubscriptionRef.update(owners, (current) => new Map(current).set(owner, views));
+    const entries = yield* SubscriptionRef.get(registry.entries);
+    const registered = new Map(
+      [...entries].map(([environmentId, entry]) => [
+        environmentId,
+        {
+          contributed: contributedBy(entry, owner),
+          enabled: entry.enabled,
+          dormant: entry.dormant === true,
+        },
+      ]),
+    );
+    // Every change is tried; the first failure fails the reconcile so it is retried.
+    const results = yield* Effect.forEach(
+      planSandboxRegistrations({ views, registered }),
+      (action) =>
+        apply(owner, action).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("Could not apply a sandbox registration change.", {
+              owner,
+              action: action._tag,
+              environmentId: action.environmentId,
+              error,
+            }),
           ),
-      );
-      const failure = results.find(Result.isFailure);
-      if (failure !== undefined) return yield* Effect.fail(failure.failure);
-    });
-
-    const follow = (owner: EnvironmentId) =>
-      access.sandboxes(owner).pipe(
-        Stream.tapError((error) =>
-          Effect.logWarning("Could not follow an owner's sandboxes.", { owner, error }),
+          Effect.result,
         ),
-        Stream.retry(RETRY),
-        // A newer list replaces a reconcile still retrying an older one.
-        Stream.switchMap((views) =>
-          Stream.fromEffect(reconcile(owner, views).pipe(Effect.retry(RETRY))),
-        ),
-        Stream.runDrain,
-      );
+    );
+    const failure = results.find(Result.isFailure);
+    if (failure !== undefined) return yield* Effect.fail(failure.failure);
+  });
 
-    const start = SubscriptionRef.changes(registry.entries).pipe(
-      Stream.runForEach((entries) =>
-        Effect.gen(function* () {
-          for (const environmentId of entries.keys()) {
-            if (followed.has(environmentId)) continue;
-            followed.add(environmentId);
-            yield* FiberMap.run(followers, environmentId, follow(environmentId));
-          }
-          for (const environmentId of followed) {
-            if (entries.has(environmentId)) continue;
-            followed.delete(environmentId);
-            yield* FiberMap.remove(followers, environmentId);
-            yield* SubscriptionRef.update(owners, (current) => {
-              const next = new Map(current);
-              next.delete(environmentId);
-              return next;
-            });
-          }
-        }),
+  const follow = (owner: EnvironmentId) =>
+    access.sandboxes(owner).pipe(
+      Stream.tapError((error) =>
+        Effect.logWarning("Could not follow an owner's sandboxes.", { owner, error }),
       ),
-      Effect.forkIn(scope),
-      Effect.asVoid,
+      Stream.retry(RETRY),
+      // A newer list replaces a reconcile still retrying an older one.
+      Stream.switchMap((views) =>
+        Stream.fromEffect(reconcile(owner, views).pipe(Effect.retry(RETRY))),
+      ),
+      Stream.runDrain,
     );
 
-    return SandboxRegistrations.of({ owners, start });
-  }).pipe(Effect.withSpan("SandboxRegistrations.makeReconciler"));
+  const start = SubscriptionRef.changes(registry.entries).pipe(
+    Stream.runForEach((entries) =>
+      Effect.gen(function* () {
+        for (const environmentId of entries.keys()) {
+          if (followed.has(environmentId)) continue;
+          followed.add(environmentId);
+          yield* FiberMap.run(followers, environmentId, follow(environmentId));
+        }
+        for (const environmentId of followed) {
+          if (entries.has(environmentId)) continue;
+          followed.delete(environmentId);
+          yield* FiberMap.remove(followers, environmentId);
+          yield* SubscriptionRef.update(owners, (current) => {
+            const next = new Map(current);
+            next.delete(environmentId);
+            return next;
+          });
+        }
+      }),
+    ),
+    Effect.forkIn(scope),
+    Effect.asVoid,
+  );
+
+  return SandboxRegistrations.of({ owners, start });
+});
 
 /** Every list the owner sends while it advertises sandboxes, across reconnects. */
 const ownerSandboxes = Stream.unwrap(

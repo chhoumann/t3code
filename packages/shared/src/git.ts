@@ -165,9 +165,10 @@ export function normalizeGitRemoteUrl(value: string): string {
     }
   }
 
-  const scpStyleHostAndPath = /^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:\/[^/\s]+)+)$/i.exec(
-    normalized,
-  );
+  // A userless one-letter prefix is a Windows drive, not an SCP host.
+  const scpStyleHostAndPath = /^[a-z]:/i.test(normalized)
+    ? null
+    : /^(?:[a-zA-Z0-9._-]+@)?([^@:/\\\s]+):\/?([^/\s]+(?:\/[^/\s]+)+)$/i.exec(normalized);
   const scpHost = scpStyleHostAndPath?.[1];
   const scpPath = scpStyleHostAndPath?.[2];
   if (scpHost && scpPath) {
@@ -195,6 +196,26 @@ function parseGitConfigValue(raw: string): string {
     out += char;
   }
   return out.trim();
+}
+
+export function isBareGitConfig(configText: string): boolean {
+  let inCore = false;
+  let bare = false;
+  for (const rawLine of configText.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    // Git accepts the first setting on the section header's own line.
+    const header = /^\[\s*([^\]]*?)\s*\](.*)$/.exec(line);
+    if (header !== null) {
+      inCore = header[1]!.toLowerCase() === "core";
+      line = header[2]!.trim();
+    }
+    if (!inCore) continue;
+    const match = /^bare\s*(?:=(.*)|[#;].*)?$/i.exec(line);
+    if (match === null) continue;
+    const value = match[1] === undefined ? "true" : parseGitConfigValue(match[1]).toLowerCase();
+    bare = value === "true" || value === "yes" || value === "on" || value === "1";
+  }
+  return bare;
 }
 
 export function parseOriginUrlFromGitConfig(configText: string): string | null {
@@ -309,10 +330,40 @@ export function detectSourceControlProviderFromGitRemoteUrl(
 export function parseRemoteFetchUrls(stdout: string): GitRemote[] {
   const remotes: GitRemote[] = [];
   for (const line of stdout.split("\n")) {
-    const [, name, url] = /^(\S+)\s+(\S+)\s+\(fetch\)$/.exec(line.trim()) ?? [];
+    // Partial clones append the promisor filter, e.g. `(fetch) [blob:none]`.
+    const [, name, url] = /^(\S+)\s+(\S+)\s+\(fetch\)(?:\s+\[[^\]]+\])?$/.exec(line.trim()) ?? [];
     if (name && url) remotes.push({ name, url });
   }
   return remotes;
+}
+
+/**
+ * Local remotes (GitButler's `gb-local` is `.`) name a path on this machine,
+ * not a repository, so unrelated repos would share one identity.
+ */
+export function isLocalRemoteUrl(url: string): boolean {
+  if (/^file:/i.test(url)) return true;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
+  if (/^[a-z]:[\\/]/i.test(url)) return true;
+  // Git treats `host:path` as scp-style only when the colon precedes any slash.
+  const colonIndex = url.indexOf(":");
+  const slashIndex = url.search(/[\\/]/);
+  return colonIndex === -1 || (slashIndex !== -1 && slashIndex < colonIndex);
+}
+
+/** The `owner/name` path in a remote URL, as the URL spells it. */
+export function repositoryPathFromRemoteUrl(url: string | null): string | null {
+  const trimmed = url?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const match =
+    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
+      trimmed,
+    );
+  const path = match?.[1]?.trim() ?? "";
+  return path.length > 0 ? path : null;
 }
 
 /** The remote a checkout's repository identity names: `upstream`, then `origin`, then the first by name. */
@@ -324,8 +375,10 @@ export function pickPrimaryRemote<R extends GitRemote>(remotes: Arr.NonEmptyRead
   );
 }
 
-function repositoryPathOf(canonicalKey: string): string {
-  return canonicalKey.split("/").slice(1).join("/");
+function repositoryPathOf(canonicalKey: string, remoteUrl: string): string {
+  const canonicalPath = canonicalKey.split("/").slice(1).join("/");
+  const displayPath = repositoryPathFromRemoteUrl(remoteUrl);
+  return displayPath?.toLowerCase() === canonicalPath ? displayPath : canonicalPath;
 }
 
 /**
@@ -338,13 +391,13 @@ export function repositoryIdentityFromRemotes(
   const primary = pickPrimaryRemote(remotes);
   const canonicalKey = normalizeGitRemoteUrl(primary.url);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(primary.url);
-  const repositoryPath = repositoryPathOf(canonicalKey);
+  const repositoryPath = repositoryPathOf(canonicalKey, primary.url);
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
   const originUrl = remotes.find((remote) => remote.name === "origin")?.url;
   const originKey = originUrl === undefined ? canonicalKey : normalizeGitRemoteUrl(originUrl);
-  const originPath = repositoryPathOf(originKey);
+  const originPath = originUrl === undefined ? "" : repositoryPathOf(originKey, originUrl);
 
   return {
     canonicalKey,

@@ -139,14 +139,16 @@ class TracerError extends Schema.TaggedError<TracerError>()("TracerError", {
 const say = (line: string) => Console.log(`[tracer] ${line}`);
 const seconds = (ms: number) => (ms / 1000).toFixed(1);
 
-const step = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>) =>
-  Effect.gen(function* () {
-    const startedAt = yield* Clock.currentTimeMillis;
-    const result = yield* effect;
-    const now = yield* Clock.currentTimeMillis;
-    yield* say(`${name.padEnd(48)} ${seconds(now - startedAt).padStart(6)}s`);
-    return result;
-  });
+const step = Effect.fn("SandboxTracer.step")(function* <A, E, R>(
+  name: string,
+  effect: Effect.Effect<A, E, R>,
+) {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const result = yield* effect;
+  const now = yield* Clock.currentTimeMillis;
+  yield* say(`${name.padEnd(48)} ${seconds(now - startedAt).padStart(6)}s`);
+  return result;
+});
 
 const check = (ok: boolean, message: string) =>
   ok ? Effect.void : Effect.fail(new TracerError({ reason: `check failed: ${message}` }));
@@ -234,536 +236,532 @@ const secretStoreLayer = Layer.succeed(
   }),
 );
 
-const trace = (apiKey: Redacted.Redacted<string>, runStartedAt: number) =>
-  Effect.gen(function* () {
-    const sandboxes = yield* SandboxService.SandboxService;
-    const provider = yield* SandboxProvider;
-    const guest = yield* SandboxGuest.SandboxGuest;
-    const sql = yield* SqlClient.SqlClient;
-    const httpClient = yield* HttpClient.HttpClient;
-    const account = { apiKey };
-    const api = (baseUrl: string) =>
-      HttpApiClient.make(EnvironmentHttpApi, { baseUrl }).pipe(
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-      );
-    const id = SandboxId.make(`tracer-${NodeCrypto.randomUUID().slice(0, 8)}`);
-    yield* say(`sandbox ${id}`);
-
-    const boatLimits = httpClient
-      .execute(
-        HttpClientRequest.get("https://boat.dev/api/v1/limits").pipe(
-          HttpClientRequest.bearerToken(Redacted.value(apiKey)),
-          HttpClientRequest.acceptJson,
-        ),
-      )
-      .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(BoatLimits)));
-    yield* step(
-      "the account preflight creates no machine",
-      Effect.gen(function* () {
-        const before = yield* boatLimits;
-        const missing = yield* provider.checkAccess(account);
-        const after = yield* boatLimits;
-        yield* say(
-          `preflight: missing actions [${missing.join(", ")}]; active ${before.activeSandboxes} -> ${after.activeSandboxes}; starts today ${before.starts.day.used} -> ${after.starts.day.used}`,
-        );
-        yield* check(missing.length === 0, "the key can take every action sandboxes need");
-        yield* check(
-          after.activeSandboxes === before.activeSandboxes &&
-            after.starts.day.used === before.starts.day.used,
-          "the preflight started no machine",
-        );
-      }),
+const trace = Effect.fn("SandboxTracer.trace")(function* (
+  apiKey: Redacted.Redacted<string>,
+  runStartedAt: number,
+) {
+  const sandboxes = yield* SandboxService.SandboxService;
+  const provider = yield* SandboxProvider;
+  const guest = yield* SandboxGuest.SandboxGuest;
+  const sql = yield* SqlClient.SqlClient;
+  const httpClient = yield* HttpClient.HttpClient;
+  const account = { apiKey };
+  const api = (baseUrl: string) =>
+    HttpApiClient.make(EnvironmentHttpApi, { baseUrl }).pipe(
+      Effect.provideService(HttpClient.HttpClient, httpClient),
     );
+  const id = SandboxId.make(`tracer-${NodeCrypto.randomUUID().slice(0, 8)}`);
+  yield* say(`sandbox ${id}`);
 
-    const storedColumn = (column: "machine_id" | "seed_json") =>
-      sql<Record<string, string | null>>`
+  const boatLimits = httpClient
+    .execute(
+      HttpClientRequest.get("https://boat.dev/api/v1/limits").pipe(
+        HttpClientRequest.bearerToken(Redacted.value(apiKey)),
+        HttpClientRequest.acceptJson,
+      ),
+    )
+    .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(BoatLimits)));
+  yield* step(
+    "the account preflight creates no machine",
+    Effect.gen(function* () {
+      const before = yield* boatLimits;
+      const missing = yield* provider.checkAccess(account);
+      const after = yield* boatLimits;
+      yield* say(
+        `preflight: missing actions [${missing.join(", ")}]; active ${before.activeSandboxes} -> ${after.activeSandboxes}; starts today ${before.starts.day.used} -> ${after.starts.day.used}`,
+      );
+      yield* check(missing.length === 0, "the key can take every action sandboxes need");
+      yield* check(
+        after.activeSandboxes === before.activeSandboxes &&
+          after.starts.day.used === before.starts.day.used,
+        "the preflight started no machine",
+      );
+    }),
+  );
+
+  const storedColumn = (column: "machine_id" | "seed_json") =>
+    sql<Record<string, string | null>>`
         SELECT ${sql(column)} AS value FROM sandboxes WHERE sandbox_id = ${id}`.pipe(
-        Effect.map((rows) => rows[0]?.["value"] ?? null),
-      );
-    const machineId = storedColumn("machine_id");
+      Effect.map((rows) => rows[0]?.["value"] ?? null),
+    );
+  const machineId = storedColumn("machine_id");
 
-    /** Resolves when the sandbox shows `tag`; fails as soon as it shows failed instead, unless told to wait past it. */
-    const awaitStatus = (tag: SandboxStatus["_tag"], options = { failFast: true }) =>
-      Effect.gen(function* () {
-        const seen = yield* sandboxes.subscribe().pipe(
-          Stream.map((views: ReadonlyArray<SandboxView>) =>
-            views.find(
-              (view) =>
-                view.id === id &&
-                (view.status._tag === tag || (options.failFast && view.status._tag === "failed")),
-            ),
-          ),
-          Stream.filter((view) => view !== undefined),
-          Stream.runHead,
-          Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
-        );
-        if (Option.isNone(seen)) {
-          return yield* new TracerError({ reason: `timed out waiting for ${tag}` });
-        }
-        if (seen.value.status._tag !== tag) {
-          return yield* new TracerError({
-            reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
-          });
-        }
-        return seen.value;
-      });
-
-    /** Resolves once the sandbox is destroyed, which drops it from the list. */
-    const awaitGone = (options = { failFast: true }) =>
-      Effect.gen(function* () {
-        const seen = yield* sandboxes.subscribe().pipe(
-          Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
-          Stream.filter(
-            (view) => view === undefined || (options.failFast && view.status._tag === "failed"),
-          ),
-          Stream.runHead,
-          Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
-        );
-        if (Option.isNone(seen)) {
-          return yield* new TracerError({ reason: "timed out waiting for destroyed" });
-        }
-        if (seen.value !== undefined) {
-          return yield* new TracerError({
-            reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
-          });
-        }
-      });
-
-    yield* sandboxes.subscribe().pipe(
-      Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
+  /** Resolves when the sandbox shows `tag`; fails as soon as it shows failed instead, unless told to wait past it. */
+  const awaitStatus = Effect.fn("SandboxTracer.awaitStatus")(function* (
+    tag: SandboxStatus["_tag"],
+    options = { failFast: true },
+  ) {
+    const seen = yield* sandboxes.subscribe().pipe(
+      Stream.map((views: ReadonlyArray<SandboxView>) =>
+        views.find(
+          (view) =>
+            view.id === id &&
+            (view.status._tag === tag || (options.failFast && view.status._tag === "failed")),
+        ),
+      ),
       Stream.filter((view) => view !== undefined),
-      Stream.changesWith((a, b) => JSON.stringify(a.status) === JSON.stringify(b.status)),
-      Stream.runForEach((view) =>
-        Clock.currentTimeMillis.pipe(
-          Effect.flatMap((now) =>
-            say(`  status ${JSON.stringify(view.status)} at +${seconds(now - runStartedAt)}s`),
-          ),
-        ),
-      ),
-      Effect.forkScoped,
+      Stream.runHead,
+      Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
     );
-
-    const exec = (command: string) =>
-      Effect.gen(function* () {
-        const machine = yield* machineId;
-        if (machine === null) return yield* new TracerError({ reason: "no machine id" });
-        const result = yield* provider.exec(account, ProviderMachineId.make(machine), {
-          command,
-          timeoutSeconds: 30,
-        });
-        return result.stdout.trim();
+    if (Option.isNone(seen)) {
+      return yield* new TracerError({ reason: `timed out waiting for ${tag}` });
+    }
+    if (seen.value.status._tag !== tag) {
+      return yield* new TracerError({
+        reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
       });
+    }
+    return seen.value;
+  });
 
-    const confirmGone = Effect.gen(function* () {
-      const machine = yield* machineId;
-      if (machine === null) return yield* say(`no machine was stored for ${id}`);
-      const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
-      yield* check(seen === null, `Boat still has ${machine}`);
-      yield* say(`destroyed ${machine} (inspect -> 404)`);
-    });
-    const cleanUp = Effect.gen(function* () {
-      yield* say("cleaning up after a failure");
-      // Lines that could carry a credential are dropped before printing.
-      yield* exec(
-        `tail -n 40 ${SANDBOX_BOOT_LOG} | grep -viE 'key|token|secret|auth' || true`,
-      ).pipe(
-        Effect.tap((tail) => say(`boot log tail:\n${tail}`)),
-        Effect.ignore,
-      );
-      yield* sandboxes.update({ id, desired: "destroyed" }).pipe(Effect.ignore);
-      yield* awaitGone({ failFast: false });
-      yield* confirmGone;
-    }).pipe(
-      Effect.catch((error) =>
-        Console.error(`[tracer] cleanup through the service failed: ${error.message}`).pipe(
-          Effect.andThen(machineId),
-          Effect.flatMap((machine) =>
-            machine === null
-              ? Effect.void
-              : provider.destroy(account, ProviderMachineId.make(machine)).pipe(
-                  Effect.andThen(
-                    provider.inspect(account, ProviderMachineId.make(machine)).pipe(
-                      Effect.filterOrFail(
-                        (found) => found === null,
-                        () => new TracerError({ reason: "still present" }),
-                      ),
-                      Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 60 }),
-                    ),
-                  ),
-                  Effect.andThen(say(`destroyed ${machine} directly (inspect -> 404)`)),
-                ),
-          ),
+  /** Resolves once the sandbox is destroyed, which drops it from the list. */
+  const awaitGone = Effect.fn("SandboxTracer.awaitGone")(function* (options = { failFast: true }) {
+    const seen = yield* sandboxes.subscribe().pipe(
+      Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
+      Stream.filter(
+        (view) => view === undefined || (options.failFast && view.status._tag === "failed"),
+      ),
+      Stream.runHead,
+      Effect.timeoutOrElse({ duration: STEP_TIMEOUT, orElse: () => Effect.succeedNone }),
+    );
+    if (Option.isNone(seen)) {
+      return yield* new TracerError({ reason: "timed out waiting for destroyed" });
+    }
+    if (seen.value !== undefined) {
+      return yield* new TracerError({
+        reason: `sandbox failed: ${JSON.stringify(seen.value.status)}`,
+      });
+    }
+  });
+
+  yield* sandboxes.subscribe().pipe(
+    Stream.map((views: ReadonlyArray<SandboxView>) => views.find((view) => view.id === id)),
+    Stream.filter((view) => view !== undefined),
+    Stream.changesWith((a, b) => JSON.stringify(a.status) === JSON.stringify(b.status)),
+    Stream.runForEach((view) =>
+      Clock.currentTimeMillis.pipe(
+        Effect.flatMap((now) =>
+          say(`  status ${JSON.stringify(view.status)} at +${seconds(now - runStartedAt)}s`),
         ),
       ),
-      Effect.catch((error) => Console.error(`[tracer] DESTROY FAILED for ${id}: ${error.message}`)),
-    );
-    yield* Effect.addFinalizer((exit) => (exit._tag === "Success" ? Effect.void : cleanUp));
+    ),
+    Effect.forkScoped,
+  );
 
-    yield* sandboxes.launch({
-      id,
-      accountId: ACCOUNT_ID,
-      title: "Sandbox tracer",
-      message: "Add hello.txt containing 'hello from a sandbox'.",
-      repository: {
-        remotes: [{ name: "origin", url: flags.repo }],
-        trackedRemote: "origin",
-        commit: null,
-      },
-      driver: ProviderDriverKind.make("claudeAgent"),
-      model: "claude-sonnet-4-6",
-      runtimeMode: "full-access",
-      interactionMode: "default",
+  const exec = Effect.fn("SandboxTracer.exec")(function* (command: string) {
+    const machine = yield* machineId;
+    if (machine === null) return yield* new TracerError({ reason: "no machine id" });
+    const result = yield* provider.exec(account, ProviderMachineId.make(machine), {
+      command,
+      timeoutSeconds: 30,
     });
-    const ready = yield* step("launch -> ready", awaitStatus("ready"));
-    const baseUrl = ready.httpBaseUrl ?? "";
-    yield* say(`Boat sandbox ${yield* machineId}, environment ${ready.environmentId}`);
+    return result.stdout.trim();
+  });
 
-    const token = Redacted.make(new TextDecoder().decode(secrets.get(`sandbox-${id}-admin`)));
-    const seed = yield* decodeSeed((yield* storedColumn("seed_json")) ?? "");
-    const readBack = (label: string) =>
-      step(
-        label,
-        Effect.gen(function* () {
-          const client = yield* api(baseUrl);
-          const shell = yield* client.orchestration.shellSnapshot({
-            headers: {
-              authorization: `Bearer ${Redacted.value(token)}`,
-              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-            },
-          });
-          yield* check(shell.projects.length === 1, `one project (saw ${shell.projects.length})`);
-          yield* check(
-            shell.threads.length === 1 && shell.threads[0]?.id === seed.threadId,
-            `exactly the seed thread (saw ${shell.threads.length})`,
-          );
-        }),
-      );
-    yield* readBack("read back: 1 project, the seed thread once");
+  const confirmGone = Effect.gen(function* () {
+    const machine = yield* machineId;
+    if (machine === null) return yield* say(`no machine was stored for ${id}`);
+    const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
+    yield* check(seen === null, `Boat still has ${machine}`);
+    yield* say(`destroyed ${machine} (inspect -> 404)`);
+  });
+  const cleanUp = Effect.gen(function* () {
+    yield* say("cleaning up after a failure");
+    // Lines that could carry a credential are dropped before printing.
+    yield* exec(`tail -n 40 ${SANDBOX_BOOT_LOG} | grep -viE 'key|token|secret|auth' || true`).pipe(
+      Effect.tap((tail) => say(`boot log tail:\n${tail}`)),
+      Effect.ignore,
+    );
+    yield* sandboxes.update({ id, desired: "destroyed" }).pipe(Effect.ignore);
+    yield* awaitGone({ failFast: false });
+    yield* confirmGone;
+  }).pipe(
+    Effect.catch((error) =>
+      Console.error(`[tracer] cleanup through the service failed: ${error.message}`).pipe(
+        Effect.andThen(machineId),
+        Effect.flatMap((machine) =>
+          machine === null
+            ? Effect.void
+            : provider.destroy(account, ProviderMachineId.make(machine)).pipe(
+                Effect.andThen(
+                  provider.inspect(account, ProviderMachineId.make(machine)).pipe(
+                    Effect.filterOrFail(
+                      (found) => found === null,
+                      () => new TracerError({ reason: "still present" }),
+                    ),
+                    Effect.retry({ schedule: Schedule.spaced("2 seconds"), times: 60 }),
+                  ),
+                ),
+                Effect.andThen(say(`destroyed ${machine} directly (inspect -> 404)`)),
+              ),
+        ),
+      ),
+    ),
+    Effect.catch((error) => Console.error(`[tracer] DESTROY FAILED for ${id}: ${error.message}`)),
+  );
+  yield* Effect.addFinalizer((exit) => (exit._tag === "Success" ? Effect.void : cleanUp));
 
-    const threadId = ThreadId.make(seed.threadId);
-    /** One line naming where the route from the machine to the proxy breaks; no secrets. */
-    const diagnoseProxy = (label: string) =>
-      exec(
-        [
-          `set -a && . ${SANDBOX_ENV_FILE} && set +a`,
-          `host=$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^https?://([^/:]+).*#\\1#')`,
-          `backend=$(tailscale status --json 2>/dev/null | grep -o '"BackendState": *"[A-Za-z]*"' | head -n 1 | grep -o '[A-Za-z]*"$' | tr -d '"')`,
-          `dns=$(getent hosts "$host" >/dev/null && echo ok || echo fail)`,
-          `tcp=$(timeout 5 bash -c "</dev/tcp/$host/443" 2>/dev/null && echo ok || echo fail)`,
-          `http=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" -H "authorization: Bearer $ANTHROPIC_AUTH_TOKEN" -H 'anthropic-version: 2023-06-01' "$ANTHROPIC_BASE_URL/v1/models" 2>/dev/null || true)`,
-          `echo "tailnet=\${backend:-none} dns=$dns tcp443=$tcp http=\${http:-000}"`,
-        ].join("\n"),
-      ).pipe(Effect.tap((line) => say(`${label}: ${line}`)));
+  yield* sandboxes.launch({
+    id,
+    accountId: ACCOUNT_ID,
+    title: "Sandbox tracer",
+    message: "Add hello.txt containing 'hello from a sandbox'.",
+    repository: {
+      remotes: [{ name: "origin", url: flags.repo }],
+      trackedRemote: "origin",
+      commit: null,
+    },
+    driver: ProviderDriverKind.make("claudeAgent"),
+    model: "claude-sonnet-4-6",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  });
+  const ready = yield* step("launch -> ready", awaitStatus("ready"));
+  const baseUrl = ready.httpBaseUrl ?? "";
+  yield* say(`Boat sandbox ${yield* machineId}, environment ${ready.environmentId}`);
 
-    /** Waits for the thread's `runCount`th run to end, then returns its status and reply. */
-    const awaitReply = (runCount: number) =>
+  const token = Redacted.make(new TextDecoder().decode(secrets.get(`sandbox-${id}-admin`)));
+  const seed = yield* decodeSeed((yield* storedColumn("seed_json")) ?? "");
+  const readBack = (label: string) =>
+    step(
+      label,
       Effect.gen(function* () {
         const client = yield* api(baseUrl);
-        const detail = yield* client.orchestration.threadSnapshot({
-          params: { threadId },
+        const shell = yield* client.orchestration.shellSnapshot({
           headers: {
             authorization: `Bearer ${Redacted.value(token)}`,
             [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
           },
         });
-        const run = detail.projection.runs.toSorted((a, b) => a.ordinal - b.ordinal)[runCount - 1];
-        if (run === undefined || !TERMINAL_RUN_STATUSES.has(run.status)) {
-          return yield* new TracerError({ reason: `run ${runCount} has not ended` });
-        }
-        const reply = detail.projection.messages
-          .filter((message) => message.role === "assistant" && message.runId === run.id)
-          .map((message) => message.text)
-          .join("\n")
-          .trim();
-        return { status: run.status, reply };
-      }).pipe(
-        Effect.retry({
-          while: (error) => error._tag === "TracerError",
-          schedule: Schedule.spaced("3 seconds"),
-        }),
-        Effect.timeoutOrElse({
-          duration: AGENT_REPLY_TIMEOUT,
-          orElse: () => Effect.fail(new TracerError({ reason: `run ${runCount} did not end` })),
-        }),
-      );
+        yield* check(shell.projects.length === 1, `one project (saw ${shell.projects.length})`);
+        yield* check(
+          shell.threads.length === 1 && shell.threads[0]?.id === seed.threadId,
+          `exactly the seed thread (saw ${shell.threads.length})`,
+        );
+      }),
+    );
+  yield* readBack("read back: 1 project, the seed thread once");
 
-    const checkReply = (label: string, outcome: { status: string; reply: string }) =>
-      Effect.gen(function* () {
-        yield* say(`${label}: run ${outcome.status}, reply ${outcome.reply.length} chars`);
-        yield* say(`  reply: ${JSON.stringify(outcome.reply.slice(0, 160))}`);
-        yield* check(outcome.status === "completed", `${label}: the run completed`);
-        yield* check(outcome.reply.length > 0, `${label}: the agent replied`);
-        yield* check(!LOGIN_FAILURE.test(outcome.reply), `${label}: the agent was logged in`);
+  const threadId = ThreadId.make(seed.threadId);
+  /** One line naming where the route from the machine to the proxy breaks; no secrets. */
+  const diagnoseProxy = (label: string) =>
+    exec(
+      [
+        `set -a && . ${SANDBOX_ENV_FILE} && set +a`,
+        `host=$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^https?://([^/:]+).*#\\1#')`,
+        `backend=$(tailscale status --json 2>/dev/null | grep -o '"BackendState": *"[A-Za-z]*"' | head -n 1 | grep -o '[A-Za-z]*"$' | tr -d '"')`,
+        `dns=$(getent hosts "$host" >/dev/null && echo ok || echo fail)`,
+        `tcp=$(timeout 5 bash -c "</dev/tcp/$host/443" 2>/dev/null && echo ok || echo fail)`,
+        `http=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" -H "authorization: Bearer $ANTHROPIC_AUTH_TOKEN" -H 'anthropic-version: 2023-06-01' "$ANTHROPIC_BASE_URL/v1/models" 2>/dev/null || true)`,
+        `echo "tailnet=\${backend:-none} dns=$dns tcp443=$tcp http=\${http:-000}"`,
+      ].join("\n"),
+    ).pipe(Effect.tap((line) => say(`${label}: ${line}`)));
+
+  /** Waits for the thread's `runCount`th run to end, then returns its status and reply. */
+  const awaitReply = Effect.fn("SandboxTracer.awaitReply")(
+    function* (runCount: number) {
+      const client = yield* api(baseUrl);
+      const detail = yield* client.orchestration.threadSnapshot({
+        params: { threadId },
+        headers: {
+          authorization: `Bearer ${Redacted.value(token)}`,
+          [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+        },
       });
+      const run = detail.projection.runs.toSorted((a, b) => a.ordinal - b.ordinal)[runCount - 1];
+      if (run === undefined || !TERMINAL_RUN_STATUSES.has(run.status)) {
+        return yield* new TracerError({ reason: `run ${runCount} has not ended` });
+      }
+      const reply = detail.projection.messages
+        .filter((message) => message.role === "assistant" && message.runId === run.id)
+        .map((message) => message.text)
+        .join("\n")
+        .trim();
+      return { status: run.status, reply };
+    },
+    Effect.retry({
+      while: (error) => error._tag === "TracerError",
+      schedule: Schedule.spaced("3 seconds"),
+    }),
+    (effect, runCount) =>
+      Effect.timeoutOrElse(effect, {
+        duration: AGENT_REPLY_TIMEOUT,
+        orElse: () => Effect.fail(new TracerError({ reason: `run ${runCount} did not end` })),
+      }),
+  );
 
+  const checkReply = Effect.fn("SandboxTracer.checkReply")(function* (
+    label: string,
+    outcome: { status: string; reply: string },
+  ) {
+    yield* say(`${label}: run ${outcome.status}, reply ${outcome.reply.length} chars`);
+    yield* say(`  reply: ${JSON.stringify(outcome.reply.slice(0, 160))}`);
+    yield* check(outcome.status === "completed", `${label}: the run completed`);
+    yield* check(outcome.reply.length > 0, `${label}: the agent replied`);
+    yield* check(!LOGIN_FAILURE.test(outcome.reply), `${label}: the agent was logged in`);
+  });
+
+  if (flags["agent-proxy"]) {
+    yield* diagnoseProxy("proxy route after launch");
+    yield* checkReply("seed turn", yield* step("seed turn -> reply", awaitReply(1)));
+  }
+  let followUps = 0;
+  const sendFollowUp = Effect.fn("SandboxTracer.sendFollowUp")(function* (text: string) {
+    const rpc = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
+    yield* rpc["orchestration.dispatchCommand"]({
+      type: "message.dispatch",
+      commandId: CommandId.make(NodeCrypto.randomUUID()),
+      createdBy: "user",
+      creationSource: "web",
+      threadId,
+      messageId: MessageId.make(NodeCrypto.randomUUID()),
+      text,
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+    });
+    followUps += 1;
+  }, Effect.scoped);
+
+  if (flags.idle) {
+    const deadlineNow = Effect.gen(function* () {
+      const machine = yield* machineId;
+      if (machine === null) return yield* new TracerError({ reason: "no machine id" });
+      const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
+      return seen?.archiveAfter ?? null;
+    });
+    const created = yield* deadlineNow;
+    const launchedAt = yield* Clock.currentTimeMillis;
+    yield* say(
+      `Boat deadline after launch: ${created === null ? "none" : `+${seconds(created - launchedAt)}s`}`,
+    );
+    yield* check(created !== null, "Boat reports an auto-stop deadline");
+    yield* step(
+      "Boat moves the deadline on request",
+      Effect.gen(function* () {
+        const machine = ProviderMachineId.make((yield* machineId) ?? "");
+        yield* provider.setDeadline(account, machine, 3 * 3600);
+        const moved = yield* deadlineNow;
+        const now = yield* Clock.currentTimeMillis;
+        yield* say(`Boat deadline after PATCH: +${seconds((moved ?? 0) - now)}s`);
+        yield* check(
+          moved !== null && Math.abs(moved - (now + 3 * 3600 * 1000)) < 120_000,
+          "the deadline is three hours out",
+        );
+      }),
+    );
     if (flags["agent-proxy"]) {
-      yield* diagnoseProxy("proxy route after launch");
-      yield* checkReply("seed turn", yield* step("seed turn -> reply", awaitReply(1)));
-    }
-    let followUps = 0;
-    const sendFollowUp = (text: string) =>
-      Effect.gen(function* () {
-        const rpc = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
-        yield* rpc["orchestration.dispatchCommand"]({
-          type: "message.dispatch",
-          commandId: CommandId.make(NodeCrypto.randomUUID()),
-          createdBy: "user",
-          creationSource: "web",
-          threadId,
-          messageId: MessageId.make(NodeCrypto.randomUUID()),
-          text,
-          attachments: [],
-          dispatchMode: { type: "start_immediately" },
-        });
-        followUps += 1;
-      }).pipe(Effect.scoped);
-
-    if (flags.idle) {
-      const deadlineNow = Effect.gen(function* () {
-        const machine = yield* machineId;
-        if (machine === null) return yield* new TracerError({ reason: "no machine id" });
-        const seen = yield* provider.inspect(account, ProviderMachineId.make(machine));
-        return seen?.archiveAfter ?? null;
-      });
-      const created = yield* deadlineNow;
-      const launchedAt = yield* Clock.currentTimeMillis;
-      yield* say(
-        `Boat deadline after launch: ${created === null ? "none" : `+${seconds(created - launchedAt)}s`}`,
+      yield* sendFollowUp(
+        "Run `sleep 240 && echo DONE` in a shell, wait for it to finish, and answer with its output only.",
       );
-      yield* check(created !== null, "Boat reports an auto-stop deadline");
-      yield* step(
-        "Boat moves the deadline on request",
-        Effect.gen(function* () {
-          const machine = ProviderMachineId.make((yield* machineId) ?? "");
-          yield* provider.setDeadline(account, machine, 3 * 3600);
-          const moved = yield* deadlineNow;
-          const now = yield* Clock.currentTimeMillis;
-          yield* say(`Boat deadline after PATCH: +${seconds((moved ?? 0) - now)}s`);
-          yield* check(
-            moved !== null && Math.abs(moved - (now + 3 * 3600 * 1000)) < 120_000,
-            "the deadline is three hours out",
-          );
-        }),
-      );
-      if (flags["agent-proxy"]) {
-        yield* sendFollowUp(
-          "Run `sleep 240 && echo DONE` in a shell, wait for it to finish, and answer with its output only.",
-        );
-        const outcome = yield* step(
-          "busy turn longer than the stop time",
-          awaitReply(1 + followUps),
-        );
-        yield* checkReply("busy turn", outcome);
-        const afterBusy = (yield* sandboxes.list()).find((view) => view.id === id);
-        yield* check(
-          afterBusy?.status._tag === "ready",
-          `the sandbox stayed up through a 4-minute turn (saw ${afterBusy?.status._tag})`,
-        );
-      }
-      const asleep = yield* step("idle -> asleep", awaitStatus("stopped"));
+      const outcome = yield* step("busy turn longer than the stop time", awaitReply(1 + followUps));
+      yield* checkReply("busy turn", outcome);
+      const afterBusy = (yield* sandboxes.list()).find((view) => view.id === id);
       yield* check(
-        asleep.status._tag === "stopped" && asleep.status.reason === "idle",
-        `stopped for inactivity (saw ${JSON.stringify(asleep.status)})`,
+        afterBusy?.status._tag === "ready",
+        `the sandbox stayed up through a 4-minute turn (saw ${afterBusy?.status._tag})`,
       );
-      yield* check(asleep.desired === "running", "desired is still running while asleep");
-      yield* sandboxes.update({ id, desired: "running" });
-      const awake = yield* step("wake -> ready", awaitStatus("ready"));
-      yield* check(awake.environmentId === ready.environmentId, "the same environment woke");
-      yield* readBack("after wake: the same seed thread");
-      if (flags["agent-proxy"]) {
-        yield* sendFollowUp("Answer with the single word AWAKE.");
-        yield* checkReply(
-          "after wake",
-          yield* step("after wake: follow-up -> reply", awaitReply(1 + followUps)),
-        );
-      }
-      yield* sandboxes.update({ id, desired: "destroyed" });
-      yield* step("destroyed", awaitGone());
-      return yield* confirmGone;
     }
-
-    const clientToken = yield* step(
-      "pairing grant exchanges for a session",
-      Effect.gen(function* () {
-        const credential = yield* guest.issuePairingCredential(
-          { baseUrl, token },
-          { label: "tracer" },
-        );
-        const client = yield* api(baseUrl);
-        const issued = yield* client.auth.token({
-          headers: {},
-          payload: {
-            grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-            subject_token: Redacted.value(credential),
-            subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-            requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-          },
-        });
-        const session = yield* client.auth.session({
-          headers: { authorization: `Bearer ${issued.access_token}` },
-        });
-        yield* check(session.authenticated, "the paired client session authenticates");
-
-        const refused = yield* Effect.scoped(
-          Effect.gen(function* () {
-            const rpc = yield* SandboxGuest.connectGuestRpc({
-              baseUrl,
-              token: Redacted.make(issued.access_token),
-            });
-            return yield* rpc["orchestration.dispatchCommand"]({
-              type: "thread.archive",
-              commandId: CommandId.make(NodeCrypto.randomUUID()),
-              threadId,
-            }).pipe(Effect.flip);
-          }),
-        );
-        yield* say(`a paired client archiving the seed thread: ${refused._tag}`);
-        yield* check(
-          refused._tag === "SandboxManagedByOwnerError" &&
-            refused.sandboxId === id &&
-            refused.ownerEnvironmentId === "sandbox-tracer-owner",
-          "the sandbox refuses to archive its seed thread for anyone but its owner",
-        );
-        return Redacted.make(issued.access_token);
-      }),
+    const asleep = yield* step("idle -> asleep", awaitStatus("stopped"));
+    yield* check(
+      asleep.status._tag === "stopped" && asleep.status.reason === "idle",
+      `stopped for inactivity (saw ${JSON.stringify(asleep.status)})`,
     );
-
-    yield* step(
-      "a paired client cannot delete the last active thread either",
-      Effect.gen(function* () {
-        const asClient = yield* SandboxGuest.connectGuestRpc({ baseUrl, token: clientToken });
-        const second = ThreadId.make(NodeCrypto.randomUUID());
-        yield* asClient["orchestration.launchThread"]({
-          commandId: CommandId.make(NodeCrypto.randomUUID()),
-          threadId: second,
-          projectId: ProjectId.make(seed.projectId),
-          title: "Second thread",
-          modelSelection: {
-            instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent")),
-            model: "claude-sonnet-4-6",
-          },
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          workspaceStrategy: { type: "root" },
-        });
-        const command = (
-          type: "thread.archive" | "thread.unarchive" | "thread.delete",
-          thread: ThreadId,
-        ) => ({
-          type,
-          commandId: CommandId.make(NodeCrypto.randomUUID()),
-          threadId: thread,
-        });
-        yield* asClient["orchestration.dispatchCommand"](command("thread.archive", threadId));
-        yield* say("a paired client archived the seed thread while a second thread is active");
-        const refused = yield* asClient["orchestration.dispatchCommand"](
-          command("thread.delete", second),
-        ).pipe(Effect.flip);
-        yield* say(`a paired client deleting the last active thread: ${refused._tag}`);
-        yield* check(
-          refused._tag === "SandboxManagedByOwnerError" && refused.operation === "delete-thread",
-          "the sandbox refuses to delete its last active thread for anyone but its owner",
-        );
-        const asOwner = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
-        yield* asOwner["orchestration.dispatchCommand"](command("thread.unarchive", threadId));
-        yield* asOwner["orchestration.dispatchCommand"](command("thread.delete", second));
-      }).pipe(Effect.scoped),
-    );
-    yield* readBack("read back: the seed thread alone again");
-
-    yield* step(
-      "a refused owner session is replaced on use",
-      Effect.gen(function* () {
-        const name = `sandbox-${id}-admin`;
-        secrets.set(name, new TextEncoder().encode("revoked-owner-session"));
-        const connected = yield* sandboxes.connect({ id, scopes: ["orchestration:read"] });
-        const stored = new TextDecoder().decode(secrets.get(name));
-        yield* check(
-          stored.length > 0 && stored !== "revoked-owner-session",
-          "a new owner session was minted and stored",
-        );
-        yield* check(
-          connected.pairingCredential.length > 0,
-          "the pairing grant was issued with the new session",
-        );
-      }),
-    );
-
-    const pairingLines = yield* exec(
-      "grep -c 'Token:\\|pair#token' /home/user/.t3/userdata/logs/boot-service.log || true",
-    );
-    yield* say(`startup pairing lines in the guest service log: ${pairingLines}`);
-    yield* check(pairingLines === "0", "the guest logs no startup pairing token");
-
-    const distinctBoots = exec(`cut -d' ' -f1 ${SETUP_RUNS_LOG} | sort -u | wc -l`).pipe(
-      Effect.map(Number),
-    );
-    yield* check((yield* distinctBoots) === 1, "the machine setup ran on the first boot");
-
-    for (const round of [1, 2]) {
-      yield* sandboxes.update({ id, desired: "stopped" });
-      const stopped = yield* step(`round ${round}: stopped`, awaitStatus("stopped"));
-      yield* check(
-        stopped.status._tag === "stopped" && stopped.status.reason === "requested",
-        "stopped as requested",
+    yield* check(asleep.desired === "running", "desired is still running while asleep");
+    yield* sandboxes.update({ id, desired: "running" });
+    const awake = yield* step("wake -> ready", awaitStatus("ready"));
+    yield* check(awake.environmentId === ready.environmentId, "the same environment woke");
+    yield* readBack("after wake: the same seed thread");
+    if (flags["agent-proxy"]) {
+      yield* sendFollowUp("Answer with the single word AWAKE.");
+      yield* checkReply(
+        "after wake",
+        yield* step("after wake: follow-up -> reply", awaitReply(1 + followUps)),
       );
-      envRound = round + 1;
-      yield* sandboxes.update({ id, desired: "running" });
-      const resumed = yield* step(`round ${round}: resumed to ready`, awaitStatus("ready"));
-      yield* check(
-        resumed.environmentId === ready.environmentId,
-        "the environment id survived stop and resume",
-      );
-      yield* readBack(`round ${round}: read back: the same seed thread`);
-      const boots = yield* distinctBoots;
-      const lastRun = yield* exec(`tail -n 1 ${SETUP_RUNS_LOG}`);
-      const envFileRound = yield* exec(
-        `grep -c '^T3_TRACER_ROUND="${envRound}"$' ${SANDBOX_ENV_FILE} || true`,
-      );
-      yield* say(
-        `round ${round}: setup ran on ${boots} boots; last run ${lastRun.split(" ").at(-1)}; sandbox.env round ${envRound}: ${envFileRound === "1" ? "yes" : "no"}`,
-      );
-      yield* check(boots === round + 1, `the machine setup ran on boot ${round + 1}`);
-      yield* check(envFileRound === "1", `sandbox.env carries round ${envRound}`);
-      yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
-      if (flags["agent-proxy"]) {
-        yield* diagnoseProxy(`round ${round}: proxy route after resume`);
-        const envNames = yield* exec(
-          [
-            'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
-            "pid=$(systemctl --user show -p MainPID --value t3code.service)",
-            `count() { tr '\\0' '\\n' < "$1" | grep -c "^$2=" || true; }`,
-            `echo "service_tailscale=$(count /proc/$pid/environ TAILSCALE_AUTH_KEY)" \\`,
-            `"service_anthropic=$(count /proc/$pid/environ ANTHROPIC_BASE_URL)" \\`,
-            `"sandbox_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_ENV_FILE} || true)" \\`,
-            `"setup_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_SETUP_ENV_FILE} || true)"`,
-          ].join("\n"),
-        );
-        yield* say(`round ${round}: env names: ${envNames}`);
-        yield* check(
-          envNames ===
-            "service_tailscale=0 service_anthropic=1 sandbox_env_tailscale=0 setup_env_tailscale=1",
-          "the setup-only key reaches the machine setup but not T3",
-        );
-        yield* sendFollowUp(
-          "Run `printenv TAILSCALE_AUTH_KEY >/dev/null && echo SET || echo UNSET` in a shell and answer with its output only.",
-        );
-        const outcome = yield* step(
-          `round ${round}: follow-up -> reply`,
-          awaitReply(1 + followUps),
-        );
-        yield* checkReply(`round ${round}: follow-up`, outcome);
-        yield* check(
-          /\bUNSET\b/.test(outcome.reply) && !/\bSET\b/.test(outcome.reply),
-          "the agent's process env lacks the setup-only key",
-        );
-      }
     }
-
     yield* sandboxes.update({ id, desired: "destroyed" });
     yield* step("destroyed", awaitGone());
-    yield* confirmGone;
-  });
+    return yield* confirmGone;
+  }
+
+  const clientToken = yield* step(
+    "pairing grant exchanges for a session",
+    Effect.gen(function* () {
+      const credential = yield* guest.issuePairingCredential(
+        { baseUrl, token },
+        { label: "tracer" },
+      );
+      const client = yield* api(baseUrl);
+      const issued = yield* client.auth.token({
+        headers: {},
+        payload: {
+          grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+          subject_token: Redacted.value(credential),
+          subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+          requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        },
+      });
+      const session = yield* client.auth.session({
+        headers: { authorization: `Bearer ${issued.access_token}` },
+      });
+      yield* check(session.authenticated, "the paired client session authenticates");
+
+      const refused = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const rpc = yield* SandboxGuest.connectGuestRpc({
+            baseUrl,
+            token: Redacted.make(issued.access_token),
+          });
+          return yield* rpc["orchestration.dispatchCommand"]({
+            type: "thread.archive",
+            commandId: CommandId.make(NodeCrypto.randomUUID()),
+            threadId,
+          }).pipe(Effect.flip);
+        }),
+      );
+      yield* say(`a paired client archiving the seed thread: ${refused._tag}`);
+      yield* check(
+        refused._tag === "SandboxManagedByOwnerError" &&
+          refused.sandboxId === id &&
+          refused.ownerEnvironmentId === "sandbox-tracer-owner",
+        "the sandbox refuses to archive its seed thread for anyone but its owner",
+      );
+      return Redacted.make(issued.access_token);
+    }),
+  );
+
+  yield* step(
+    "a paired client cannot delete the last active thread either",
+    Effect.gen(function* () {
+      const asClient = yield* SandboxGuest.connectGuestRpc({ baseUrl, token: clientToken });
+      const second = ThreadId.make(NodeCrypto.randomUUID());
+      yield* asClient["orchestration.launchThread"]({
+        commandId: CommandId.make(NodeCrypto.randomUUID()),
+        threadId: second,
+        projectId: ProjectId.make(seed.projectId),
+        title: "Second thread",
+        modelSelection: {
+          instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent")),
+          model: "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        workspaceStrategy: { type: "root" },
+      });
+      const command = (
+        type: "thread.archive" | "thread.unarchive" | "thread.delete",
+        thread: ThreadId,
+      ) => ({
+        type,
+        commandId: CommandId.make(NodeCrypto.randomUUID()),
+        threadId: thread,
+      });
+      yield* asClient["orchestration.dispatchCommand"](command("thread.archive", threadId));
+      yield* say("a paired client archived the seed thread while a second thread is active");
+      const refused = yield* asClient["orchestration.dispatchCommand"](
+        command("thread.delete", second),
+      ).pipe(Effect.flip);
+      yield* say(`a paired client deleting the last active thread: ${refused._tag}`);
+      yield* check(
+        refused._tag === "SandboxManagedByOwnerError" && refused.operation === "delete-thread",
+        "the sandbox refuses to delete its last active thread for anyone but its owner",
+      );
+      const asOwner = yield* SandboxGuest.connectGuestRpc({ baseUrl, token });
+      yield* asOwner["orchestration.dispatchCommand"](command("thread.unarchive", threadId));
+      yield* asOwner["orchestration.dispatchCommand"](command("thread.delete", second));
+    }).pipe(Effect.scoped),
+  );
+  yield* readBack("read back: the seed thread alone again");
+
+  yield* step(
+    "a refused owner session is replaced on use",
+    Effect.gen(function* () {
+      const name = `sandbox-${id}-admin`;
+      secrets.set(name, new TextEncoder().encode("revoked-owner-session"));
+      const connected = yield* sandboxes.connect({ id, scopes: ["orchestration:read"] });
+      const stored = new TextDecoder().decode(secrets.get(name));
+      yield* check(
+        stored.length > 0 && stored !== "revoked-owner-session",
+        "a new owner session was minted and stored",
+      );
+      yield* check(
+        connected.pairingCredential.length > 0,
+        "the pairing grant was issued with the new session",
+      );
+    }),
+  );
+
+  const pairingLines = yield* exec(
+    "grep -c 'Token:\\|pair#token' /home/user/.t3/userdata/logs/boot-service.log || true",
+  );
+  yield* say(`startup pairing lines in the guest service log: ${pairingLines}`);
+  yield* check(pairingLines === "0", "the guest logs no startup pairing token");
+
+  const distinctBoots = exec(`cut -d' ' -f1 ${SETUP_RUNS_LOG} | sort -u | wc -l`).pipe(
+    Effect.map(Number),
+  );
+  yield* check((yield* distinctBoots) === 1, "the machine setup ran on the first boot");
+
+  for (const round of [1, 2]) {
+    yield* sandboxes.update({ id, desired: "stopped" });
+    const stopped = yield* step(`round ${round}: stopped`, awaitStatus("stopped"));
+    yield* check(
+      stopped.status._tag === "stopped" && stopped.status.reason === "requested",
+      "stopped as requested",
+    );
+    envRound = round + 1;
+    yield* sandboxes.update({ id, desired: "running" });
+    const resumed = yield* step(`round ${round}: resumed to ready`, awaitStatus("ready"));
+    yield* check(
+      resumed.environmentId === ready.environmentId,
+      "the environment id survived stop and resume",
+    );
+    yield* readBack(`round ${round}: read back: the same seed thread`);
+    const boots = yield* distinctBoots;
+    const lastRun = yield* exec(`tail -n 1 ${SETUP_RUNS_LOG}`);
+    const envFileRound = yield* exec(
+      `grep -c '^T3_TRACER_ROUND="${envRound}"$' ${SANDBOX_ENV_FILE} || true`,
+    );
+    yield* say(
+      `round ${round}: setup ran on ${boots} boots; last run ${lastRun.split(" ").at(-1)}; sandbox.env round ${envRound}: ${envFileRound === "1" ? "yes" : "no"}`,
+    );
+    yield* check(boots === round + 1, `the machine setup ran on boot ${round + 1}`);
+    yield* check(envFileRound === "1", `sandbox.env carries round ${envRound}`);
+    yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
+    if (flags["agent-proxy"]) {
+      yield* diagnoseProxy(`round ${round}: proxy route after resume`);
+      const envNames = yield* exec(
+        [
+          'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+          "pid=$(systemctl --user show -p MainPID --value t3code.service)",
+          `count() { tr '\\0' '\\n' < "$1" | grep -c "^$2=" || true; }`,
+          `echo "service_tailscale=$(count /proc/$pid/environ TAILSCALE_AUTH_KEY)" \\`,
+          `"service_anthropic=$(count /proc/$pid/environ ANTHROPIC_BASE_URL)" \\`,
+          `"sandbox_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_ENV_FILE} || true)" \\`,
+          `"setup_env_tailscale=$(grep -c '^TAILSCALE_AUTH_KEY=' ${SANDBOX_SETUP_ENV_FILE} || true)"`,
+        ].join("\n"),
+      );
+      yield* say(`round ${round}: env names: ${envNames}`);
+      yield* check(
+        envNames ===
+          "service_tailscale=0 service_anthropic=1 sandbox_env_tailscale=0 setup_env_tailscale=1",
+        "the setup-only key reaches the machine setup but not T3",
+      );
+      yield* sendFollowUp(
+        "Run `printenv TAILSCALE_AUTH_KEY >/dev/null && echo SET || echo UNSET` in a shell and answer with its output only.",
+      );
+      const outcome = yield* step(`round ${round}: follow-up -> reply`, awaitReply(1 + followUps));
+      yield* checkReply(`round ${round}: follow-up`, outcome);
+      yield* check(
+        /\bUNSET\b/.test(outcome.reply) && !/\bSET\b/.test(outcome.reply),
+        "the agent's process env lacks the setup-only key",
+      );
+    }
+  }
+
+  yield* sandboxes.update({ id, desired: "destroyed" });
+  yield* step("destroyed", awaitGone());
+  yield* confirmGone;
+});
 
 const program = Effect.gen(function* () {
   const runStartedAt = yield* Clock.currentTimeMillis;

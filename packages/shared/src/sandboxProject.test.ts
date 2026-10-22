@@ -63,10 +63,10 @@ describe("sandboxProject", () => {
           remoteName: "origin",
           remoteUrl: "https://github.com/octocat/Hello-World.git",
         },
-        displayName: "octocat/hello-world",
+        displayName: "octocat/Hello-World",
         provider: "github",
         owner: "octocat",
-        name: "hello-world",
+        name: "Hello-World",
       },
     });
   });

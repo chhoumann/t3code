@@ -109,12 +109,12 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "pull-request",
   ),
   unwatch_pull_request: tool(
-    ["Stop watching", "Stopping watching", "Stopped watching", "a pull request"],
+    ["Stop watching", "Unwatching", "Stopped watching", "a pull request"],
     "unwatch-pr",
     "pull-request",
   ),
   write_pull_request_guides: tool(
-    ["Write", "Writing", "Started", "review guides"],
+    ["Write", "Writing", "Started writing", "review guides"],
     "write-pr-guides",
     "pull-request",
   ),
@@ -130,7 +130,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
   task_cancel: tool(
-    ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],
+    ["Cancel", "Canceling", "Requested cancellation of", "a delegated task"],
     "task-cancel",
   ),
   schedule_task: tool(
@@ -402,10 +402,4 @@ export function resolveT3McpToolPresentation(
 ): T3McpToolPresentation | null {
   const definition = resolveT3McpToolDefinition(toolName);
   return definition === null ? null : { displayName: definition.displayName, logo: "t3-code" };
-}
-
-export function resolveT3McpToolSummaryAction(
-  toolName: string | null | undefined,
-): T3McpToolSummaryAction | null {
-  return resolveT3McpToolDefinition(toolName)?.summaryAction ?? null;
 }

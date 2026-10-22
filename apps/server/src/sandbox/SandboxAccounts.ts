@@ -162,8 +162,8 @@ const make = Effect.gen(function* () {
     secrets.get(name).pipe(Effect.map(Option.map((bytes) => textDecoder.decode(bytes))));
 
   // A settings or secret store that cannot be read is not a missing account.
-  const get: SandboxAccounts["Service"]["get"] = (accountId) =>
-    Effect.gen(function* () {
+  const get: SandboxAccounts["Service"]["get"] = Effect.fn("SandboxAccounts.get")(
+    function* (accountId) {
       const notFound = new SandboxAccountNotFoundError({ accountId });
       const config = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxAccounts[accountId];
       if (config === undefined) return yield* notFound;
@@ -186,7 +186,8 @@ const make = Effect.gen(function* () {
         size: config.size,
         stopAfterHours: config.stopAfterHours,
       } satisfies SandboxAccount;
-    });
+    },
+  );
 
   const save: SandboxAccounts["Service"]["save"] = (input) =>
     accountLocks.withLock(

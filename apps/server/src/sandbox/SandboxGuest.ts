@@ -278,28 +278,29 @@ function projectScriptsFromT3File(contents: string): ReadonlyArray<ProjectScript
 }
 
 /** An RPC client on the guest's socket, authenticated as `target`, open for the scope. */
-export const connectGuestRpc = (target: SandboxGuestTarget) =>
-  Effect.gen(function* () {
-    const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.baseUrl });
-    const { ticket } = yield* client.auth.webSocketTicket({
-      headers: { authorization: `Bearer ${Redacted.value(target.token)}` },
-    });
-    const socketUrl = new URL("/ws", target.baseUrl);
-    socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
-    socketUrl.searchParams.set(
-      ORCHESTRATION_PROTOCOL_QUERY_PARAM,
-      String(ORCHESTRATION_PROTOCOL_VERSION),
-    );
-    socketUrl.searchParams.set("wsTicket", ticket);
-    // Built into the caller's scope: the socket must outlive the client's construction.
-    const protocol = yield* Layer.build(
-      RpcClient.layerProtocolSocket().pipe(
-        Layer.provide(Socket.layerWebSocket(socketUrl.toString())),
-        Layer.provide(RpcSerialization.layerJson),
-      ),
-    );
-    return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
+export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(function* (
+  target: SandboxGuestTarget,
+) {
+  const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.baseUrl });
+  const { ticket } = yield* client.auth.webSocketTicket({
+    headers: { authorization: `Bearer ${Redacted.value(target.token)}` },
   });
+  const socketUrl = new URL("/ws", target.baseUrl);
+  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  socketUrl.searchParams.set(
+    ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+    String(ORCHESTRATION_PROTOCOL_VERSION),
+  );
+  socketUrl.searchParams.set("wsTicket", ticket);
+  // Built into the caller's scope: the socket must outlive the client's construction.
+  const protocol = yield* Layer.build(
+    RpcClient.layerProtocolSocket().pipe(
+      Layer.provide(Socket.layerWebSocket(socketUrl.toString())),
+      Layer.provide(RpcSerialization.layerJson),
+    ),
+  );
+  return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
+});
 
 export class SandboxGuest extends Context.Service<
   SandboxGuest,
@@ -400,92 +401,83 @@ const make = Effect.gen(function* () {
 
   const encode = (text: string) => new TextEncoder().encode(text);
 
-  const writeBootInputs: SandboxGuest["Service"]["writeBootInputs"] = (
-    account,
-    machineId,
-    inputs,
-  ) =>
-    Effect.gen(function* () {
-      const marker = yield* provider.exec(account, machineId, {
-        command: `${renderInputsReadyTest(inputs.managed.sandboxId)} && echo present || true`,
-        timeoutSeconds: 10,
-      });
-      if (marker.stdout.trim() === "present") return;
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_ENV_FILE,
-        content: encode(inputs.envFile),
-      });
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_SETUP_ENV_FILE,
-        content: encode(inputs.setupEnvFile),
-      });
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_MACHINE_SETUP_SCRIPT,
-        content: encode(inputs.machineSetupScript),
-      });
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_MANAGED_FILE,
-        content: encode(encodeManagedSandboxMarker(inputs.managed)),
-      });
-      const tarball = inputs.tarball;
-      if (tarball !== null) {
-        const parts = Math.ceil(tarball.length / UPLOAD_CHUNK_BYTES);
-        yield* Effect.forEach(
-          Array.from({ length: parts }, (_, index) => index),
-          (index) =>
-            provider.writeFile(account, machineId, {
-              path: `${SANDBOX_T3_TARBALL}.part-${String(index).padStart(3, "0")}`,
-              content: tarball.subarray(
-                index * UPLOAD_CHUNK_BYTES,
-                (index + 1) * UPLOAD_CHUNK_BYTES,
-              ),
-            }),
-          { concurrency: 3 },
-        );
-        yield* execOrFail(
-          "write-inputs",
-          account,
-          machineId,
-          `cat ${shellQuote(SANDBOX_T3_TARBALL)}.part-* > ${shellQuote(SANDBOX_T3_TARBALL)} && rm -f ${shellQuote(SANDBOX_T3_TARBALL)}.part-*`,
-          60,
-        );
-      }
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_INPUTS_READY_FILE,
-        content: encode(inputs.managed.sandboxId),
-      });
+  const writeBootInputs: SandboxGuest["Service"]["writeBootInputs"] = Effect.fn(
+    "SandboxGuest.writeBootInputs",
+  )(function* (account, machineId, inputs) {
+    const marker = yield* provider.exec(account, machineId, {
+      command: `${renderInputsReadyTest(inputs.managed.sandboxId)} && echo present || true`,
+      timeoutSeconds: 10,
     });
-
-  const refreshCredentials: SandboxGuest["Service"]["refreshCredentials"] = (
-    account,
-    machineId,
-    credentials,
-  ) =>
-    Effect.gen(function* () {
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_STAGED_ENV_FILE,
-        content: encode(credentials.envFile),
-      });
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_STAGED_SETUP_ENV_FILE,
-        content: encode(credentials.setupEnvFile),
-      });
-      yield* provider.writeFile(account, machineId, {
-        path: SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
-        content: encode(credentials.machineSetupScript),
-      });
-      const outcome = yield* execOrFail(
-        "refresh-credentials",
+    if (marker.stdout.trim() === "present") return;
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_ENV_FILE,
+      content: encode(inputs.envFile),
+    });
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_SETUP_ENV_FILE,
+      content: encode(inputs.setupEnvFile),
+    });
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_MACHINE_SETUP_SCRIPT,
+      content: encode(inputs.machineSetupScript),
+    });
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_MANAGED_FILE,
+      content: encode(encodeManagedSandboxMarker(inputs.managed)),
+    });
+    const tarball = inputs.tarball;
+    if (tarball !== null) {
+      const parts = Math.ceil(tarball.length / UPLOAD_CHUNK_BYTES);
+      yield* Effect.forEach(
+        Array.from({ length: parts }, (_, index) => index),
+        (index) =>
+          provider.writeFile(account, machineId, {
+            path: `${SANDBOX_T3_TARBALL}.part-${String(index).padStart(3, "0")}`,
+            content: tarball.subarray(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES),
+          }),
+        { concurrency: 3 },
+      );
+      yield* execOrFail(
+        "write-inputs",
         account,
         machineId,
-        renderRefreshCredentialsCommand(),
-        // Boat's longest exec; the setup unit's own timeout is shorter.
-        600,
+        `cat ${shellQuote(SANDBOX_T3_TARBALL)}.part-* > ${shellQuote(SANDBOX_T3_TARBALL)} && rm -f ${shellQuote(SANDBOX_T3_TARBALL)}.part-*`,
+        60,
       );
-      yield* Effect.logInfo("sandbox credentials refreshed").pipe(
-        Effect.annotateLogs({ machineId, outcome: outcome.trim().split("\n").at(-1) ?? "" }),
-      );
+    }
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_INPUTS_READY_FILE,
+      content: encode(inputs.managed.sandboxId),
     });
+  });
+
+  const refreshCredentials: SandboxGuest["Service"]["refreshCredentials"] = Effect.fn(
+    "SandboxGuest.refreshCredentials",
+  )(function* (account, machineId, credentials) {
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_STAGED_ENV_FILE,
+      content: encode(credentials.envFile),
+    });
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_STAGED_SETUP_ENV_FILE,
+      content: encode(credentials.setupEnvFile),
+    });
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_STAGED_MACHINE_SETUP_SCRIPT,
+      content: encode(credentials.machineSetupScript),
+    });
+    const outcome = yield* execOrFail(
+      "refresh-credentials",
+      account,
+      machineId,
+      renderRefreshCredentialsCommand(),
+      // Boat's longest exec; the setup unit's own timeout is shorter.
+      600,
+    );
+    yield* Effect.logInfo("sandbox credentials refreshed").pipe(
+      Effect.annotateLogs({ machineId, outcome: outcome.trim().split("\n").at(-1) ?? "" }),
+    );
+  });
 
   const readEnvironmentId: SandboxGuest["Service"]["readEnvironmentId"] = (baseUrl) =>
     httpApi(baseUrl).pipe(
@@ -526,8 +518,8 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const launchThread = (target: SandboxGuestTarget, seed: SandboxSeedThread) =>
-    Effect.gen(function* () {
+  const launchThread = Effect.fn("SandboxGuest.launchThread")(
+    function* (target: SandboxGuestTarget, seed: SandboxSeedThread) {
       const rpc = yield* connectGuestRpc(target);
       return yield* rpc["orchestration.launchThread"]({
         commandId: seed.commandId,
@@ -540,35 +532,36 @@ const make = Effect.gen(function* () {
         workspaceStrategy: { type: "root" },
         initialMessage: { messageId: seed.messageId, text: seed.message, attachments: [] },
       });
-    }).pipe(
-      Effect.scoped,
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-      Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
-      Effect.timeout(GUEST_CALL_TIMEOUT),
-      Effect.mapError(sessionCallError("launch-thread")),
-    );
+    },
+    Effect.scoped,
+    Effect.provideService(HttpClient.HttpClient, httpClient),
+    Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
+    Effect.timeout(GUEST_CALL_TIMEOUT),
+    Effect.mapError(sessionCallError("launch-thread")),
+  );
 
-  const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (target, input) =>
-    Effect.gen(function* () {
-      const client = yield* httpApi(target.baseUrl);
-      yield* client.projects
-        .mutate({
-          headers: bearer(target),
-          payload: {
-            type: "project.create",
-            commandId: CommandId.make(`sandbox-project:${input.seed.projectId}`),
-            projectId: input.seed.projectId,
-            title: input.checkout.path.split("/").at(-1) ?? "project",
-            workspaceRoot: input.checkout.path,
-            scripts: input.scripts,
-          },
-        })
-        .pipe(
-          Effect.timeout(GUEST_CALL_TIMEOUT),
-          Effect.mapError(sessionCallError("create-project")),
-        );
-      yield* launchThread(target, input.seed);
-    });
+  const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = Effect.fn(
+    "SandboxGuest.launchSeedThread",
+  )(function* (target, input) {
+    const client = yield* httpApi(target.baseUrl);
+    yield* client.projects
+      .mutate({
+        headers: bearer(target),
+        payload: {
+          type: "project.create",
+          commandId: CommandId.make(`sandbox-project:${input.seed.projectId}`),
+          projectId: input.seed.projectId,
+          title: input.checkout.path.split("/").at(-1) ?? "project",
+          workspaceRoot: input.checkout.path,
+          scripts: input.scripts,
+        },
+      })
+      .pipe(
+        Effect.timeout(GUEST_CALL_TIMEOUT),
+        Effect.mapError(sessionCallError("create-project")),
+      );
+    yield* launchThread(target, input.seed);
+  });
 
   const readActivity: SandboxGuest["Service"]["readActivity"] = (target) =>
     httpApi(target.baseUrl).pipe(

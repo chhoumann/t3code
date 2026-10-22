@@ -21,7 +21,6 @@ import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
 import {
-  DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
   CommandId,
   authScopeResponse,
@@ -78,8 +77,6 @@ import {
   ProviderSetupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
-  type ServerSelfUpdateError,
-  type ServerSelfUpdateProgressEvent,
   type ServerConfig as ClientServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
@@ -95,16 +92,14 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   ThreadId,
-  type TerminalAttachStreamEvent,
-  type TerminalError,
-  type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
   WS_METHODS,
+  WsCoreRpcGroup,
   WsRpcGroup,
+  WsSandboxRpcGroup,
   isSandboxManagedByOwnerError,
 } from "@t3tools/contracts";
-import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -134,6 +129,7 @@ import * as SandboxService from "./sandbox/SandboxService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
+  bufferShellLiveStream,
   coalesceShellApplicationEvents,
   coalesceStoredThreadEvents,
   composeShellStreamWithEnrichment,
@@ -176,6 +172,7 @@ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRe
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import { latestProviderVersionCacheKeys } from "@t3tools/provider-core/server/maintenanceResolver";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
@@ -186,7 +183,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
-import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
+import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -214,6 +211,7 @@ import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
+import { threadWorkspaceRoot } from "./project/threadWorkspaceRoot.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
 import { projectMutationOperation } from "./project/ProjectMutation.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
@@ -224,6 +222,7 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
+import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
@@ -234,6 +233,8 @@ import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import { featureUsage } from "./telemetry/FeatureUsage.ts";
+import type { TelemetryOwner } from "./telemetry/Identify.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -254,6 +255,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { isTelemetryIdHash } from "@t3tools/shared/telemetryId";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -274,7 +276,7 @@ const resolveDiscoveryForConfig = <A, E, R>(
     Effect.map(Option.getOrElse(onTimeout)),
   );
 
-export const resolveAvailableEditorsForConfig = <A, E, R>(
+const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
 ) => resolveDiscoveryForConfig(discovery, () => []);
 
@@ -287,24 +289,23 @@ type EditorDiscovery = Pick<
   "resolveAvailableEditors" | "resolveFileManagerRevealKind"
 >;
 
-const resolveEditorConfig = <E, R>(
+const resolveEditorConfig = Effect.fn("ws.resolveEditorConfig")(function* <E, R>(
   availableEditors: ReadonlyArray<EditorId>,
   revealKind: Effect.Effect<FileManagerRevealKind | undefined, E, R>,
-) =>
-  Effect.gen(function* () {
-    const fileManagerRevealKind = availableEditors.includes("file-manager")
-      ? yield* revealKind
-      : undefined;
-    return {
-      availableEditors,
-      ...(fileManagerRevealKind === undefined
-        ? {}
-        : {
-            shellRevealInFileManager: true,
-            shellRevealInFileManagerKind: fileManagerRevealKind,
-          }),
-    };
-  });
+) {
+  const fileManagerRevealKind = availableEditors.includes("file-manager")
+    ? yield* revealKind
+    : undefined;
+  return {
+    availableEditors,
+    ...(fileManagerRevealKind === undefined
+      ? {}
+      : {
+          shellRevealInFileManager: true,
+          shellRevealInFileManagerKind: fileManagerRevealKind,
+        }),
+  };
+});
 
 export const withLateEditorConfig = <E, R>(
   config: ClientServerConfig,
@@ -551,6 +552,8 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
+const ServerWsSandboxRpcGroup = WsSandboxRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -609,14 +612,14 @@ const MAX_CLIENT_APP_VERSION_LENGTH = 64;
 const MAX_CLIENT_BROWSER_LENGTH = 64;
 const MAX_CLIENT_DEVICE_MODEL_LENGTH = 80;
 
-export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
+function hasCompatibleOrchestrationProtocol(url: URL): boolean {
   return (
     url.searchParams.get(ORCHESTRATION_PROTOCOL_QUERY_PARAM) ===
     String(ORCHESTRATION_PROTOCOL_VERSION)
   );
 }
 
-export function shouldUseBoundedThreadSnapshot(input: {
+function shouldUseBoundedThreadSnapshot(input: {
   readonly acceptBoundedSnapshot?: boolean;
 }): boolean {
   return input.acceptBoundedSnapshot === true;
@@ -683,6 +686,28 @@ function readClientAnalyticsProps(request: HttpServerRequest.HttpServerRequest) 
     ...(hasDeviceModel ? { deviceModel, clientDeviceModel: deviceModel } : {}),
     ...(isClientConnectionMethod(connectionMethod) ? { connectionMethod } : {}),
   };
+}
+
+/**
+ * Owners a connecting client reports: its hashed T3 Connect account and its
+ * hashed device id. Only hashes are accepted, so a raw id never reaches analytics.
+ */
+function readClientOwners(
+  request: HttpServerRequest.HttpServerRequest,
+): ReadonlyArray<TelemetryOwner> {
+  const url = HttpServerRequest.toURL(request);
+  if (Option.isNone(url)) {
+    return [];
+  }
+  const params = url.value.searchParams;
+  return (
+    [
+      ["connect", params.get("clientOwner")],
+      ["device", params.get("clientDevice")],
+    ] as const
+  ).flatMap(([source, ownerId]) =>
+    ownerId !== null && isTelemetryIdHash(ownerId) ? [{ source, ownerId }] : [],
+  );
 }
 
 const canReplayPersistedRange = Effect.fnUntraced(function* (
@@ -1031,7 +1056,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       );
 
     const liveFrom = (afterSequence: number) =>
-      bufferLiveStream(
+      bufferShellLiveStream(
         toShellStream(
           applicationEvents.streamProjectedApplicationEvents({
             afterSequence,
@@ -1165,14 +1190,44 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
-const layerWsRpc = (
+/** The sandbox RPCs this environment's owner side serves. */
+const layerWsSandboxRpc = (currentSession: EnvironmentAuth.AuthenticatedSession) =>
+  ServerWsSandboxRpcGroup.toLayer(
+    Effect.gen(function* () {
+      const sandboxes = yield* SandboxService.SandboxService;
+      const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
+      return ServerWsSandboxRpcGroup.of({
+        [WS_METHODS.sandboxesSubscribe]: (_input) =>
+          sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesListTemplates]: (input) =>
+          sandboxes.listTemplates(input.accountId).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesLaunch]: (input) =>
+          sandboxes.launch(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesUpdate]: (input) =>
+          sandboxes.update(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesConnect]: (input) =>
+          sandboxes
+            .connect({
+              id: input.id,
+              scopes: currentSession.scopes.filter(Schema.is(AuthGrantScope)),
+            })
+            .pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesSaveAccount]: (input) =>
+          sandboxAccounts.save(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesRemoveAccount]: (input) =>
+          sandboxAccounts.remove(input.id).pipe(Effect.mapError(toSandboxError)),
+      });
+    }),
+  );
+
+const layerWsCoreRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  ServerWsCoreRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1188,6 +1243,7 @@ const layerWsRpc = (
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const projectService = yield* ProjectService.ProjectService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+      const eventLoopMonitor = yield* EventLoopMonitor.EventLoopMonitor;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -1206,8 +1262,6 @@ const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
-      const sandboxes = yield* SandboxService.SandboxService;
-      const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -1238,6 +1292,7 @@ const layerWsRpc = (
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+      const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1292,16 +1347,6 @@ const layerWsRpc = (
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const otlpEndpointCheck = yield* OtlpEndpointCheck.OtlpEndpointCheck;
-      const automaticGitFetchInterval = serverSettings.getSettings.pipe(
-        Effect.map(
-          (settings) => resolveServerBackgroundActivitySettings(settings).automaticGitFetchInterval,
-        ),
-        Effect.catch((cause) =>
-          Effect.logWarning("Failed to read automatic Git fetch interval setting", {
-            detail: cause.message,
-          }).pipe(Effect.as(DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL)),
-        ),
-      );
       const sourceControlRepositories =
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
@@ -1662,64 +1707,65 @@ const layerWsRpc = (
           ),
         );
 
-      const loadServerConfig = (options: { readonly usageLimitsCommand: boolean }) =>
-        Effect.gen(function* () {
-          const keybindingsConfig = yield* keybindings.loadConfigState;
-          const currentProviders = yield* providerRegistry.getProviders;
-          const providers = options.usageLimitsCommand
-            ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
-            : currentProviders;
-          const settings = ServerSettings.redactServerSettingsForClient(
-            yield* serverSettings.getSettings,
-          );
-          const environment = yield* serverEnvironment.getDescriptor;
-          const auth = yield* serverAuth.getDescriptor();
-          const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
-          const editorConfig = yield* resolveEditorConfig(
-            yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
-            resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
-          );
+      const loadServerConfig = Effect.fn("ws.loadServerConfig")(function* (options: {
+        readonly usageLimitsCommand: boolean;
+      }) {
+        const keybindingsConfig = yield* keybindings.loadConfigState;
+        const currentProviders = yield* providerRegistry.getProviders;
+        const providers = options.usageLimitsCommand
+          ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
+          : currentProviders;
+        const settings = ServerSettings.redactServerSettingsForClient(
+          yield* serverSettings.getSettings,
+        );
+        const environment = yield* serverEnvironment.getDescriptor;
+        const auth = yield* serverAuth.getDescriptor();
+        const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
+        const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
+        const editorConfig = yield* resolveEditorConfig(
+          yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
+          resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
+        );
 
-          return {
-            environment,
-            auth,
-            cwd: config.cwd,
-            keybindingsConfigPath: config.keybindingsConfigPath,
-            keybindings: keybindingsConfig.keybindings,
-            issues: keybindingsConfig.issues,
-            providers,
-            ...editorConfig,
-            remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
-              remoteOpenTargets.resolveTargets(),
-            ),
-            directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
-            observability: {
-              logsDirectoryPath: config.logsDir,
-              localTracingEnabled: true,
-              ...(config.otlpTracesUrl !== undefined
-                ? { otlpTracesUrl: config.otlpTracesUrl }
-                : {}),
-              otlpTracesEnabled: config.otlpTracesUrl !== undefined,
-              ...(config.otlpMetricsUrl !== undefined
-                ? { otlpMetricsUrl: config.otlpMetricsUrl }
-                : {}),
-              otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
-              ...(config.otlpLogsUrl !== undefined ? { otlpLogsUrl: config.otlpLogsUrl } : {}),
-              otlpLogsEnabled: config.otlpLogsUrl !== undefined,
-            },
-            settings,
-            shellResumeCompletionMarker: true,
-            threadResumeCompletionMarker: true,
-            threadSnapshotPagination: true,
-            threadFind: true,
-            threadFindProgressive: true,
-            ...Option.match(scratchWorkspaceRoot, {
-              onNone: () => ({}),
-              onSome: (root) => ({ scratchWorkspaceRoot: root }),
-            }),
-            newProjectsRoot: managedFolders.namedProjectsRoot,
-          };
-        });
+        return {
+          environment,
+          auth,
+          cwd: config.cwd,
+          keybindingsConfigPath: config.keybindingsConfigPath,
+          keybindings: keybindingsConfig.keybindings,
+          issues: keybindingsConfig.issues,
+          providers,
+          ...editorConfig,
+          remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
+            remoteOpenTargets.resolveTargets(),
+          ),
+          directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
+          observability: {
+            logsDirectoryPath: config.logsDir,
+            localTracingEnabled: true,
+            ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
+            otlpTracesEnabled: config.otlpTracesUrl !== undefined,
+            ...(config.otlpMetricsUrl !== undefined
+              ? { otlpMetricsUrl: config.otlpMetricsUrl }
+              : {}),
+            otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
+            ...(config.otlpLogsUrl !== undefined ? { otlpLogsUrl: config.otlpLogsUrl } : {}),
+            otlpLogsEnabled: config.otlpLogsUrl !== undefined,
+          },
+          settings,
+          shellResumeCompletionMarker: true,
+          threadResumeCompletionMarker: true,
+          threadSnapshotPagination: true,
+          threadFind: true,
+          threadFindProgressive: true,
+          ...Option.match(scratchWorkspaceRoot, {
+            onNone: () => ({}),
+            onSome: (root) => ({ scratchWorkspaceRoot: root }),
+          }),
+          newProjectsRoot: managedFolders.namedProjectsRoot,
+          ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
+        };
+      });
 
       const refreshGitStatus = (cwd: string) =>
         vcsStatusBroadcaster
@@ -1804,7 +1850,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerWsCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2044,25 +2090,6 @@ const layerWsRpc = (
               Effect.as(commandOutputHub.subscribe(input)),
             ),
           ),
-        [WS_METHODS.sandboxesSubscribe]: (_input) =>
-          sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesListTemplates]: (input) =>
-          sandboxes.listTemplates(input.accountId).pipe(Effect.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesLaunch]: (input) =>
-          sandboxes.launch(input).pipe(Effect.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesUpdate]: (input) =>
-          sandboxes.update(input).pipe(Effect.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesConnect]: (input) =>
-          sandboxes
-            .connect({
-              id: input.id,
-              scopes: currentSession.scopes.filter(Schema.is(AuthGrantScope)),
-            })
-            .pipe(Effect.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesSaveAccount]: (input) =>
-          sandboxAccounts.save(input).pipe(Effect.mapError(toSandboxError)),
-        [WS_METHODS.sandboxesRemoveAccount]: (input) =>
-          sandboxAccounts.remove(input.id).pipe(Effect.mapError(toSandboxError)),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
@@ -2197,8 +2224,9 @@ const layerWsRpc = (
               }),
             ),
           ),
-        [WS_METHODS.serverRefreshProviders]: (input) =>
-          Effect.gen(function* () {
+        [WS_METHODS.serverRefreshProviders]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* (input) {
             if (input.refreshModels) {
               yield* modelManifest.forceRefresh;
               const instances = yield* providerInstances.listInstances;
@@ -2211,10 +2239,16 @@ const layerWsRpc = (
                   Effect.gen(function* () {
                     yield* instance.invalidateCaches ?? Effect.void;
                     const maintenance = yield* instance.snapshot.resolveMaintenance({
-                      fresh: true,
+                      fresh:
+                        input.instanceId !== undefined &&
+                        input.cwd !== undefined &&
+                        input.fresh !== true,
                     });
-                    if (maintenance.packageName)
-                      yield* providerLatestVersions.invalidate(maintenance.packageName);
+                    yield* Effect.forEach(
+                      latestProviderVersionCacheKeys(maintenance),
+                      providerLatestVersions.invalidate,
+                      { discard: true },
+                    );
                   }),
                 { concurrency: "unbounded", discard: true },
               );
@@ -2266,59 +2300,65 @@ const layerWsRpc = (
         [WS_METHODS.mcpAppsToolInfo]: (input) => mcpAppRequests.toolInfo(input),
         [WS_METHODS.mcpAppsUpdateModelContext]: (input) => mcpAppRequests.updateModelContext(input),
         [WS_METHODS.mcpAppsReadResource]: (input) => mcpAppRequests.readResource(input),
-        [WS_METHODS.providerUploadFeedback]: (input) =>
-          Effect.gen(function* () {
-            const projection = yield* threadManagement.getThreadRecords(input.threadId, [
-              "providerThreads",
-            ]);
-            const providerThread =
-              projection.providerThreads.find(
-                (candidate) => candidate.id === projection.thread.activeProviderThreadId,
-              ) ?? projection.providerThreads.at(-1);
-            const providerSessionId = providerThread?.providerSessionId ?? null;
-            if (providerThread === undefined || providerSessionId === null) {
-              return yield* Effect.fail(
-                new ProviderUploadFeedbackError({
-                  threadId: input.threadId,
-                  cause: "No provider session has run in this thread yet.",
-                }),
-              );
-            }
-            const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
-            if (runtime === null) {
-              return yield* Effect.fail(
-                new ProviderUploadFeedbackError({
-                  threadId: input.threadId,
-                  cause: "The provider session is no longer running. Send a message first.",
-                }),
-              );
-            }
-            if (runtime.uploadFeedback === undefined) {
-              return yield* Effect.fail(
-                new ProviderUploadFeedbackError({
-                  threadId: input.threadId,
-                  cause: `Provider '${runtime.driver}' does not support feedback uploads.`,
-                }),
-              );
-            }
-            return yield* runtime.uploadFeedback({
-              providerThread,
-              ...(input.reason === undefined ? {} : { reason: input.reason }),
-            });
-          }).pipe(
-            Effect.mapError((cause) =>
-              isProviderUploadFeedbackError(cause)
-                ? cause
-                : new ProviderUploadFeedbackError({
+        [WS_METHODS.providerUploadFeedback]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(
+            function* (input) {
+              const projection = yield* threadManagement.getThreadRecords(input.threadId, [
+                "providerThreads",
+              ]);
+              const providerThread =
+                projection.providerThreads.find(
+                  (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+                ) ?? projection.providerThreads.at(-1);
+              const providerSessionId = providerThread?.providerSessionId ?? null;
+              if (providerThread === undefined || providerSessionId === null) {
+                return yield* Effect.fail(
+                  new ProviderUploadFeedbackError({
                     threadId: input.threadId,
-                    cause,
+                    cause: "No provider session has run in this thread yet.",
                   }),
-            ),
+                );
+              }
+              const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
+              if (runtime === null) {
+                return yield* Effect.fail(
+                  new ProviderUploadFeedbackError({
+                    threadId: input.threadId,
+                    cause: "The provider session is no longer running. Send a message first.",
+                  }),
+                );
+              }
+              if (runtime.uploadFeedback === undefined) {
+                return yield* Effect.fail(
+                  new ProviderUploadFeedbackError({
+                    threadId: input.threadId,
+                    cause: `Provider '${runtime.driver}' does not support feedback uploads.`,
+                  }),
+                );
+              }
+              return yield* runtime.uploadFeedback({
+                providerThread,
+                ...(input.reason === undefined ? {} : { reason: input.reason }),
+              });
+            },
+            (effect, input) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isProviderUploadFeedbackError(cause)
+                    ? cause
+                    : new ProviderUploadFeedbackError({
+                        threadId: input.threadId,
+                        cause,
+                      }),
+                ),
+              ),
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           providerMaintenanceRunner.updateProvider(input),
-        [WS_METHODS.providerConsumeResetCredit]: (input) =>
-          Effect.gen(function* () {
+        [WS_METHODS.providerConsumeResetCredit]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* (input) {
             if ("sourceId" in input) return yield* usageLimitSources.consumeResetCredit(input);
             const instance = yield* providerInstances.getInstance(input.instanceId);
             if (instance === undefined || !instance.enabled) {
@@ -2370,37 +2410,18 @@ const layerWsRpc = (
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
         [WS_METHODS.serverUpdateServer]: (input) => serverSelfUpdate.update(input),
         [WS_METHODS.serverUpdateServerWithProgress]: (input) =>
-          Stream.callback<ServerSelfUpdateProgressEvent, ServerSelfUpdateError>((queue) =>
-            serverSelfUpdate
-              .update(input, (stage) =>
-                Queue.offer(queue, {
-                  type: "progress",
-                  stage,
-                }).pipe(Effect.asVoid),
-              )
-              .pipe(
-                Effect.flatMap((result) =>
-                  Queue.offer(queue, {
-                    type: "complete",
-                    result,
-                  }),
-                ),
-                Effect.catchTags({
-                  ServerSelfUpdateError: (error) => Queue.fail(queue, error),
-                }),
-                Effect.andThen(Queue.end(queue)),
-                Effect.forkScoped,
-              ),
-          ),
+          ServerSelfUpdate.updateProgressStream(serverSelfUpdate, input),
         [WS_METHODS.serverCommitDesktopUpdate]: (input) =>
           serverSelfUpdate.commitDesktopUpdate(input.requestId),
-        [WS_METHODS.serverUpsertKeybinding]: (rule) =>
-          Effect.gen(function* () {
+        [WS_METHODS.serverUpsertKeybinding]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* (rule) {
             const keybindingsConfig = yield* keybindings.upsertKeybindingRule(rule);
             return { keybindings: keybindingsConfig, issues: [] };
           }),
-        [WS_METHODS.serverRemoveKeybinding]: (rule) =>
-          Effect.gen(function* () {
+        [WS_METHODS.serverRemoveKeybinding]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* (rule) {
             const keybindingsConfig = yield* keybindings.removeKeybindingRule(rule);
             return { keybindings: keybindingsConfig, issues: [] };
           }),
@@ -2409,8 +2430,9 @@ const layerWsRpc = (
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.serverGetSettings]: (_input) =>
           serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
-        [WS_METHODS.serverUpdateSettings]: ({ patch, providerInstanceMutation }) =>
-          Effect.gen(function* () {
+        [WS_METHODS.serverUpdateSettings]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
             const deviceHosts = patch.deviceHosts
               ? yield* remoteSshDeviceHosts(patch.deviceHosts).pipe(
                   Effect.provide(deviceHostContext),
@@ -2518,6 +2540,8 @@ const layerWsRpc = (
           withPullRequestViewer(input, pullRequests.diffFileContents(input)),
         [WS_METHODS.pullRequestsFilesViewed]: (input) =>
           withPullRequestViewer(input, pullRequests.filesViewed(input)),
+        [WS_METHODS.pullRequestsChangeBreakdown]: (input) =>
+          withPullRequestViewer(input, pullRequests.changeBreakdown(input)),
         [WS_METHODS.pullRequestsSetFilesViewed]: (input) =>
           withPullRequestViewer(input, pullRequests.setFilesViewed(input)),
         [WS_METHODS.pullRequestsRunAction]: (input) =>
@@ -2602,6 +2626,10 @@ const layerWsRpc = (
                   }),
                 ),
                 Effect.andThen(refreshGitStatus(project.workspaceRoot)),
+                // The folder was empty when the project was created, so the cached
+                // enrichment says "no repository" and clients cannot group it yet.
+                Effect.andThen(projectEnrichment.invalidate([project.workspaceRoot])),
+                Effect.andThen(projectEnrichment.request(project.workspaceRoot)),
                 Effect.ignoreCause({ log: true }),
               ),
           }),
@@ -2657,6 +2685,17 @@ const layerWsRpc = (
           ),
         [WS_METHODS.projectsListEntries]: (input) =>
           workspaceEntries.list(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectListEntriesError({
+                  ...input,
+                  ...projectEntriesFailureContext(cause),
+                  cause,
+                }),
+            ),
+          ),
+        [WS_METHODS.projectsListIgnoredFiles]: (input) =>
+          workspaceEntries.listIgnoredFiles(input).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectListEntriesError({
@@ -2722,8 +2761,9 @@ const layerWsRpc = (
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
-        [WS_METHODS.assetsCreateUrl]: (input) =>
-          Effect.gen(function* () {
+        [WS_METHODS.assetsCreateUrl]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(function* (input) {
             const path = yield* Path.Path;
             if (
               input.resource._tag === "attachment" ||
@@ -2765,10 +2805,9 @@ const layerWsRpc = (
                 ...(project.value.faviconPath
                   ? { projectFaviconPath: project.value.faviconPath }
                   : {}),
-                projectCheckoutPending:
-                  clone !== null &&
-                  clone.phase !== "done" &&
-                  clone.destinationPath === project.value.workspaceRoot,
+                ...(clone !== null && clone.destinationPath === project.value.workspaceRoot
+                  ? { projectCheckout: clone.phase === "done" ? "cloned" : "pending" }
+                  : {}),
               });
             }
             const thread = yield* threadManagement
@@ -2803,10 +2842,7 @@ const layerWsRpc = (
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
-        [WS_METHODS.subscribeVcsStatus]: (input) =>
-          vcsStatusBroadcaster.streamStatus(input, {
-            automaticRemoteRefreshInterval: automaticGitFetchInterval,
-          }),
+        [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
         [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
@@ -2881,11 +2917,11 @@ const layerWsRpc = (
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
         [WS_METHODS.terminalAttach]: (input) =>
-          Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-            Effect.acquireRelease(
-              terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
-              (unsubscribe) => Effect.sync(unsubscribe),
-            ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
+          terminalOutputStream(
+            (listener, registerCleanup) =>
+              terminalManager.attachStream(input, listener, registerCleanup),
+            (listener, registerCleanup) =>
+              terminalManager.resyncStream(input, listener, registerCleanup),
           ),
         [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),
         [WS_METHODS.terminalResize]: (input) => terminalManager.resize(input),
@@ -2893,19 +2929,14 @@ const layerWsRpc = (
         [WS_METHODS.terminalRestart]: (input) => terminalManager.restart(input),
         [WS_METHODS.terminalClose]: (input) => terminalManager.close(input),
         [WS_METHODS.terminalObserve]: (input) =>
-          Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-            Effect.acquireRelease(
-              terminalManager.observeStream(input, (event) => Queue.offer(queue, event)),
-              (unsubscribe) => Effect.sync(unsubscribe),
-            ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
+          terminalOutputStream(
+            (listener, registerCleanup) =>
+              terminalManager.observeStream(input, listener, registerCleanup),
+            (listener, registerCleanup) =>
+              terminalManager.resyncStream(input, listener, registerCleanup),
           ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
-          Stream.callback<TerminalEvent>((queue) =>
-            Effect.acquireRelease(
-              terminalManager.subscribe((event) => Queue.offer(queue, event)),
-              (unsubscribe) => Effect.sync(unsubscribe),
-            ),
-          ),
+          terminalOutputStream(terminalManager.subscribe),
         [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
           Stream.callback<TerminalMetadataStreamEvent>((queue) =>
             Effect.acquireRelease(
@@ -2926,6 +2957,7 @@ const layerWsRpc = (
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
+        [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),
         [WS_METHODS.deviceList]: (input) =>
           input.inspectOnly && !input.updateTool
             ? deviceService.inspect
@@ -2937,7 +2969,10 @@ const layerWsRpc = (
                     ? deviceService.retryHost(input.retryHostId)
                     : deviceService.list,
               ),
-        [WS_METHODS.deviceOpen]: (input) => deviceService.open(input),
+        [WS_METHODS.deviceOpen]: (input) =>
+          threadWorkspaceRoot(input.threadId).pipe(
+            Effect.flatMap((workspaceRoot) => deviceService.open(input, { workspaceRoot })),
+          ),
         [WS_METHODS.deviceClose]: (input) => deviceService.close(input),
         [WS_METHODS.deviceShutdown]: (input) => deviceService.shutdown(input),
         [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
@@ -2973,8 +3008,11 @@ const layerWsRpc = (
           Stream.unwrap(
             Effect.gen(function* () {
               const usageLimitsCommand = input.usageLimitsCommand === true;
+              // Buffer changes through discovery and the initial snapshot's RPC ACK wait.
+              const keybindingsChanges = yield* keybindings.subscribeChanges;
+              const settingsChanges = yield* serverSettings.subscribeChanges;
               const config = yield* loadServerConfig({ usageLimitsCommand });
-              const keybindingsUpdates = keybindings.streamChanges.pipe(
+              const keybindingsUpdates = keybindingsChanges.pipe(
                 Stream.map((event) => ({
                   version: 1 as const,
                   type: "keybindingsUpdated" as const,
@@ -3040,7 +3078,7 @@ const layerWsRpc = (
                       })),
                     )
                   : Stream.empty;
-              const settingsUpdates = serverSettings.streamChanges.pipe(
+              const settingsUpdates = settingsChanges.pipe(
                 Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
                 Stream.map((settings) => ({
                   version: 1 as const,
@@ -3135,6 +3173,24 @@ const layerWsRpc = (
     }),
   );
 
+export const layerWsRpc = (
+  currentSession: EnvironmentAuth.AuthenticatedSession,
+  clientOrigin: OrchestrationClientOrigin,
+  clientAnalyticsProps: Readonly<Record<string, unknown>>,
+  previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  serverBrowser: ServerBrowser.ServerBrowser["Service"],
+) =>
+  Layer.merge(
+    layerWsCoreRpc(
+      currentSession,
+      clientOrigin,
+      clientAnalyticsProps,
+      previewAutomationBroker,
+      serverBrowser,
+    ),
+    layerWsSandboxRpc(currentSession),
+  );
+
 // RpcServer's default sends a socket-level Defect frame instead, and the client
 // ends every pending request on the socket with it.
 export const WS_RPC_SERVER_OPTIONS = {
@@ -3184,12 +3240,30 @@ export const layer = Layer.unwrap(
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* sessions.recordClientConnection(session.sessionId, clientOrigin);
         yield* analytics.record("client.connected", clientAnalyticsProps);
+        yield* analytics.recordOwners(readClientOwners(request), "client");
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
             Effect.provide(
-              Layer.merge(RpcAuthorization.layer(session.scopes), rpcInstrumentationLayer),
+              Layer.merge(
+                RpcAuthorization.layer(session.scopes, (method, payload) => {
+                  // Anonymous product signal: the feature and its enum variant,
+                  // credited to the connecting client's surface only.
+                  const usage = featureUsage(method, payload);
+                  return usage === undefined
+                    ? Effect.void
+                    : analytics
+                        .record("feature.used", {
+                          ...usage,
+                          ...(clientAnalyticsProps.surface === undefined
+                            ? {}
+                            : { surface: clientAnalyticsProps.surface }),
+                        })
+                        .pipe(Effect.ignore);
+                }),
+                rpcInstrumentationLayer,
+              ),
             ),
             Effect.forkScoped,
           );

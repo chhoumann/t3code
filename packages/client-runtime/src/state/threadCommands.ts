@@ -27,7 +27,6 @@ import {
   createRuntimeCommand,
 } from "./runtime.ts";
 import {
-  type ThreadCommandInput,
   type ArchiveThreadInput,
   type CancelQueuedRunInput,
   type RetryWorkspacePreparationInput,
@@ -40,6 +39,7 @@ import {
   type MergeThreadBackInput,
   type PromoteQueuedRunInput,
   type ReorderQueuedRunInput,
+  type ResumeThreadQueueInput,
   type LinkThreadPullRequestInput,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
@@ -199,6 +199,23 @@ export function createThreadEnvironmentAtoms<R, E>(
   /** Wakes the environment's sandbox when it sleeps; succeeds with whether it had to. */
   const wakeFirst = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) =>
     runAtomCommand(wake, registry, { environmentId });
+  const loadEarlierHistory = Effect.fn("ThreadCommands.loadEarlierHistory")(function* (
+    input: LoadEarlierThreadHistoryInput,
+  ) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const controller = yield* Effect.serviceOption(ThreadHistoryController.ThreadHistoryController);
+    if (Option.isNone(controller)) {
+      return {
+        _tag: "noop",
+      } satisfies ThreadHistoryController.ThreadHistoryLoadEarlierResult;
+    }
+    return yield* controller.value.loadEarlier(
+      supervisor.target.environmentId,
+      input.threadId,
+      input.throughEntryId,
+    );
+  });
+
   const commands = {
     wake,
     create: createEnvironmentCommand(runtime, {
@@ -406,7 +423,7 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     resumeThreadQueue: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resume-queue",
-      execute: (input: ThreadCommandInput, registry, environmentId) =>
+      execute: (input: ResumeThreadQueueInput, registry, environmentId) =>
         wakeFirst(registry, environmentId).pipe(Effect.andThen(resumeThreadQueue(input))),
       scheduler,
       concurrency,
@@ -445,23 +462,7 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     loadEarlierHistory: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:load-earlier-history",
-      execute: (input: LoadEarlierThreadHistoryInput) =>
-        Effect.gen(function* () {
-          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-          const controller = yield* Effect.serviceOption(
-            ThreadHistoryController.ThreadHistoryController,
-          );
-          if (Option.isNone(controller)) {
-            return {
-              _tag: "noop",
-            } satisfies ThreadHistoryController.ThreadHistoryLoadEarlierResult;
-          }
-          return yield* controller.value.loadEarlier(
-            supervisor.target.environmentId,
-            input.threadId,
-            input.throughEntryId,
-          );
-        }),
+      execute: loadEarlierHistory,
       scheduler,
       concurrency: {
         mode: "serial",
@@ -513,11 +514,7 @@ export function createThreadEnvironmentAtoms<R, E>(
             ...thread,
             pendingRuntimeRequest: null,
             snoozedUntil: DateTime.makeUnsafe(input.snoozedUntil),
-            snoozedAt:
-              thread.snoozedUntil != null &&
-              DateTime.formatIso(thread.snoozedUntil) === input.snoozedUntil
-                ? (thread.snoozedAt ?? now)
-                : now,
+            snoozedAt: now,
           },
     ),
     unsnooze: optimistic.wrap(commands.unsnooze, (thread) => ({

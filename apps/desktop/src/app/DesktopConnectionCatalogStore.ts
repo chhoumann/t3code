@@ -373,6 +373,7 @@ const migrateSavedEnvironmentRecords = Effect.fn(
     credentials,
     remoteDpopTokens: [],
     disabledEnvironmentIds: [],
+    dormantEnvironmentIds: [],
   };
 });
 

@@ -29,17 +29,19 @@ export const fakeEnvironmentRegistry = (
       target: { environmentId },
       session: sessions.get(environmentId)!,
     } as EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-  const run: Registry["run"] = (environmentId, effect) =>
-    Effect.gen(function* () {
-      if (!(yield* SubscriptionRef.get(entries)).has(environmentId)) {
-        return yield* new EnvironmentRegistry.EnvironmentNotRegisteredError({ environmentId });
-      }
-      return yield* Effect.provideService(
-        effect,
-        EnvironmentSupervisor.EnvironmentSupervisor,
-        supervisor(environmentId),
-      );
-    });
+  const run: Registry["run"] = Effect.fn("FakeEnvironmentRegistry.run")(function* <A, E, R>(
+    environmentId: EnvironmentId,
+    effect: Effect.Effect<A, E, R>,
+  ) {
+    if (!(yield* SubscriptionRef.get(entries)).has(environmentId)) {
+      return yield* new EnvironmentRegistry.EnvironmentNotRegisteredError({ environmentId });
+    }
+    return yield* Effect.provideService(
+      effect,
+      EnvironmentSupervisor.EnvironmentSupervisor,
+      supervisor(environmentId),
+    );
+  });
   const followStream: Registry["followStream"] = (environmentId, stream) =>
     SubscriptionRef.changes(entries).pipe(
       Stream.map((current) => current.has(environmentId)),

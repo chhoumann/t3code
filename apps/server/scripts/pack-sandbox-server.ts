@@ -34,24 +34,27 @@ class PackSandboxServerError extends Schema.TaggedError<PackSandboxServerError>(
   }
 }
 
-const run = (command: string, args: ReadonlyArray<string>, cwd: string) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(
-      ChildProcess.make(command, args, { cwd, stdout: "inherit", stderr: "inherit" }),
-    );
-    if (exitCode !== 0) {
-      return yield* new PackSandboxServerError({ command: `${command} ${args[0]}`, exitCode });
-    }
-  });
+const run = Effect.fn("PackSandboxServer.run")(function* (
+  command: string,
+  args: ReadonlyArray<string>,
+  cwd: string,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const exitCode = yield* spawner.exitCode(
+    ChildProcess.make(command, args, { cwd, stdout: "inherit", stderr: "inherit" }),
+  );
+  if (exitCode !== 0) {
+    return yield* new PackSandboxServerError({ command: `${command} ${args[0]}`, exitCode });
+  }
+});
 
 /**
  * Writes this checkout's server to `out`, laid out like a linux-x64 release
  * archive (bundle, web client, runtime externals staged by the archive build)
  * minus the single executable: the machine's Node runs the bundle.
  */
-export const packSandboxServer = (options: { readonly skipBuild: boolean; readonly out: string }) =>
-  Effect.gen(function* () {
+export const packSandboxServer = Effect.fn("PackSandboxServer.packSandboxServer")(
+  function* (options: { readonly skipBuild: boolean; readonly out: string }) {
     if (!options.skipBuild) yield* run("vp", ["run", "--filter", "t3", "build"], repoRoot);
     const stage = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-pack-"));
     const root = NodePath.join(stage, "t3");
@@ -70,7 +73,9 @@ export const packSandboxServer = (options: { readonly skipBuild: boolean; readon
     NodeFS.mkdirSync(NodePath.dirname(options.out), { recursive: true });
     yield* run("tar", ["--no-mac-metadata", "-czf", options.out, "-C", stage, "t3"], stage);
     NodeFS.rmSync(stage, { recursive: true, force: true });
-  }).pipe(Effect.scoped);
+  },
+  Effect.scoped,
+);
 
 if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
