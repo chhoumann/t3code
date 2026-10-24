@@ -20,6 +20,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -32,6 +33,7 @@ import { sourceControlDefinitions } from "../sourceControl/sourceControlDefiniti
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { GitHubAppConnection, type GitHubUserToken } from "./GitHubAppConnection.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
 import type { ManagedSandboxMarker } from "./ManagedSandbox.ts";
@@ -78,6 +80,19 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     /** What the guest's agents report; null when the guest does not answer. */
     activity: { busy: false, lastActivityAt: 0 } as SandboxGuestActivity | null,
     credentialRefreshes: 0,
+    /** What every credential refresh reports about T3's restart. */
+    restartPendingOnRefresh: false,
+    serverRestarts: 0,
+    /** Signalled by the next server restart. */
+    restarted: null as Deferred.Deferred<void> | null,
+    /** The token the owner's GitHub App connection hands out; null when no user is connected. */
+    githubToken: null as GitHubUserToken | null,
+    /** Fed into the connection's generations stream, as a rotation would. */
+    rotations: null as Queue.Queue<number | null> | null,
+    /** Every token a guest was signed in with, in order with the project preparations. */
+    guestSteps: [] as Array<string>,
+    /** Signalled by the next token delivery. */
+    delivered: null as Deferred.Deferred<number> | null,
     managedMarkers: [] as Array<ManagedSandboxMarker>,
     bootEnvFiles: [] as Array<{ readonly envFile: string; readonly setupEnvFile: string }>,
     launchedThreads: [] as Array<{ readonly threadId: string; readonly baseRef: string }>,
@@ -211,7 +226,29 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
         world.managedMarkers.push(inputs.managed);
         world.bootEnvFiles.push({ envFile: inputs.envFile, setupEnvFile: inputs.setupEnvFile });
       }),
-    refreshCredentials: () => Effect.sync(() => void (world.credentialRefreshes += 1)),
+    refreshCredentials: () =>
+      Effect.sync(() => {
+        world.credentialRefreshes += 1;
+        return { restartPending: world.restartPendingOnRefresh };
+      }),
+    restartServer: () =>
+      Effect.gen(function* () {
+        world.serverRestarts += 1;
+        const restarted = world.restarted;
+        if (restarted !== null) {
+          world.restarted = null;
+          yield* Deferred.succeed(restarted, undefined);
+        }
+      }),
+    deliverGitHubToken: (_account, _machineId, token) =>
+      Effect.gen(function* () {
+        world.guestSteps.push(`github-login:${token.generation}:${token.login}`);
+        const delivered = world.delivered;
+        if (delivered !== null) {
+          world.delivered = null;
+          yield* Deferred.succeed(delivered, token.generation);
+        }
+      }),
     readEnvironmentId: (baseUrl) =>
       Effect.gen(function* () {
         const died = world.dieNextReadiness;
@@ -235,6 +272,7 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     prepareProject: (_target, project) =>
       Effect.gen(function* () {
         world.prepared.push(project);
+        world.guestSteps.push("prepare");
         const hang = world.hangNextPrepare;
         if (hang !== null) {
           world.hangNextPrepare = null;
@@ -274,7 +312,20 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     remove: (name) => Effect.sync(() => void world.secrets.delete(name)),
   });
 
+  const connectionLayer = Layer.effect(
+    GitHubAppConnection,
+    Effect.gen(function* () {
+      const rotations = yield* Queue.unbounded<number | null>();
+      world.rotations = rotations;
+      return GitHubAppConnection.of({
+        current: () => Effect.sync(() => world.githubToken),
+        generations: Stream.fromQueue(rotations),
+      });
+    }),
+  );
+
   const serviceLayer = SandboxService.layer.pipe(
+    Layer.provide(connectionLayer),
     Layer.provide(
       SandboxAccounts.layerStatic([
         {
@@ -627,6 +678,8 @@ describe("SandboxService", () => {
           assert.strictEqual(world.credentialRefreshes, 1);
           assert.strictEqual(world.launchedThreads.length, 1);
           assert.isTrue(world.secrets.has("sandbox-sbx-cycle-admin"));
+          // No GitHub user is connected, so nothing was delivered and nothing waited for one.
+          assert.deepStrictEqual(world.guestSteps, ["prepare"]);
 
           yield* sandboxes.update({ id, desired: "destroyed" });
           yield* awaitGone(id);
@@ -1010,6 +1063,79 @@ describe("SandboxService", () => {
         yield* sandboxes.update({ id, desired: "destroyed" });
         yield* awaitGone(id);
         assert.strictEqual(world.machines.size, 0);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("signs a guest in to GitHub before its clone, and again when the token rotates", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const token = (generation: number): GitHubUserToken => ({
+        generation,
+        token: Redacted.make(`ghu_${generation}`),
+        expiresAt: Date.UTC(2026, 9, 25, 20),
+        login: "octocat",
+        name: "The Octocat",
+        email: null,
+      });
+      world.githubToken = token(1);
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-github");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        assert.deepStrictEqual(world.guestSteps, ["github-login:1:octocat", "prepare"]);
+
+        const delivered = yield* Deferred.make<number>();
+        world.delivered = delivered;
+        world.githubToken = token(2);
+        yield* Queue.offer(world.rotations!, 2);
+        assert.strictEqual(yield* Deferred.await(delivered), 2);
+        assert.deepStrictEqual(world.guestSteps, [
+          "github-login:1:octocat",
+          "prepare",
+          "github-login:2:octocat",
+        ]);
+
+        // The user disconnected: the guest keeps the login it has.
+        world.githubToken = null;
+        yield* Queue.offer(world.rotations!, null);
+        yield* TestClock.adjust("2 minutes");
+        assert.strictEqual(world.guestSteps.length, 3);
+      }).pipe(Effect.provide(started.context));
+      yield* Scope.close(started.scope, Exit.void);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("restarts T3 for a changed env only once the resumed agents are idle", () =>
+    Effect.gen(function* () {
+      const { world, start } = makeWorld();
+      const started = yield* start;
+      yield* Effect.gen(function* () {
+        const sandboxes = yield* service;
+        const id = SandboxId.make("sbx-env");
+        yield* sandboxes.launch(launchInput(id));
+        yield* awaitStatus(id, "ready");
+        yield* sandboxes.update({ id, desired: "stopped" });
+        yield* awaitStatus(id, "stopped");
+
+        world.restartPendingOnRefresh = true;
+        world.activity = { busy: true, lastActivityAt: 0 };
+        yield* sandboxes.update({ id, desired: "running" });
+        yield* awaitStatus(id, "ready");
+        yield* TestClock.adjust("3 minutes");
+        assert.strictEqual(world.credentialRefreshes, 1);
+        assert.strictEqual(world.serverRestarts, 0);
+
+        const restarted = yield* Deferred.make<void>();
+        world.restarted = restarted;
+        world.activity = { busy: false, lastActivityAt: yield* Clock.currentTimeMillis };
+        yield* advanceUntil(Deferred.await(restarted), "1 minute");
+        assert.strictEqual(world.serverRestarts, 1);
+        yield* TestClock.adjust("3 minutes");
+        assert.strictEqual(world.serverRestarts, 1);
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

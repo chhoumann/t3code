@@ -81,6 +81,8 @@ const fresh: SandboxRecord = {
   runningSince: null,
   inputsWrittenAt: null,
   credentialsStale: false,
+  restartPending: false,
+  githubTokenGeneration: null,
   resolvedBase: null,
   seedLaunchedAt: null,
   createdAt: NOW - 30 * MINUTE,
@@ -142,6 +144,7 @@ const observed = (overrides: Partial<SandboxObservation> = {}): SandboxObservati
   machine: null,
   environmentId: null,
   activity: null,
+  githubTokenGeneration: null,
   ...overrides,
 });
 const busy = { busy: true, lastActivityAt: NOW - 30 * MINUTE };
@@ -327,6 +330,91 @@ const cases: ReadonlyArray<Case> = [
     { ...prepared, seedLaunchedAt: NOW },
     answering,
     { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+
+  // The owner's GitHub token.
+  [
+    "signs the guest in to GitHub before preparing the project",
+    launching,
+    observed({ ...answering, githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+  [
+    "prepares the project once the guest holds the current token",
+    { ...launching, githubTokenGeneration: 1 },
+    observed({ ...answering, githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
+  ],
+  [
+    "does not sign in before T3 answers",
+    launching,
+    observed({ machine: machine("running"), githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a rotated token goes to a ready sandbox while its agents work",
+    { ...ready, githubTokenGeneration: 1 },
+    observed({ ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy), githubTokenGeneration: 2 }),
+    { status: { _tag: "ready" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+  [
+    "a ready sandbox holding the current token keeps watching",
+    { ...ready, githubTokenGeneration: 2 },
+    observed({ ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy), githubTokenGeneration: 2 }),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a disconnected GitHub leaves a sandbox with the token it has",
+    { ...ready, githubTokenGeneration: 1 },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a resumed sandbox refreshes its credentials before any token",
+    resumed,
+    observed({ machine: machine("running"), githubTokenGeneration: 1 }),
+    { status: { _tag: "resuming" }, action: { _tag: "RefreshCredentials" } },
+  ],
+  [
+    "a token rotated while the sandbox was stopped is delivered before it is ready",
+    { ...resumed, credentialsStale: false, githubTokenGeneration: 1 },
+    observed({ ...answering, githubTokenGeneration: 2 }),
+    { status: { _tag: "resuming" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+
+  // An env that changed while the sandbox was stopped.
+  [
+    "a pending restart waits while the agents work",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a pending restart waits while the guest does not answer",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, null),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a pending restart runs once the agents are idle",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, idleSince(NOW - MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
+  ],
+  [
+    "a sandbox that never stops on its own still restarts once idle",
+    { ...neverStops, restartPending: true },
+    watched(null, idleSince(NOW - MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
+  ],
+  [
+    "a new token goes out before a pending restart",
+    { ...ready, restartPending: true, githubTokenGeneration: 1 },
+    observed({
+      ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, idleSince(NOW - MINUTE)),
+      githubTokenGeneration: 2,
+    }),
+    { status: { _tag: "ready" }, action: { _tag: "DeliverGitHubToken" } },
   ],
   [
     "a resume after the project was prepared but before the seed launched launches it",

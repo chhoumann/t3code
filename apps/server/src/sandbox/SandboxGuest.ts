@@ -47,6 +47,7 @@ import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import { Socket } from "effect/socket";
 
+import type { GitHubUserToken } from "./GitHubAppConnection.ts";
 import {
   type ManagedSandboxMarker,
   SANDBOX_OWNER_SUBJECT,
@@ -54,6 +55,7 @@ import {
 } from "./ManagedSandbox.ts";
 import {
   SANDBOX_ENV_FILE,
+  SANDBOX_GITHUB_TOKEN_FILE,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MANAGED_FILE,
   SANDBOX_SETUP_ENV_FILE,
@@ -64,8 +66,10 @@ import {
   SANDBOX_T3_BIN,
   SANDBOX_T3_HOME,
   SANDBOX_T3_TARBALL,
+  renderGitHubLoginCommand,
   renderInputsReadyTest,
   renderRefreshCredentialsCommand,
+  renderRestartServerCommand,
   shellQuote,
 } from "./sandboxBootScript.ts";
 import { guestActivity, type SandboxGuestActivity } from "./sandboxActivity.ts";
@@ -118,6 +122,8 @@ export interface SandboxMachineCredentials {
 export const SandboxGuestOperation = Schema.Literals([
   "write-inputs",
   "refresh-credentials",
+  "restart-server",
+  "github-login",
   "mint-session",
   "clone",
   "launch-thread",
@@ -129,6 +135,8 @@ export type SandboxGuestOperation = typeof SandboxGuestOperation.Type;
 const OPERATION_SUMMARY: Record<SandboxGuestOperation, string> = {
   "write-inputs": "write the boot inputs to the sandbox",
   "refresh-credentials": "refresh the sandbox credentials",
+  "restart-server": "restart T3 in the sandbox",
+  "github-login": "sign the sandbox in to GitHub",
   "mint-session": "mint the owner session on the sandbox",
   clone: "clone the repository in the sandbox",
   "launch-thread": "launch the sandbox thread",
@@ -233,11 +241,33 @@ export class SandboxGuest extends Context.Service<
         readonly managed: ManagedSandboxMarker;
       },
     ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
-    /** Rewrites the account credentials after a boot, restarting what they changed. */
+    /**
+     * Rewrites the account credentials after a resume and re-runs the machine
+     * setup when they changed. Reports whether T3 must restart to load them,
+     * which `restartServer` does once the agents are idle.
+     */
     readonly refreshCredentials: (
       account: SandboxProviderAccount,
       machineId: ProviderMachineId,
       credentials: SandboxMachineCredentials,
+    ) => Effect.Effect<
+      { readonly restartPending: boolean },
+      SandboxGuestError | SandboxProviderError
+    >;
+    /** Restarts the guest's T3 if a refresh left that pending; a no-op otherwise. */
+    readonly restartServer: (
+      account: SandboxProviderAccount,
+      machineId: ProviderMachineId,
+    ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
+    /**
+     * Signs the guest in to GitHub as the token's user, for git and `gh`
+     * alike. The token travels as a file the login reads and removes; it
+     * never appears in a command line or a log.
+     */
+    readonly deliverGitHubToken: (
+      account: SandboxProviderAccount,
+      machineId: ProviderMachineId,
+      token: GitHubUserToken,
     ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
     /** The guest's environment id, or null when its T3 server does not answer within seconds. */
     readonly readEnvironmentId: (baseUrl: string) => Effect.Effect<EnvironmentId | null>;
@@ -391,6 +421,41 @@ const make = Effect.gen(function* () {
     );
     yield* Effect.logInfo("sandbox credentials refreshed").pipe(
       Effect.annotateLogs({ machineId, outcome: outcome.trim().split("\n").at(-1) ?? "" }),
+    );
+    return { restartPending: /\bt3_restart_pending=1\b/.test(outcome) };
+  });
+
+  const restartServer: SandboxGuest["Service"]["restartServer"] = Effect.fn(
+    "SandboxGuest.restartServer",
+  )(function* (account, machineId) {
+    const outcome = yield* execOrFail(
+      "restart-server",
+      account,
+      machineId,
+      renderRestartServerCommand(),
+      120,
+    );
+    yield* Effect.logInfo("sandbox server restart").pipe(
+      Effect.annotateLogs({ machineId, outcome: outcome.trim() }),
+    );
+  });
+
+  const deliverGitHubToken: SandboxGuest["Service"]["deliverGitHubToken"] = Effect.fn(
+    "SandboxGuest.deliverGitHubToken",
+  )(function* (account, machineId, token) {
+    yield* provider.writeFile(account, machineId, {
+      path: SANDBOX_GITHUB_TOKEN_FILE,
+      content: encode(Redacted.value(token.token)),
+    });
+    yield* execOrFail(
+      "github-login",
+      account,
+      machineId,
+      renderGitHubLoginCommand({ login: token.login, name: token.name, email: token.email }),
+      60,
+    );
+    yield* Effect.logInfo("sandbox signed in to GitHub").pipe(
+      Effect.annotateLogs({ machineId, login: token.login, generation: token.generation }),
     );
   });
 
@@ -547,6 +612,8 @@ const make = Effect.gen(function* () {
   return SandboxGuest.of({
     writeBootInputs,
     refreshCredentials,
+    restartServer,
+    deliverGitHubToken,
     readEnvironmentId,
     mintAdminSession,
     prepareProject,

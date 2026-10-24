@@ -65,6 +65,7 @@ import {
   renderSandboxBootScript,
   renderSandboxEnvFile,
 } from "./sandboxBootScript.ts";
+import { GitHubAppConnection, type GitHubAppConnectionError } from "./GitHubAppConnection.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
 import {
@@ -84,6 +85,8 @@ import { ProviderMachineId, SandboxProvider, SandboxProviderError } from "./Sand
 const POLL_INTERVAL = Duration.seconds(2);
 /** How often a ready sandbox is checked for idle agents and for stops from outside. */
 const WATCH_INTERVAL = Duration.minutes(1);
+/** A GitHub token handed to a guest has at least this long left, so a clone or push finishes on it. */
+const GITHUB_TOKEN_MIN_LIFETIME = Duration.hours(1);
 /** Between restarts of a sandbox's loop after a failure it could not handle. */
 const RESTART_BACKOFF = Schedule.min([
   Schedule.exponential(Duration.seconds(1)),
@@ -240,6 +243,8 @@ const SandboxReconcilerColumns = Schema.Struct({
   running_since: Schema.NullOr(Schema.Number),
   inputs_written_at: Schema.NullOr(Schema.Number),
   credentials_stale: Schema.BooleanFromBit,
+  restart_pending: Schema.BooleanFromBit,
+  github_token_generation: Schema.NullOr(Schema.Number),
   resolved_base_json: Schema.NullOr(Schema.fromJsonString(SandboxResolvedBase)),
   seed_launched_at: Schema.NullOr(Schema.Number),
 });
@@ -275,6 +280,8 @@ const reconcilerColumnsOf = (record: SandboxRecord) =>
     running_since: record.runningSince,
     inputs_written_at: record.inputsWrittenAt,
     credentials_stale: record.credentialsStale,
+    restart_pending: record.restartPending,
+    github_token_generation: record.githubTokenGeneration,
     resolved_base_json: record.resolvedBase,
     seed_launched_at: record.seedLaunchedAt,
   });
@@ -298,6 +305,8 @@ const recordOf = (row: Effect.Success<ReturnType<typeof decodeRow>>): SandboxRec
   runningSince: row.running_since,
   inputsWrittenAt: row.inputs_written_at,
   credentialsStale: row.credentials_stale,
+  restartPending: row.restart_pending,
+  githubTokenGeneration: row.github_token_generation,
   resolvedBase: row.resolved_base_json,
   seedLaunchedAt: row.seed_launched_at,
   createdAt: row.created_at,
@@ -334,9 +343,11 @@ const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   WriteInputs: "boot",
   Host: "boot",
   RecordEnvironment: "boot",
+  DeliverGitHubToken: "launch",
   PrepareProject: "launch",
   LaunchSeed: "launch",
   RefreshCredentials: "resume",
+  RestartGuest: "resume",
   Stop: "stop",
   Resume: "resume",
   Destroy: "destroy",
@@ -348,12 +359,19 @@ const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   Settle: "observe",
 };
 
+/** The token is delivered during a launch and after a resume; a failure names the one under way. */
+const failedStepOf = (record: SandboxRecord, action: SandboxAction["_tag"]): SandboxFailedStep =>
+  action === "DeliverGitHubToken" && record.seedLaunchedAt !== null
+    ? "resume"
+    : FAILED_STEP[action];
+
 type StepError =
   | SandboxBuildUnavailableError
   | SandboxProviderError
   | SandboxGuest.SandboxGuestError
   | SandboxAccounts.SandboxAccountNotFoundError
-  | ServerSecretStore.SecretStoreError;
+  | ServerSecretStore.SecretStoreError
+  | GitHubAppConnectionError;
 
 const isProviderError = Schema.is(SandboxProviderError);
 
@@ -380,6 +398,7 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const build = yield* SandboxT3Build;
+  const githubConnection = yield* GitHubAppConnection;
   const ownerEnvironmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
@@ -496,6 +515,18 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
 
+  /** The generation of the token the connection hands out now, or null when it has none to give. */
+  const githubTokenGenerationNow = () =>
+    githubConnection.current(GITHUB_TOKEN_MIN_LIFETIME).pipe(
+      Effect.map((token) => token?.generation ?? null),
+      Effect.tapError((error) =>
+        Effect.logDebug("GitHub token unavailable for sandboxes").pipe(
+          Effect.annotateLogs({ error: error.message }),
+        ),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+
   const observe = Effect.fn("SandboxService.observe")(function* (record: SandboxRecord) {
     const now = yield* Clock.currentTimeMillis;
     const machineId = record.machineId;
@@ -505,19 +536,27 @@ const make = Effect.gen(function* () {
         : yield* accounts
             .get(record.accountId)
             .pipe(Effect.flatMap((account) => provider.inspect(account, machineId)));
+    const guestUp = machine?.state === "running" && record.httpBaseUrl !== null;
     // A ready sandbox stays ready while its server restarts; only the machine state matters then.
     const environmentId =
-      machine?.state === "running" && record.httpBaseUrl !== null && record.status._tag !== "ready"
+      guestUp && record.status._tag !== "ready"
         ? yield* guest.readEnvironmentId(record.httpBaseUrl)
         : null;
     const activity =
-      machine?.state === "running" &&
-      record.httpBaseUrl !== null &&
+      guestUp &&
       record.status._tag === "ready" &&
-      record.spec.machine.stopAfterSeconds !== null
+      (record.spec.machine.stopAfterSeconds !== null || record.restartPending)
         ? yield* readActivity(record, machine.id, record.httpBaseUrl)
         : null;
-    return { now, machine, environmentId, activity } satisfies SandboxObservation;
+    const githubTokenGeneration =
+      guestUp && record.environmentId !== null ? yield* githubTokenGenerationNow() : null;
+    return {
+      now,
+      machine,
+      environmentId,
+      activity,
+      githubTokenGeneration,
+    } satisfies SandboxObservation;
   });
 
   /** Runs one action. Returns the record as the action left it. */
@@ -652,10 +691,25 @@ const make = Effect.gen(function* () {
         );
         return yield* writeFacts(record, { status, seedLaunchedAt: now });
       }
+      case "DeliverGitHubToken": {
+        const token = yield* githubConnection.current(GITHUB_TOKEN_MIN_LIFETIME);
+        // Disconnected since the look that planned this; the next look plans without it.
+        if (token === null) return yield* writeFacts(record, { status });
+        yield* guest.deliverGitHubToken(yield* account(), yield* machineId, token);
+        return yield* writeFacts(record, { status, githubTokenGeneration: token.generation });
+      }
       case "RefreshCredentials": {
         const resolved = yield* account();
-        yield* guest.refreshCredentials(resolved, yield* machineId, machineCredentials(resolved));
-        return yield* writeFacts(record, { status, credentialsStale: false });
+        const { restartPending } = yield* guest.refreshCredentials(
+          resolved,
+          yield* machineId,
+          machineCredentials(resolved),
+        );
+        return yield* writeFacts(record, { status, credentialsStale: false, restartPending });
+      }
+      case "RestartGuest": {
+        yield* guest.restartServer(yield* account(), yield* machineId);
+        return yield* writeFacts(record, { status, restartPending: false });
       }
       case "Stop": {
         const resolved = yield* account();
@@ -758,10 +812,19 @@ const make = Effect.gen(function* () {
       if (isProviderError(error) && (error.kind === "transient" || error.kind === "not-found")) {
         return "wait" as const;
       }
+      // The connection's trouble is not the sandbox's: the next look sees no token to deliver.
+      if (error._tag === "GitHubAppConnectionError") return "wait" as const;
+      // A working sandbox keeps the token it has, and is signed in again on a later look.
+      if (next.action._tag === "DeliverGitHubToken" && record.status._tag === "ready") {
+        yield* Effect.logWarning("sandbox GitHub sign-in failed").pipe(
+          Effect.annotateLogs({ sandboxId: id, error: error.message }),
+        );
+        return "watch" as const;
+      }
       const current = yield* readRecord(id);
       if (Option.isSome(current)) {
         yield* writeFacts(current.value, {
-          status: failedStatus(FAILED_STEP[next.action._tag], error),
+          status: failedStatus(failedStepOf(record, next.action._tag), error),
           settledRevision: record.desiredRevision,
           // A refused call had no effect, so asking again need not wait for it to show.
           ...(isDefinitiveRefusal(error) ? { inflight: null } : {}),
@@ -848,6 +911,12 @@ const make = Effect.gen(function* () {
   /** Wakes the sandbox's loop, starting it on the first request. */
   const kick = (id: SandboxId) => Queue.offer(kicks, id).pipe(Effect.asVoid);
 
+  // A rotation revokes the token every running guest holds, so each loop looks again at once.
+  yield* githubConnection.generations.pipe(
+    Stream.runForEach(() => Effect.forEach([...wakes.keys()], kick, { discard: true })),
+    Effect.forkScoped,
+  );
+
   const launch: SandboxService["Service"]["launch"] = Effect.fn("SandboxService.launch")(
     function* (input) {
       const existing = yield* readRecord(input.id);
@@ -916,6 +985,8 @@ const make = Effect.gen(function* () {
             runningSince: null,
             inputsWrittenAt: null,
             credentialsStale: false,
+            restartPending: false,
+            githubTokenGeneration: null,
             resolvedBase: null,
             seedLaunchedAt: null,
             createdAt: now,

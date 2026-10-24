@@ -45,8 +45,8 @@ export const FIRST_BOOT_DEADLINE_MS = 20 * 60 * 1000;
 export const TRANSITION_DEADLINE_MS = 10 * 60 * 1000;
 /**
  * From a create or resume until T3 answers in the running machine. A resume
- * may spend a transition starting and the guest's ten-minute exec rewriting
- * credentials before T3 restarts.
+ * may spend a transition starting and the guest's ten-minute exec re-running
+ * the machine setup before T3 is asked.
  */
 export const ANSWER_DEADLINE_MS = 30 * 60 * 1000;
 /**
@@ -131,8 +131,15 @@ export interface SandboxRecord {
   /** When the latest create or resume was issued. */
   readonly runningSince: number | null;
   readonly inputsWrittenAt: number | null;
-  /** Set by every resume: the account's credentials must be written again for the new boot. */
+  /** Set by every resume: the account's env may have changed while the machine sat stopped. */
   readonly credentialsStale: boolean;
+  /**
+   * The guest's T3 must restart to load an env that changed, and waits for
+   * its agents to be idle: Boat resumes a machine from memory, mid-turn.
+   */
+  readonly restartPending: boolean;
+  /** The generation of the owner's GitHub token the guest was signed in with; null when never. */
+  readonly githubTokenGeneration: number | null;
   /** The branch and commit the guest's clone was pinned to; set once the project is prepared. */
   readonly resolvedBase: SandboxResolvedBase | null;
   readonly seedLaunchedAt: number | null;
@@ -147,9 +154,16 @@ export interface SandboxObservation {
   readonly environmentId: EnvironmentId | null;
   /**
    * What the guest's agents are doing. Null when the guest did not answer, or
-   * was not asked because the sandbox is not ready or never stops.
+   * was not asked because the sandbox is not ready, or never stops and has no
+   * restart pending.
    */
   readonly activity: SandboxGuestActivity | null;
+  /**
+   * The generation of the GitHub token the owner's App connection hands out
+   * now. Null when no App user is connected, when the connection cannot hand
+   * one out, or when it was not asked because the guest's T3 is not up yet.
+   */
+  readonly githubTokenGeneration: number | null;
 }
 
 export type SandboxAction =
@@ -157,11 +171,16 @@ export type SandboxAction =
   | { readonly _tag: "WriteInputs" }
   | { readonly _tag: "Host" }
   | { readonly _tag: "RecordEnvironment"; readonly environmentId: EnvironmentId }
+  /** Sign the guest in to GitHub with the owner's current token. */
+  | { readonly _tag: "DeliverGitHubToken" }
   /** Clone the repository in the guest, or adopt a template's clone, and pin the base. */
   | { readonly _tag: "PrepareProject" }
   /** Start the seed thread on a worktree cut from the pinned base. */
   | { readonly _tag: "LaunchSeed" }
+  /** Swap the account env and setup script in after a resume, and re-run the setup. */
   | { readonly _tag: "RefreshCredentials" }
+  /** Restart the guest's T3 so it loads the env a refresh changed; its agents are idle. */
+  | { readonly _tag: "RestartGuest" }
   | { readonly _tag: "Stop" }
   | { readonly _tag: "Resume" }
   | { readonly _tag: "Destroy" }
@@ -215,6 +234,11 @@ const creationUnknown = failed(
   "T3 could not confirm whether Boat created this machine. Check the Boat dashboard, then delete the sandbox to forget it.",
   false,
 );
+
+/** The owner hands out a GitHub token of a generation the guest was not signed in with. */
+const githubTokenStale = (record: SandboxRecord, observation: SandboxObservation) =>
+  observation.githubTokenGeneration !== null &&
+  observation.githubTokenGeneration !== record.githubTokenGeneration;
 
 /** Converged or given up on the latest request: nothing happens until the next one. */
 export function isParked(record: SandboxRecord): boolean {
@@ -432,6 +456,8 @@ function planRunning(
       act("Settle"),
     );
   }
+  // Before the clone, so a private repository is reachable.
+  if (githubTokenStale(record, observation)) return plan(waiting, act("DeliverGitHubToken"));
   if (record.resolvedBase === null) return plan(launching, act("PrepareProject"));
   if (record.seedLaunchedAt === null) return plan(launching, act("LaunchSeed"));
   return plan(ready, act("Watch"));
@@ -449,8 +475,13 @@ function planReady(
   observation: SandboxObservation,
   machine: ProviderMachine,
 ): SandboxPlan {
-  const stopAfterSeconds = record.spec.machine.stopAfterSeconds;
+  // A rotation revoked the token the guest holds, so the new one goes out while it works.
+  if (githubTokenStale(record, observation)) return plan(ready, act("DeliverGitHubToken"));
   const activity = observation.activity;
+  if (record.restartPending && activity !== null && !activity.busy) {
+    return plan(ready, act("RestartGuest"));
+  }
+  const stopAfterSeconds = record.spec.machine.stopAfterSeconds;
   if (stopAfterSeconds === null || activity === null) return plan(ready, act("Watch"));
   const stopAfter = stopAfterSeconds * 1000;
   // A resume restarts the count, however long the sandbox sat stopped.

@@ -26,6 +26,8 @@ export default Effect.gen(function* () {
       running_since INTEGER,
       inputs_written_at INTEGER,
       credentials_stale INTEGER NOT NULL,
+      restart_pending INTEGER NOT NULL,
+      github_token_generation INTEGER,
       resolved_base_json TEXT,
       seed_launched_at INTEGER,
       created_at INTEGER NOT NULL,

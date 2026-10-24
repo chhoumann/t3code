@@ -57,6 +57,7 @@ import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import * as BoatSandboxProvider from "../src/sandbox/BoatSandboxProvider.ts";
+import { GitHubAppConnection } from "../src/sandbox/GitHubAppConnection.ts";
 import {
   SANDBOX_BOOT_LOG,
   SANDBOX_ENV_FILE,
@@ -786,6 +787,16 @@ const program = Effect.gen(function* () {
             version: serverPackageJson.version,
             bytes: tarball,
           }),
+        ),
+        // The tracer runs sandboxes without a GitHub user until the connection service lands.
+        Layer.provide(
+          Layer.succeed(
+            GitHubAppConnection,
+            GitHubAppConnection.of({
+              current: () => Effect.succeed(null),
+              generations: Stream.empty,
+            }),
+          ),
         ),
         Layer.provideMerge(SandboxGuest.layer),
         Layer.provideMerge(BoatSandboxProvider.layer),

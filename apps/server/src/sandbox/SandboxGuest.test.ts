@@ -14,6 +14,7 @@ import { Socket } from "effect/socket";
 
 import {
   SANDBOX_ENV_FILE,
+  SANDBOX_GITHUB_TOKEN_FILE,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_MANAGED_FILE,
@@ -79,6 +80,73 @@ describe("SandboxGuest", () => {
           "error: the session could not be issued",
         ].join("\n"),
       );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "uploads the GitHub token as a file the login reads; the command never carries it",
+    () => {
+      const steps: Array<string> = [];
+      const layer = guestLayer({
+        exec: (_account, _machineId, { command }) =>
+          Effect.sync(() => {
+            steps.push(`exec:${command}`);
+            return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+          }),
+        writeFile: (_account, _machineId, { path, content }) =>
+          Effect.sync(() => void steps.push(`write:${path}:${new TextDecoder().decode(content)}`)),
+      });
+      return Effect.gen(function* () {
+        const guest = yield* SandboxGuest.SandboxGuest;
+        yield* guest.deliverGitHubToken(
+          { apiKey: Redacted.make("key") },
+          ProviderMachineId.make("bx_1"),
+          {
+            generation: 3,
+            token: Redacted.make("ghu_secret"),
+            expiresAt: 0,
+            login: "octocat",
+            name: null,
+            email: null,
+          },
+        );
+        expect(steps).toHaveLength(2);
+        expect(steps[0]).toBe(`write:${SANDBOX_GITHUB_TOKEN_FILE}:ghu_secret`);
+        expect(steps[1]).toContain(`< '${SANDBOX_GITHUB_TOKEN_FILE}'`);
+        expect(steps[1]).not.toContain("ghu_secret");
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("reports whether a credential refresh left T3's restart pending", () => {
+    let pending = "1";
+    const layer = guestLayer({
+      exec: () =>
+        Effect.sync(() => ({
+          exitCode: 0,
+          stdout: `setup_restarted=1 t3_restart_pending=${pending}\n`,
+          stderr: "",
+          timedOut: false,
+        })),
+      writeFile: () => Effect.void,
+    });
+    const credentials = { envFile: "", setupEnvFile: "", machineSetupScript: "" };
+    return Effect.gen(function* () {
+      const guest = yield* SandboxGuest.SandboxGuest;
+      const account = { apiKey: Redacted.make("key") };
+      const first = yield* guest.refreshCredentials(
+        account,
+        ProviderMachineId.make("bx_1"),
+        credentials,
+      );
+      pending = "0";
+      const second = yield* guest.refreshCredentials(
+        account,
+        ProviderMachineId.make("bx_1"),
+        credentials,
+      );
+      expect(first).toEqual({ restartPending: true });
+      expect(second).toEqual({ restartPending: false });
     }).pipe(Effect.provide(layer));
   });
 
