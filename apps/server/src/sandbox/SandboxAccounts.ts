@@ -67,7 +67,12 @@ export class SandboxAccountInvalidError extends Schema.TaggedError<SandboxAccoun
   "SandboxAccountInvalidError",
   {
     accountId: Schema.String,
-    reason: Schema.Literals(["api-key-required", "env-value-required", "duplicate-env-name"]),
+    reason: Schema.Literals([
+      "api-key-required",
+      "env-value-required",
+      "duplicate-env-name",
+      "reserved-env-name",
+    ]),
     envName: Schema.optional(Schema.String),
   },
 ) {
@@ -79,9 +84,14 @@ export class SandboxAccountInvalidError extends Schema.TaggedError<SandboxAccoun
         return `The env variable ${this.envName} needs a value.`;
       case "duplicate-env-name":
         return `The env variable ${this.envName} is listed twice.`;
+      case "reserved-env-name":
+        return `${this.envName} cannot be a sandbox env variable: it would override the GitHub login T3 signs sandboxes in with. Connect GitHub in Settings instead.`;
     }
   }
 }
+
+/** `gh` and git take these over any stored login, so they would hide the token the owner delivers. */
+const RESERVED_ENV_NAMES = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 
 export class SandboxAccountKeyScopeError extends Schema.TaggedError<SandboxAccountKeyScopeError>()(
   "SandboxAccountKeyScopeError",
@@ -212,6 +222,13 @@ const make = Effect.gen(function* () {
           readonly setupOnly: boolean;
         }> = [];
         for (const entry of input.env) {
+          if (RESERVED_ENV_NAMES.has(entry.name)) {
+            return yield* new SandboxAccountInvalidError({
+              accountId: id,
+              reason: "reserved-env-name",
+              envName: entry.name,
+            });
+          }
           if (env.some((existing) => existing.name === entry.name)) {
             return yield* new SandboxAccountInvalidError({
               accountId: id,

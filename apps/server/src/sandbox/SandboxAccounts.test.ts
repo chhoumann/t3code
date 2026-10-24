@@ -207,6 +207,22 @@ describe("SandboxAccounts", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("refuses GH_TOKEN and GITHUB_TOKEN as env names, storing nothing", () => {
+    const { world, layer } = makeWorld();
+    return Effect.gen(function* () {
+      const accounts = yield* SandboxAccounts.SandboxAccounts;
+      for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) {
+        const refused = yield* accounts
+          .save({ ...input, apiKey: "key", env: [{ name, value: "ghp_secret" }] })
+          .pipe(Effect.flip);
+        assert.deepInclude(refused, { reason: "reserved-env-name", envName: name });
+        assert.include(refused.message, name);
+      }
+      assert.strictEqual(world.secrets.size, 0);
+      assert.deepStrictEqual(world.checkedKeys, []);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("refuses a new account without a key", () => {
     const { layer } = makeWorld();
     return Effect.gen(function* () {
