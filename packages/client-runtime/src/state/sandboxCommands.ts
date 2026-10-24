@@ -60,6 +60,18 @@ export function createSandboxEnvironmentAtoms<R, E>(
       label: "environment-data:sandbox:remove-account",
       tag: WS_METHODS.sandboxesRemoveAccount,
     }),
+    githubBegin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandbox:github-begin",
+      tag: WS_METHODS.sandboxesGitHubBegin,
+    }),
+    githubComplete: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandbox:github-complete",
+      tag: WS_METHODS.sandboxesGitHubComplete,
+    }),
+    githubDisconnect: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:sandbox:github-disconnect",
+      tag: WS_METHODS.sandboxesGitHubDisconnect,
+    }),
   };
 }
 
