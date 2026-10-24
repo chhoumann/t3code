@@ -19,9 +19,13 @@ import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSour
 
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 
-function harness(respond: (request: HttpClientRequest.HttpClientRequest) => Response) {
+/** `tokens` is what the credential source hands out, moving on to the next after each invalidation. */
+function harness(
+  respond: (request: HttpClientRequest.HttpClientRequest) => Response,
+  initialTokens: ReadonlyArray<string> = ["first", "second"],
+) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
-  let tokens = ["first", "second"];
+  let tokens = initialTokens;
   let invalidations = 0;
   let credentialReads = 0;
   const credentials = Layer.succeed(
@@ -190,11 +194,28 @@ describe("GitHubRest", () => {
     }).pipe(Effect.provide(layer));
   });
 
-  it.effect("drops a refused token so the next request asks the source again", () => {
+  it.effect("sends a refused request once more with the token the source holds after it", () => {
     const { layer, requests, invalidations } = harness((request) =>
       request.headers.authorization === "Bearer first"
         ? new Response(null, { status: 401 })
         : json({ ok: true }),
+    );
+    return Effect.gen(function* () {
+      const api = yield* GitHubRest.GitHubRest;
+      const answered = yield* api.rest({ host: "github.com", operation: "user", path: "user" });
+      expect(answered.status).toBe(200);
+      expect(invalidations()).toBe(1);
+      expect(requests.map((request) => request.headers.authorization)).toEqual([
+        "Bearer first",
+        "Bearer second",
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("fails a refused request when the source still holds the same token", () => {
+    const { layer, requests, invalidations } = harness(
+      () => new Response(null, { status: 401 }),
+      ["first", "first", "first"],
     );
     return Effect.gen(function* () {
       const api = yield* GitHubRest.GitHubRest;
@@ -203,8 +224,21 @@ describe("GitHubRest", () => {
       );
       expect(refused._tag).toBe("GitHubApiAuthenticationError");
       expect(invalidations()).toBe(1);
-      const answered = yield* api.rest({ host: "github.com", operation: "user", path: "user" });
-      expect(answered.status).toBe(200);
+      expect(requests.map((request) => request.headers.authorization)).toEqual(["Bearer first"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("gives a successor token that is refused too no third try", () => {
+    const { layer, requests } = harness(
+      () => new Response(null, { status: 401 }),
+      ["first", "second", "third"],
+    );
+    return Effect.gen(function* () {
+      const api = yield* GitHubRest.GitHubRest;
+      const refused = yield* Effect.flip(
+        api.rest({ host: "github.com", operation: "user", path: "user" }),
+      );
+      expect(refused._tag).toBe("GitHubApiAuthenticationError");
       expect(requests.map((request) => request.headers.authorization)).toEqual([
         "Bearer first",
         "Bearer second",

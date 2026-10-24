@@ -234,6 +234,8 @@ export class GitHubRequestPolicy extends Context.Service<
   }
 >()("@t3tools/source-control-github/server/GitHubRequestPolicy") {}
 
+const isRefusedCredential = Schema.is(GitHubApiAuthenticationError);
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const credentials = yield* GitHubCredentials.GitHubCredentials;
@@ -271,7 +273,7 @@ export const make = Effect.gen(function* () {
       "github.host": host,
       "github.operation": input.operation,
     });
-    const { token, fingerprint } = yield* credential(host);
+    const first = yield* credential(host);
     const scope = yield* SourceControlRateLimit.CredentialScope;
     // A refusal pauses the whole host, whichever quota it spent: the key PullRequestService
     // records its own backoff under.
@@ -315,7 +317,7 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    const run = Effect.gen(function* () {
+    const run = Effect.fnUntraced(function* (token: Redacted.Redacted<string>) {
       const lease = yield* quota
         .admit(host, input.resource, { allowReserve: input.allowReserve })
         .pipe(
@@ -342,9 +344,26 @@ export const make = Effect.gen(function* () {
       return yield* settle(lease, answer);
     });
     // The rate-limit scope follows the credential, so a pause on one account never blocks another.
-    return yield* slots
-      .withPermit(run)
-      .pipe(Effect.provideService(SourceControlRateLimit.CredentialScope, scope || fingerprint));
+    const attempt = (held: {
+      readonly token: Redacted.Redacted<string>;
+      readonly fingerprint: string;
+    }) =>
+      slots
+        .withPermit(run(held.token))
+        .pipe(
+          Effect.provideService(SourceControlRateLimit.CredentialScope, scope || held.fingerprint),
+        );
+    return yield* attempt(first).pipe(
+      // A rotated token is revoked at once, and the refusal dropped the cached one, so the
+      // source may now hold its successor: send once more with that, never with the same token.
+      Effect.catchIf(isRefusedCredential, (refused) =>
+        credential(host).pipe(
+          Effect.flatMap((fresh) =>
+            fresh.fingerprint === first.fingerprint ? Effect.fail(refused) : attempt(fresh),
+          ),
+        ),
+      ),
+    );
   });
 
   return GitHubRequestPolicy.of({ request, credential });
