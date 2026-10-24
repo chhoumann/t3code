@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
 
@@ -169,6 +170,19 @@ export const make = Effect.gen(function* () {
   );
 
   const resolveSecretPath = (name: string) => path.join(serverConfig.secretsDir, `${name}.bin`);
+  const platform = yield* HostProcess.Platform;
+
+  // A rename is durable only once the directory entry reaches disk too. Windows
+  // cannot open a directory for syncing and journals the metadata itself.
+  const syncDirectory =
+    platform === "win32"
+      ? Effect.void
+      : Effect.scoped(
+          Effect.gen(function* () {
+            const directory = yield* fileSystem.open(serverConfig.secretsDir, { flag: "r" });
+            yield* directory.sync;
+          }),
+        );
 
   const get: ServerSecretStore["Service"]["get"] = (name) =>
     fileSystem.readFile(resolveSecretPath(name)).pipe(
@@ -199,10 +213,17 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((uuid) => {
         const tempPath = `${secretPath}.${uuid}.tmp`;
         return Effect.gen(function* () {
-          yield* fileSystem.writeFile(tempPath, value);
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const file = yield* fileSystem.open(tempPath, { flag: "w", mode: 0o600 });
+              yield* file.writeAll(value);
+              yield* file.sync;
+            }),
+          );
           yield* fileSystem.chmod(tempPath, 0o600);
           yield* fileSystem.rename(tempPath, secretPath);
           yield* fileSystem.chmod(secretPath, 0o600);
+          yield* syncDirectory;
         }).pipe(
           Effect.catch((cause) =>
             fileSystem.remove(tempPath).pipe(
@@ -247,6 +268,7 @@ export const make = Effect.gen(function* () {
           );
           yield* fileSystem.chmod(tempPath, 0o600);
           yield* fileSystem.link(tempPath, secretPath);
+          yield* syncDirectory;
         }).pipe(
           Effect.ensuring(fileSystem.remove(tempPath).pipe(Effect.ignore)),
           Effect.mapError(
