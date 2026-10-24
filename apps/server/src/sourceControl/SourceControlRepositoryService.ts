@@ -97,7 +97,7 @@ export interface SourceControlCloneResult extends SourceControlCloneRepositoryRe
 }
 
 /** Where a clone of `destinationPath` is made before it is moved into place. */
-export function cloneStagingPath(path: Path.Path, destinationPath: string): string {
+function cloneStagingPath(path: Path.Path, destinationPath: string): string {
   return path.join(path.dirname(destinationPath), `.${path.basename(destinationPath)}.t3-clone`);
 }
 

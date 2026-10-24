@@ -48,6 +48,7 @@ export class ProjectProvisioning extends Context.Service<
 
 const T3_PROJECT_FILE = "t3.json";
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const projectService = yield* ProjectService.ProjectService;

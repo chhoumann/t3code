@@ -80,7 +80,7 @@ export const SandboxRemoteUrl = TrimmedNonEmptyString.check(
 export type SandboxRemoteUrl = typeof SandboxRemoteUrl.Type;
 
 /** `git check-ref-format --branch`: a name under `refs/heads/`, with no revision syntax. */
-export function isGitBranchName(name: string): boolean {
+function isGitBranchName(name: string): boolean {
   if (name.length === 0 || name === "HEAD" || name === "@" || name.startsWith("-")) return false;
   if (name.startsWith("/") || name.endsWith("/") || name.endsWith(".")) return false;
   if (name.includes("//") || name.includes("..") || name.includes("@{")) return false;
