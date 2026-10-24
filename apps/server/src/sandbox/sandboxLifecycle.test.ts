@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   SandboxAccountId,
   SandboxId,
+  SandboxRemoteUrl,
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -43,10 +44,9 @@ const fresh: SandboxRecord = {
   spec: {
     title: "Fix the bug",
     message: "Fix the bug",
-    repository: {
-      remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World" }],
-      trackedRemote: "origin",
-      commit: null,
+    source: {
+      remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/Hello-World"),
+      base: { _tag: "default" },
     },
     driver: ProviderDriverKind.make("claudeAgent"),
     model: "claude-sonnet-4-6",
@@ -81,6 +81,7 @@ const fresh: SandboxRecord = {
   runningSince: null,
   inputsWrittenAt: null,
   credentialsStale: false,
+  resolvedBase: null,
   seedLaunchedAt: null,
   createdAt: NOW - 30 * MINUTE,
 };
@@ -97,8 +98,12 @@ const booting: SandboxRecord = {
   httpBaseUrl: "https://bx-test.boat.dev",
 };
 const launching: SandboxRecord = { ...booting, status: { _tag: "launching" }, environmentId: ENV };
-const ready: SandboxRecord = {
+const prepared: SandboxRecord = {
   ...launching,
+  resolvedBase: { branch: "main", commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d" },
+};
+const ready: SandboxRecord = {
+  ...prepared,
   status: { _tag: "ready" },
   seedLaunchedAt: NOW - 3 * MINUTE,
   settledRevision: 1,
@@ -300,22 +305,34 @@ const cases: ReadonlyArray<Case> = [
     failed("boot", false),
   ],
   [
-    "launches the seed thread once T3 answers",
+    "prepares the project once T3 answers",
     launching,
     answering,
-    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
   ],
   [
-    "waits for T3 before launching",
+    "waits for T3 before preparing",
     launching,
     running,
     { status: { _tag: "launching" }, action: { _tag: "Wait" } },
   ],
   [
+    "launches the seed thread once the project is prepared",
+    prepared,
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+  ],
+  [
     "seed launched: ready",
-    { ...launching, seedLaunchedAt: NOW },
+    { ...prepared, seedLaunchedAt: NOW },
     answering,
     { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a resume after the project was prepared but before the seed launched launches it",
+    { ...prepared, status: { _tag: "resuming" }, runningSince: NOW - MINUTE },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
   ],
   [
     "a ready sandbox stays ready while T3 restarts",
@@ -837,6 +854,17 @@ const cases: ReadonlyArray<Case> = [
     "asking again re-plans a failed sandbox from what is observed",
     {
       ...launching,
+      status: { _tag: "failed", step: "launch", message: "x", retryable: true },
+      settledRevision: 1,
+      desiredRevision: 2,
+    },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
+  ],
+  [
+    "a retry after a failed launch keeps the prepared project and launches again",
+    {
+      ...prepared,
       status: { _tag: "failed", step: "launch", message: "x", retryable: true },
       settledRevision: 1,
       desiredRevision: 2,

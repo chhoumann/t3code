@@ -26,6 +26,7 @@ export default Effect.gen(function* () {
       running_since INTEGER,
       inputs_written_at INTEGER,
       credentials_stale INTEGER NOT NULL,
+      resolved_base_json TEXT,
       seed_launched_at INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL

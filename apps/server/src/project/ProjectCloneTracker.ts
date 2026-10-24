@@ -1,5 +1,7 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import type {
+  ProjectCloneBase,
+  ProjectCloneCheckout,
   ProjectCloneSnapshot,
   ProjectCloneStage,
   ProjectCloneStartInput,
@@ -61,10 +63,16 @@ export interface ProjectCloneHooks {
     readonly workspaceRoot: string;
     readonly createdAt: string;
   }) => Effect.Effect<void, OrchestrationDispatchCommandError>;
-  readonly onCloned: (input: {
+  /**
+   * Runs once git is done and before the clone is reported done, so a
+   * thread cannot start until the project is complete. Its failure fails the
+   * clone.
+   */
+  readonly finalize: (input: {
     readonly projectId: ProjectId;
     readonly workspaceRoot: string;
-  }) => Effect.Effect<void>;
+    readonly base: ProjectCloneBase | null;
+  }) => Effect.Effect<void, OrchestrationDispatchCommandError>;
 }
 
 const DONE_RETENTION = "30 seconds";
@@ -88,6 +96,7 @@ interface TrackedClone {
     readonly cloneUrl: string;
     readonly destinationPath: string;
     readonly repository: SourceControlRepositoryInfo | null;
+    readonly checkout: ProjectCloneCheckout | undefined;
   };
 }
 
@@ -192,25 +201,36 @@ export const make = Effect.gen(function* () {
       Effect.forever,
     );
 
+  /** Ends a running clone. A clone that already ended keeps its outcome. */
   const finish = Effect.fn("ProjectCloneTracker.finish")(function* (
     projectId: ProjectId,
-    phase: "done" | "failed" | "cancelled",
-    error: string | null,
+    outcome:
+      | { readonly phase: "done"; readonly base: ProjectCloneBase | null }
+      | { readonly phase: "failed"; readonly error: string }
+      | { readonly phase: "cancelled" },
   ) {
     const endedAt = yield* nowIso;
-    yield* modify(projectId, (tracked) => ({
-      ...tracked,
-      fiber: null,
-      snapshot: {
-        ...tracked.snapshot,
-        phase,
-        endedAt,
-        percent: phase === "done" ? 100 : tracked.snapshot.percent,
-        stalled: false,
-        error: error === null ? null : clampText(error, PROJECT_CLONE_ERROR_MAX_LENGTH),
-      },
-    }));
-    if (phase === "done") yield* scheduleRemoval(projectId);
+    const ended = yield* modify(projectId, (tracked) =>
+      tracked.snapshot.phase !== "running"
+        ? tracked
+        : {
+            ...tracked,
+            fiber: null,
+            snapshot: {
+              ...tracked.snapshot,
+              phase: outcome.phase,
+              endedAt,
+              percent: outcome.phase === "done" ? 100 : tracked.snapshot.percent,
+              stalled: false,
+              error:
+                outcome.phase === "failed"
+                  ? clampText(outcome.error, PROJECT_CLONE_ERROR_MAX_LENGTH)
+                  : null,
+              ...(outcome.phase === "done" && outcome.base !== null ? { base: outcome.base } : {}),
+            },
+          },
+    );
+    if (ended?.phase === "done") yield* scheduleRemoval(projectId);
   });
 
   const cloneWatchingForStall = Effect.fn("ProjectCloneTracker.cloneWatchingForStall")(function* (
@@ -225,30 +245,38 @@ export const make = Effect.gen(function* () {
         onProgress: (update) =>
           Queue.offer(pulses, undefined).pipe(Effect.andThen(progress(projectId, update))),
         timeoutMs: null,
+        ...(tracked.input.checkout === undefined ? {} : { checkout: tracked.input.checkout }),
       },
     );
   }, Effect.scoped);
 
   /**
-   * Runs in its own fiber; the tracker records the outcome through `onExit`,
+   * Runs in its own fiber; the tracker records a failure through `onExit`,
    * which still runs when the fiber is interrupted (a `matchCause` handler
-   * would be skipped). Once git has finished the clone is marked done before
-   * the post-clone hook runs, so a late Cancel cannot tear down a complete
-   * checkout.
+   * would be skipped). Once git has finished, the published checkout is
+   * complete and the user's: finalization and the done mark run as one
+   * uninterruptible step, so a late Cancel neither tears the checkout down
+   * nor records a finished clone as cancelled.
    */
   const runClone = (projectId: ProjectId, tracked: TrackedClone) =>
     cloneWatchingForStall(projectId, tracked).pipe(
+      Effect.flatMap((cloned) =>
+        Effect.uninterruptible(
+          tracked.hooks
+            .finalize({
+              projectId,
+              workspaceRoot: tracked.input.destinationPath,
+              base: cloned.base ?? null,
+            })
+            .pipe(Effect.andThen(finish(projectId, { phase: "done", base: cloned.base ?? null }))),
+        ),
+      ),
       Effect.onExit((exit) =>
         Exit.isSuccess(exit)
-          ? finish(projectId, "done", null)
+          ? Effect.void
           : Cause.hasInterruptsOnly(exit.cause)
-            ? finish(projectId, "cancelled", null)
-            : finish(projectId, "failed", describeCloneFailure(exit.cause)),
-      ),
-      Effect.flatMap(() =>
-        tracked.hooks
-          .onCloned({ projectId, workspaceRoot: tracked.input.destinationPath })
-          .pipe(Effect.ignoreCause({ log: true })),
+            ? finish(projectId, { phase: "cancelled" })
+            : finish(projectId, { phase: "failed", error: describeCloneFailure(exit.cause) }),
       ),
       Effect.ignoreCause(),
     );
@@ -269,7 +297,10 @@ export const make = Effect.gen(function* () {
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (input, hooks) {
-      const prepared = yield* repositories.prepareClone(input);
+      const prepared = yield* repositories.prepareClone(
+        input,
+        input.checkout === undefined ? undefined : { checkout: input.checkout },
+      );
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
@@ -302,6 +333,7 @@ export const make = Effect.gen(function* () {
             cloneUrl: prepared.cloneUrl,
             destinationPath: prepared.destinationPath,
             repository: prepared.repository,
+            checkout: input.checkout,
           },
         });
         return [true, next] as const;
@@ -350,16 +382,17 @@ export const make = Effect.gen(function* () {
       if (!tracked || tracked.snapshot.phase !== "running" || !tracked.fiber) return false;
       // Uninterruptible past this point: a client that disconnects mid-cancel
       // must not leave a dead fiber behind a "running" snapshot.
-      yield* Effect.uninterruptible(
+      return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* Fiber.interrupt(tracked.fiber!);
           const after = yield* get(projectId);
-          if (after?.phase === "done") return;
-          if (after?.phase === "running") yield* finish(projectId, "cancelled", null);
+          // Git finished while the interrupt was landing: the checkout is complete and stays.
+          if (after?.phase === "done") return false;
+          if (after?.phase === "running") yield* finish(projectId, { phase: "cancelled" });
           yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+          return true;
         }),
       );
-      return true;
     },
   );
 

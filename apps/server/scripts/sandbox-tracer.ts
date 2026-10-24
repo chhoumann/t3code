@@ -30,6 +30,7 @@ import {
   ProviderDriverKind,
   SandboxAccountId,
   SandboxId,
+  SandboxRemoteUrl,
   ThreadId,
   type OrchestrationV2RunStatus,
   type SandboxStatus,
@@ -119,6 +120,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus> = new Set([
 const LOGIN_FAILURE = /not logged in|\/login|invalid api key|authentication_error/i;
 const STEP_TIMEOUT = "10 minutes";
 const IDLE_STOP_AFTER_HOURS = 0.05;
+const decodeRemoteUrl = Schema.decodeUnknownEffect(SandboxRemoteUrl);
 const decodeSeed = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ threadId: Schema.String, projectId: Schema.String })),
 );
@@ -406,10 +408,9 @@ const trace = Effect.fn("SandboxTracer.trace")(function* (
     accountId: ACCOUNT_ID,
     title: "Sandbox tracer",
     message: "Add hello.txt containing 'hello from a sandbox'.",
-    repository: {
-      remotes: [{ name: "origin", url: flags.repo }],
-      trackedRemote: "origin",
-      commit: null,
+    source: {
+      remoteUrl: yield* decodeRemoteUrl(flags.repo),
+      base: { _tag: "default" },
     },
     driver: ProviderDriverKind.make("claudeAgent"),
     model: "claude-sonnet-4-6",

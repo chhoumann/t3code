@@ -14,7 +14,7 @@ import {
   ProviderDriverKind,
   ProviderInteractionMode,
   RuntimeMode,
-  SandboxRepository,
+  SandboxSource,
   ThreadId,
   type EnvironmentId,
   type SandboxAccountId,
@@ -22,6 +22,7 @@ import {
   SandboxMachineSize,
   type SandboxFailedStep,
   type SandboxId,
+  type SandboxResolvedBase,
   type SandboxStatus,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -69,7 +70,7 @@ export function startupTtlSeconds(stopAfterSeconds: number | null): number | nul
 export const SandboxSpec = Schema.Struct({
   title: Schema.String,
   message: Schema.String,
-  repository: SandboxRepository,
+  source: SandboxSource,
   driver: ProviderDriverKind,
   model: Schema.String,
   runtimeMode: RuntimeMode,
@@ -132,6 +133,8 @@ export interface SandboxRecord {
   readonly inputsWrittenAt: number | null;
   /** Set by every resume: the account's credentials must be written again for the new boot. */
   readonly credentialsStale: boolean;
+  /** The branch and commit the guest's clone was pinned to; set once the project is prepared. */
+  readonly resolvedBase: SandboxResolvedBase | null;
   readonly seedLaunchedAt: number | null;
   readonly createdAt: number;
 }
@@ -154,6 +157,9 @@ export type SandboxAction =
   | { readonly _tag: "WriteInputs" }
   | { readonly _tag: "Host" }
   | { readonly _tag: "RecordEnvironment"; readonly environmentId: EnvironmentId }
+  /** Clone the repository in the guest, or adopt a template's clone, and pin the base. */
+  | { readonly _tag: "PrepareProject" }
+  /** Start the seed thread on a worktree cut from the pinned base. */
   | { readonly _tag: "LaunchSeed" }
   | { readonly _tag: "RefreshCredentials" }
   | { readonly _tag: "Stop" }
@@ -426,6 +432,7 @@ function planRunning(
       act("Settle"),
     );
   }
+  if (record.resolvedBase === null) return plan(launching, act("PrepareProject"));
   if (record.seedLaunchedAt === null) return plan(launching, act("LaunchSeed"));
   return plan(ready, act("Watch"));
 }

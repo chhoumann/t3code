@@ -1,8 +1,8 @@
 /**
  * SandboxGuest - what an owner environment does to the T3 server inside one
- * of its sandboxes: mint the owner's admin session, prepare the checkout,
- * launch the seed thread, read what its agents are doing, and mint client
- * pairing grants.
+ * of its sandboxes: mint the owner's admin session, prepare the project
+ * through the guest's own clone service, launch the seed thread, read what
+ * its agents are doing, and mint client pairing grants.
  *
  * The guest is reached over its public HTTP API and RPC socket with the
  * admin bearer, the same seams any remote client uses. Its MCP endpoint is
@@ -13,11 +13,10 @@
  */
 import {
   type AuthGrantScope,
-  CommandId,
+  type CommandId,
   EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
   type EnvironmentId,
-  type GitRemote,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -25,21 +24,24 @@ import {
   WsRpcGroup,
   defaultInstanceIdForDriver,
   type MessageId,
+  type ProjectCloneSnapshot,
   type ProjectId,
-  type ProjectScript,
   type ProviderDriverKind,
   type ProviderInteractionMode,
   type RuntimeMode,
-  type SandboxRepository,
+  type SandboxResolvedBase,
+  type SandboxSource,
+  SourceControlRepositoryError,
   type ThreadId,
 } from "@t3tools/contracts";
-import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { HttpClient } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { RpcClient, RpcSerialization } from "effect/rpc";
@@ -51,9 +53,7 @@ import {
   encodeManagedSandboxMarker,
 } from "./ManagedSandbox.ts";
 import {
-  CLOSE_EXEC_LOCK,
   SANDBOX_ENV_FILE,
-  SANDBOX_EXEC_LOCK_LINES,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MANAGED_FILE,
   SANDBOX_SETUP_ENV_FILE,
@@ -82,13 +82,14 @@ export interface SandboxGuestTarget {
   readonly token: Redacted.Redacted<string>;
 }
 
-export interface SandboxCheckout extends SandboxRepository {
-  /** The sandbox the clone is for, which the clone's config names once it is its own. */
-  readonly sandboxId: string;
-  /** The task branch the clone starts on, created at `commit`. */
-  readonly branch: string;
+/** The project a sandbox's guest clones its repository into; the ids are allocated once by the owner. */
+export interface SandboxSeedProject {
+  readonly projectId: ProjectId;
+  readonly title: string;
   /** Absolute path in the guest. */
   readonly path: string;
+  readonly createdAt: string;
+  readonly source: SandboxSource;
 }
 
 /** Ids are allocated once by the owner and reused on every retry. */
@@ -119,7 +120,6 @@ export const SandboxGuestOperation = Schema.Literals([
   "refresh-credentials",
   "mint-session",
   "clone",
-  "create-project",
   "launch-thread",
   "issue-pairing",
   "read-activity",
@@ -131,7 +131,6 @@ const OPERATION_SUMMARY: Record<SandboxGuestOperation, string> = {
   "refresh-credentials": "refresh the sandbox credentials",
   "mint-session": "mint the owner session on the sandbox",
   clone: "clone the repository in the sandbox",
-  "create-project": "create the sandbox project",
   "launch-thread": "launch the sandbox thread",
   "issue-pairing": "issue a pairing grant for the sandbox",
   "read-activity": "read what the agents in the sandbox are doing",
@@ -156,6 +155,8 @@ export class SandboxGuestError extends Schema.TaggedError<SandboxGuestError>()(
 }
 
 const isAuthInvalid = Schema.is(EnvironmentAuthInvalidError);
+const isGuestError = Schema.is(SandboxGuestError);
+const isRepositoryError = Schema.is(SourceControlRepositoryError);
 
 /** The error of a call made over the guest's HTTP or RPC seams with a session. */
 const sessionCallError = (operation: SandboxGuestOperation) => (cause: unknown) =>
@@ -174,10 +175,7 @@ const READINESS_TIMEOUT = Duration.seconds(5);
 /** Short, because the sandbox's loop waits on it once a minute. */
 const ACTIVITY_TIMEOUT = Duration.seconds(10);
 const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
-const CLONE_TIMEOUT_SECONDS = 600;
-/** Per remote the clone does not track, which only diffs read, so it gives up on one sooner. */
-const OTHER_REMOTE_FETCH_TIMEOUT_SECONDS = 60;
-const T3_PROJECT_FILE_MARKER = "--- t3.json ---";
+const CLONE_TIMEOUT = Duration.minutes(10);
 const STDERR_TAIL_LINES = 5;
 const STDERR_TAIL_CHARS = 600;
 
@@ -191,91 +189,6 @@ const stderrTail = (stderr: string) => {
     .join("\n");
   return tail.length === 0 ? undefined : tail.slice(-STDERR_TAIL_CHARS);
 };
-
-/** The command the owner runs in the guest to clone idempotently and read `t3.json`. */
-export function renderCloneCommand(checkout: SandboxCheckout): string {
-  const path = shellQuote(checkout.path);
-  const partial = shellQuote(`${checkout.path}.partial`);
-  const branch = shellQuote(checkout.branch);
-  const tracked = shellQuote(checkout.trackedRemote);
-  // SandboxRepository's schema keeps the tracked remote among the remotes.
-  const trackedUrl = shellQuote(
-    checkout.remotes.find((remote) => remote.name === checkout.trackedRemote)!.url,
-  );
-  const sandboxId = shellQuote(checkout.sandboxId);
-  const others = checkout.remotes.filter((remote) => remote.name !== checkout.trackedRemote);
-  const addRemotes = (repository: string, remotes: ReadonlyArray<GitRemote>) =>
-    remotes.map(
-      (remote) =>
-        `  git -C ${repository} remote add -- ${shellQuote(remote.name)} ${shellQuote(remote.url)}`,
-    );
-  // Diffs read the other remotes' branches, such as the project's main beside a fork. A
-  // remote this machine cannot reach only leaves diffs on local branches, so it never fails
-  // the launch.
-  const fetchOthers = (repository: string) =>
-    others.map(
-      (remote) =>
-        `  timeout ${OTHER_REMOTE_FETCH_TIMEOUT_SECONDS} git -C ${repository} fetch --quiet -- ${shellQuote(remote.name)} ${CLOSE_EXEC_LOCK} || true`,
-    );
-  // A configured upstream would be one the remote does not have yet, which reads as pushed.
-  const pushToTracked = (repository: string) =>
-    `  git -C ${repository} config -- ${shellQuote(`branch.${checkout.branch}.pushRemote`)} ${tracked}`;
-  // Written last, since a clone that names this sandbox is never moved again.
-  const markOwn = (repository: string) =>
-    `  git -C ${repository} config -- t3.sandboxId ${sandboxId}`;
-  return [
-    "set -euo pipefail",
-    // A replay must not delete the partial clone of a run still going.
-    ...SANDBOX_EXEC_LOCK_LINES,
-    // The account env carries any Git credentials the account provides.
-    `set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && set +a`,
-    `if [ ! -d ${path}/.git ]; then`,
-    `  rm -rf ${partial}`,
-    `  git clone --quiet --origin ${tracked} -- ${trackedUrl} ${partial} ${CLOSE_EXEC_LOCK}`,
-    ...addRemotes(partial, others),
-    `  git -C ${partial} checkout --quiet -b ${branch}${
-      checkout.commit === null ? "" : ` ${shellQuote(checkout.commit)}`
-    } ${CLOSE_EXEC_LOCK}`,
-    ...fetchOthers(partial),
-    pushToTracked(partial),
-    markOwn(partial),
-    `  mv ${partial} ${path}`,
-    // A template's clone, which an earlier sandbox made: it takes this launch's
-    // remotes and moves to its commit. Once the clone names this sandbox it is
-    // its own, and an agent's work on it is never reset. The task branch cannot
-    // tell, since another sandbox's id may start the same way.
-    `elif [ "$(git -C ${path} config --get t3.sandboxId || true)" != ${sandboxId} ]; then`,
-    `  for remote in $(git -C ${path} remote); do git -C ${path} remote remove "$remote"; done`,
-    ...addRemotes(path, checkout.remotes),
-    `  git -C ${path} fetch --quiet -- ${tracked} ${
-      checkout.commit === null ? "HEAD" : shellQuote(checkout.commit)
-    } ${CLOSE_EXEC_LOCK}`,
-    `  git -C ${path} checkout --quiet --force -B ${branch} FETCH_HEAD ${CLOSE_EXEC_LOCK}`,
-    ...fetchOthers(path),
-    pushToTracked(path),
-    markOwn(path),
-    "fi",
-    `echo ${shellQuote(T3_PROJECT_FILE_MARKER)}`,
-    `cat ${path}/t3.json 2>/dev/null || true`,
-  ].join("\n");
-}
-
-/** Maps the clone's checked-in scripts the way the web app imports them. */
-function projectScriptsFromT3File(contents: string): ReadonlyArray<ProjectScript> {
-  const file = parseT3ProjectFile(contents);
-  return (file?.scripts ?? []).map((script, index) => ({
-    id: `t3json-${index + 1}`,
-    name: script.name,
-    command: script.command,
-    icon: script.icon ?? "play",
-    runOnWorktreeCreate: script.runOnWorktreeCreate ?? false,
-    ...(script.runOnSettle ? { runOnSettle: true } : {}),
-    ...(script.runOnWorktreeCreate && script.async === false ? { async: false } : {}),
-    ...(script.previewUrl
-      ? { previewUrl: script.previewUrl, autoOpenPreview: script.autoOpenPreview ?? false }
-      : {}),
-  }));
-}
 
 /** An RPC client on the guest's socket, authenticated as `target`, open for the scope. */
 export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(function* (
@@ -301,6 +214,8 @@ export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(functio
   );
   return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
 });
+
+type GuestRpc = Effect.Success<ReturnType<typeof connectGuestRpc>>;
 
 export class SandboxGuest extends Context.Service<
   SandboxGuest,
@@ -331,23 +246,23 @@ export class SandboxGuest extends Context.Service<
       account: SandboxProviderAccount,
       machineId: ProviderMachineId,
     ) => Effect.Effect<Redacted.Redacted<string>, SandboxGuestError | SandboxProviderError>;
-    /** Clones once, however often it is called, and returns the clone's `t3.json` scripts. */
-    readonly cloneCheckout: (
-      account: SandboxProviderAccount,
-      machineId: ProviderMachineId,
-      checkout: SandboxCheckout,
-    ) => Effect.Effect<ReadonlyArray<ProjectScript>, SandboxGuestError | SandboxProviderError>;
     /**
-     * Creates the project and launches the seed thread. Both are keyed by the
-     * seed's ids, so a retry replays the first result instead of duplicating.
+     * Has the guest create the project and clone the source into it, or
+     * adopt a template's clone, then pin the base. Keyed by the project id,
+     * so a retry joins a clone still running or finds the one already made.
+     */
+    readonly prepareProject: (
+      target: SandboxGuestTarget,
+      project: SandboxSeedProject,
+    ) => Effect.Effect<SandboxResolvedBase, SandboxGuestError>;
+    /**
+     * Launches the seed thread on a worktree cut from `baseRef`. Keyed by
+     * the seed's ids, so a retry replays the first result instead of
+     * duplicating.
      */
     readonly launchSeedThread: (
       target: SandboxGuestTarget,
-      input: {
-        readonly checkout: SandboxCheckout;
-        readonly scripts: ReadonlyArray<ProjectScript>;
-        readonly seed: SandboxSeedThread;
-      },
+      input: { readonly seed: SandboxSeedThread; readonly baseRef: string },
     ) => Effect.Effect<void, SandboxGuestError>;
     /** Whether the guest's agents are working, from its shell snapshot. */
     readonly readActivity: (
@@ -503,25 +418,85 @@ const make = Effect.gen(function* () {
       Effect.map((issued) => Redacted.make(issued.token)),
     );
 
-  const cloneCheckout: SandboxGuest["Service"]["cloneCheckout"] = (account, machineId, checkout) =>
-    execOrFail(
-      "clone",
-      account,
-      machineId,
-      renderCloneCommand(checkout),
-      CLONE_TIMEOUT_SECONDS,
-    ).pipe(
-      Effect.map((stdout) =>
-        projectScriptsFromT3File(
-          stdout.slice(stdout.indexOf(T3_PROJECT_FILE_MARKER) + T3_PROJECT_FILE_MARKER.length),
-        ),
+  /** Runs `call` over the guest's RPC socket as `target`, within `timeout`. */
+  const guestRpc = <A, E>(
+    operation: SandboxGuestOperation,
+    timeout: Duration.Duration,
+    target: SandboxGuestTarget,
+    call: (rpc: GuestRpc) => Effect.Effect<A, E, Scope.Scope>,
+  ) =>
+    connectGuestRpc(target).pipe(
+      Effect.flatMap(call),
+      Effect.scoped,
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+      Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
+      Effect.timeout(timeout),
+      Effect.mapError((cause) =>
+        isGuestError(cause) ? cause : sessionCallError(operation)(cause),
       ),
     );
 
-  const launchThread = Effect.fn("SandboxGuest.launchThread")(
-    function* (target: SandboxGuestTarget, seed: SandboxSeedThread) {
-      const rpc = yield* connectGuestRpc(target);
-      return yield* rpc["orchestration.launchThread"]({
+  const cloneRefused = (error: { readonly _tag: string; readonly message: string }) =>
+    new SandboxGuestError({
+      operation: "clone",
+      stderrTail: isRepositoryError(error) ? error.detail : error.message,
+    });
+
+  const prepareProject: SandboxGuest["Service"]["prepareProject"] = (target, project) =>
+    guestRpc("clone", CLONE_TIMEOUT, target, (rpc) =>
+      Effect.gen(function* () {
+        const clones = yield* rpc["subscribeProjectClones"]({}, { asQueue: true });
+        const snapshotOf = (list: ReadonlyArray<ProjectCloneSnapshot>) =>
+          list.find((snapshot) => snapshot.projectId === project.projectId);
+        // Subscribed before asking, so the clone's end cannot slip by between the two.
+        let snapshot = snapshotOf(yield* Queue.take(clones));
+        if (snapshot === undefined) {
+          yield* rpc["projectClone.start"]({
+            projectId: project.projectId,
+            title: project.title,
+            createdAt: project.createdAt,
+            remoteUrl: project.source.remoteUrl,
+            destinationPath: project.path,
+            protocol: "https",
+            checkout: {
+              base: project.source.base,
+              reuseMatching: true,
+              importProjectScripts: true,
+            },
+          }).pipe(Effect.mapError(cloneRefused));
+        } else if (snapshot.phase === "failed" || snapshot.phase === "cancelled") {
+          yield* rpc["projectClone.retry"]({ projectId: project.projectId }).pipe(
+            Effect.mapError(cloneRefused),
+          );
+          snapshot = undefined;
+        }
+        while (snapshot === undefined || snapshot.phase === "running") {
+          const next = snapshotOf(yield* Queue.take(clones));
+          if (next === undefined) {
+            if (snapshot === undefined) continue;
+            return yield* new SandboxGuestError({
+              operation: "clone",
+              stderrTail: "The sandbox stopped tracking the clone.",
+            });
+          }
+          snapshot = next;
+        }
+        if (snapshot.phase !== "done" || snapshot.base === undefined) {
+          return yield* new SandboxGuestError({
+            operation: "clone",
+            ...(snapshot.error === null ? {} : { stderrTail: snapshot.error }),
+          });
+        }
+        return snapshot.base;
+      }),
+    );
+
+  const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (
+    target,
+    { seed, baseRef },
+  ) =>
+    guestRpc("launch-thread", GUEST_CALL_TIMEOUT, target, (rpc) =>
+      rpc["orchestration.launchThread"]({
         commandId: seed.commandId,
         threadId: seed.threadId,
         projectId: seed.projectId,
@@ -529,39 +504,11 @@ const make = Effect.gen(function* () {
         modelSelection: { instanceId: defaultInstanceIdForDriver(seed.driver), model: seed.model },
         runtimeMode: seed.runtimeMode,
         interactionMode: seed.interactionMode,
-        workspaceStrategy: { type: "root" },
+        // The preparation fetched the base once; starting from it again could move the base.
+        workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
         initialMessage: { messageId: seed.messageId, text: seed.message, attachments: [] },
-      });
-    },
-    Effect.scoped,
-    Effect.provideService(HttpClient.HttpClient, httpClient),
-    Effect.provideService(Socket.WebSocketConstructor, webSocketConstructor),
-    Effect.timeout(GUEST_CALL_TIMEOUT),
-    Effect.mapError(sessionCallError("launch-thread")),
-  );
-
-  const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = Effect.fn(
-    "SandboxGuest.launchSeedThread",
-  )(function* (target, input) {
-    const client = yield* httpApi(target.baseUrl);
-    yield* client.projects
-      .mutate({
-        headers: bearer(target),
-        payload: {
-          type: "project.create",
-          commandId: CommandId.make(`sandbox-project:${input.seed.projectId}`),
-          projectId: input.seed.projectId,
-          title: input.checkout.path.split("/").at(-1) ?? "project",
-          workspaceRoot: input.checkout.path,
-          scripts: input.scripts,
-        },
-      })
-      .pipe(
-        Effect.timeout(GUEST_CALL_TIMEOUT),
-        Effect.mapError(sessionCallError("create-project")),
-      );
-    yield* launchThread(target, input.seed);
-  });
+      }),
+    );
 
   const readActivity: SandboxGuest["Service"]["readActivity"] = (target) =>
     httpApi(target.baseUrl).pipe(
@@ -602,7 +549,7 @@ const make = Effect.gen(function* () {
     refreshCredentials,
     readEnvironmentId,
     mintAdminSession,
-    cloneCheckout,
+    prepareProject,
     launchSeedThread,
     readActivity,
     issuePairingCredential,

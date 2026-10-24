@@ -21,6 +21,7 @@ import {
   SandboxAccountId,
   SandboxDesired,
   SandboxId,
+  SandboxResolvedBase,
   SandboxStatus,
   ThreadId,
   type SandboxConnectResult,
@@ -30,8 +31,9 @@ import {
 } from "@t3tools/contracts";
 import {
   resolveSandboxProjectDefaults,
-  sandboxProject,
   sandboxProjectKey,
+  sandboxProjectTitle,
+  sandboxRepositoryIdentity,
 } from "@t3tools/shared/sandboxProject";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -232,6 +234,7 @@ const SandboxReconcilerColumns = Schema.Struct({
   running_since: Schema.NullOr(Schema.Number),
   inputs_written_at: Schema.NullOr(Schema.Number),
   credentials_stale: Schema.BooleanFromBit,
+  resolved_base_json: Schema.NullOr(Schema.fromJsonString(SandboxResolvedBase)),
   seed_launched_at: Schema.NullOr(Schema.Number),
 });
 
@@ -266,6 +269,7 @@ const reconcilerColumnsOf = (record: SandboxRecord) =>
     running_since: record.runningSince,
     inputs_written_at: record.inputsWrittenAt,
     credentials_stale: record.credentialsStale,
+    resolved_base_json: record.resolvedBase,
     seed_launched_at: record.seedLaunchedAt,
   });
 
@@ -288,6 +292,7 @@ const recordOf = (row: Effect.Success<ReturnType<typeof decodeRow>>): SandboxRec
   runningSince: row.running_since,
   inputsWrittenAt: row.inputs_written_at,
   credentialsStale: row.credentials_stale,
+  resolvedBase: row.resolved_base_json,
   seedLaunchedAt: row.seed_launched_at,
   createdAt: row.created_at,
 });
@@ -304,7 +309,8 @@ const toView = (record: SandboxRecord): SandboxView => ({
   accountId: record.accountId,
   title: record.spec.title,
   message: record.spec.message,
-  repository: record.spec.repository,
+  source: record.spec.source,
+  resolvedBase: record.resolvedBase,
   threadId: record.seed.threadId,
   desired: record.desired,
   revision: record.desiredRevision,
@@ -322,6 +328,7 @@ const FAILED_STEP: Record<SandboxAction["_tag"], SandboxFailedStep> = {
   WriteInputs: "boot",
   Host: "boot",
   RecordEnvironment: "boot",
+  PrepareProject: "launch",
   LaunchSeed: "launch",
   RefreshCredentials: "resume",
   Stop: "stop",
@@ -588,25 +595,41 @@ const make = Effect.gen(function* () {
       }
       case "RecordEnvironment":
         return yield* writeFacts(record, { status, environmentId: action.environmentId });
+      case "PrepareProject": {
+        const resolved = yield* account();
+        const baseUrl =
+          record.httpBaseUrl ??
+          (yield* Effect.die(new Error("PrepareProject planned without a base URL.")));
+        const title = sandboxProjectTitle(
+          sandboxRepositoryIdentity(record.spec.source, sourceControlDefinitions),
+        );
+        const resolvedBase = yield* asOwner(record, resolved, yield* machineId, (token) =>
+          guest.prepareProject(
+            { baseUrl, token },
+            {
+              projectId: record.seed.projectId,
+              title,
+              // Shared by every sandbox of the repository, so a template's clone is found.
+              path: `${SANDBOX_HOME_PROJECTS}/${title}`,
+              createdAt: DateTime.formatIso(DateTime.makeUnsafe(record.createdAt)),
+              source: record.spec.source,
+            },
+          ),
+        );
+        return yield* writeFacts(record, { status, resolvedBase });
+      }
       case "LaunchSeed": {
         const resolved = yield* account();
         const baseUrl =
           record.httpBaseUrl ??
           (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
-        const { repository } = record.spec;
-        const checkout = {
-          ...repository,
-          sandboxId: record.id,
-          branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-          path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository, sourceControlDefinitions).title}`,
-        };
-        const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
+        const resolvedBase =
+          record.resolvedBase ??
+          (yield* Effect.die(new Error("LaunchSeed planned before the project was prepared.")));
         yield* asOwner(record, resolved, yield* machineId, (token) =>
           guest.launchSeedThread(
             { baseUrl, token },
             {
-              checkout,
-              scripts,
               seed: {
                 ...record.seed,
                 title: record.spec.title,
@@ -616,6 +639,8 @@ const make = Effect.gen(function* () {
                 runtimeMode: record.spec.runtimeMode,
                 interactionMode: record.spec.interactionMode,
               },
+              // The preparation fetched this remote-tracking ref, so the worktree starts there.
+              baseRef: `origin/${resolvedBase.branch}`,
             },
           ),
         );
@@ -833,8 +858,7 @@ const make = Effect.gen(function* () {
             (yield* settings.getSettings.pipe(persistence)).sandboxProjectDefaults[
               sandboxProjectKey(
                 input.accountId,
-                sandboxProject(input.repository, sourceControlDefinitions).repositoryIdentity
-                  .canonicalKey,
+                sandboxRepositoryIdentity(input.source, sourceControlDefinitions).canonicalKey,
                 sourceControlDefinitions,
               )
             ],
@@ -848,7 +872,7 @@ const make = Effect.gen(function* () {
             spec: {
               title: input.title,
               message: input.message,
-              repository: input.repository,
+              source: input.source,
               driver: input.driver,
               model: input.model,
               runtimeMode: input.runtimeMode,
@@ -886,6 +910,7 @@ const make = Effect.gen(function* () {
             runningSince: null,
             inputsWrittenAt: null,
             credentialsStale: false,
+            resolvedBase: null,
             seedLaunchedAt: null,
             createdAt: now,
           };

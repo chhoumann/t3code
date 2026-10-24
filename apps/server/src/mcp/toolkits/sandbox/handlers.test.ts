@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   SandboxAccountId,
   SandboxId,
+  SandboxRemoteUrl,
   ThreadId,
   type SandboxLaunchInput,
 } from "@t3tools/contracts";
@@ -63,7 +64,8 @@ it.effect("launches a sandbox within the calling thread's modes", () =>
               accountId: input.accountId,
               title: input.title,
               message: input.message,
-              repository: input.repository,
+              source: input.source,
+              resolvedBase: null,
               threadId: ThreadId.make("thread-seed"),
               desired: "running" as const,
               revision: 1,
@@ -86,10 +88,9 @@ it.effect("launches a sandbox within the calling thread's modes", () =>
             accountId,
             title: "Fix the bug",
             message: "Fix the bug in hello.txt",
-            repository: {
-              remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World" }],
-              trackedRemote: "origin",
-              commit: null,
+            source: {
+              remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/Hello-World"),
+              base: { _tag: "default" },
             },
             driver: ProviderDriverKind.make("claudeAgent"),
             model: "claude-sonnet-4-6",

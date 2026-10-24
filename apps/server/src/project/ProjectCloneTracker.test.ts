@@ -5,6 +5,7 @@ import {
   ProjectId,
   projectCloneProgressSummary,
   SourceControlRepositoryError,
+  type ProjectCloneBase,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -30,14 +31,15 @@ function makeHarness(options?: {
   readonly clone?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["cloneRepository"];
 }) {
   const created: Array<{ projectId: ProjectId; workspaceRoot: string }> = [];
-  const cloned: Array<ProjectId> = [];
+  const finalized: Array<{ projectId: ProjectId; base: ProjectCloneBase | null }> = [];
   const discarded: Array<string> = [];
   const hooks: ProjectCloneTracker.ProjectCloneHooks = {
     createProject: (input) =>
       Effect.sync(() => {
         created.push({ projectId: input.projectId, workspaceRoot: input.workspaceRoot });
       }),
-    onCloned: (input) => Effect.sync(() => void cloned.push(input.projectId)),
+    finalize: (input) =>
+      Effect.sync(() => void finalized.push({ projectId: input.projectId, base: input.base })),
   };
   const layer = ProjectCloneTracker.layer.pipe(
     Layer.provide(
@@ -48,6 +50,7 @@ function makeHarness(options?: {
             remoteUrl: input.remoteUrl ?? "",
             cloneUrl: input.remoteUrl ?? "",
             repository: null,
+            adopt: false,
           }),
         cloneRepository:
           options?.clone ??
@@ -61,7 +64,7 @@ function makeHarness(options?: {
       }),
     ),
   );
-  return { layer, hooks, created, cloned, discarded };
+  return { layer, hooks, created, finalized, discarded };
 }
 
 describe("ProjectCloneTracker", () => {
@@ -99,7 +102,7 @@ describe("ProjectCloneTracker", () => {
       const lists = yield* Fiber.join(collected);
       const final = lists.at(-1)?.[0];
       expect(final).toMatchObject({ phase: "done", percent: 100 });
-      expect(harness.cloned).toEqual([projectId]);
+      expect(harness.finalized).toEqual([{ projectId, base: null }]);
 
       yield* TestClock.adjust("31 seconds");
       expect(yield* tracker.get(projectId)).toBeNull();
@@ -196,21 +199,73 @@ describe("ProjectCloneTracker", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("a cancel that lands after git finished keeps the checkout", () => {
-    const gate = Deferred.makeUnsafe<void>();
+  it.effect(
+    "a cancel that lands after git finished waits for finalization and keeps the checkout",
+    () => {
+      const gate = Deferred.makeUnsafe<void>();
+      const harness = makeHarness();
+      const hooks: ProjectCloneTracker.ProjectCloneHooks = {
+        ...harness.hooks,
+        finalize: () => Deferred.await(gate),
+      };
+      return Effect.gen(function* () {
+        const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+        yield* tracker.start(startInput, hooks);
+        yield* Effect.yieldNow;
+        // A thread cannot start before the project is finished.
+        expect((yield* tracker.get(projectId))?.phase).toBe("running");
+        const cancelled = yield* Effect.forkChild(tracker.cancel(projectId));
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(gate, undefined);
+        expect(yield* Fiber.join(cancelled)).toBe(false);
+        expect((yield* tracker.get(projectId))?.phase).toBe("done");
+        expect(harness.discarded).toEqual([]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("a finalization that fails fails the clone with its reason", () => {
     const harness = makeHarness();
     const hooks: ProjectCloneTracker.ProjectCloneHooks = {
       ...harness.hooks,
-      onCloned: () => Deferred.await(gate),
+      finalize: () =>
+        Effect.fail(
+          new OrchestrationDispatchCommandError({ message: "scripts could not be saved" }),
+        ),
     };
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       yield* tracker.start(startInput, hooks);
       yield* Effect.yieldNow;
-      expect((yield* tracker.get(projectId))?.phase).toBe("done");
-      expect(yield* tracker.cancel(projectId)).toBe(false);
-      expect(harness.discarded).toEqual([]);
-      yield* Deferred.succeed(gate, undefined);
+      expect(yield* tracker.get(projectId)).toMatchObject({
+        phase: "failed",
+        error: "scripts could not be saved",
+      });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("a done clone with a checkout reports the base it pinned", () => {
+    const base = { branch: "develop", commit: "abc123" };
+    const harness = makeHarness({
+      clone: (input, options) =>
+        Effect.succeed({
+          cwd: input.destinationPath,
+          remoteUrl: input.remoteUrl ?? "",
+          repository: null,
+          ...(options?.checkout === undefined ? {} : { base }),
+        }),
+    });
+    const checkout = {
+      base: { _tag: "default" as const },
+      reuseMatching: true,
+      importProjectScripts: true,
+    };
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start({ ...startInput, checkout }, harness.hooks);
+      yield* Effect.yieldNow;
+      expect(yield* tracker.get(projectId)).toMatchObject({ phase: "done", base });
+      expect(harness.finalized).toEqual([{ projectId, base }]);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -232,6 +287,7 @@ describe("ProjectCloneTracker", () => {
               remoteUrl: "https://github.com/octocat/t3code.git",
               cloneUrl: "https://user:s3cret@github.com/octocat/t3code.git",
               repository: null,
+              adopt: false,
             }),
           cloneRepository: (input) =>
             Effect.sync(() => {
