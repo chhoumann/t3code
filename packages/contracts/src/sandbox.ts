@@ -7,7 +7,6 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { GitRemote } from "./git.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
@@ -68,35 +67,65 @@ export const SandboxStatus = Schema.Union([
 ]);
 export type SandboxStatus = typeof SandboxStatus.Type;
 
-export const SandboxRepository = Schema.Struct({
-  /**
-   * The launching checkout's remotes that its repository identity reads, and
-   * the one its branch tracks. The clone gets each under its name, so its
-   * project has the checkout's repository identity.
-   */
-  remotes: Schema.NonEmptyArray(GitRemote),
-  /**
-   * The remote the launching branch tracks, which has `commit`. The clone is
-   * made from it, and the sandbox's task branch pushes there.
-   */
-  trackedRemote: TrimmedNonEmptyString,
-  /** Checked out after cloning; null keeps the tracked remote's default branch. */
-  commit: Schema.NullOr(TrimmedNonEmptyString),
-}).check(
-  Schema.makeFilter(({ remotes, trackedRemote }) => {
-    const names = new Set(remotes.map((remote) => remote.name));
-    if (names.size < remotes.length) return "Each remote needs its own name.";
-    return names.has(trackedRemote) || "The tracked remote must be one of the remotes.";
+/**
+ * The HTTPS clone URL of the repository a sandbox works on, with no
+ * credentials in it. HTTPS only: the guest's one git credential is the GitHub
+ * CLI's HTTPS helper, so clients rewrite SSH before sending.
+ */
+export const SandboxRemoteUrl = TrimmedNonEmptyString.check(
+  Schema.makeFilter((value: string) => /^https:\/\/[^@/\s?#]+\/[^\s?#]+$/.test(value), {
+    expected: "an https clone URL without credentials",
   }),
-);
-export type SandboxRepository = typeof SandboxRepository.Type;
+).pipe(Schema.brand("SandboxRemoteUrl"));
+export type SandboxRemoteUrl = typeof SandboxRemoteUrl.Type;
+
+/** `git check-ref-format --branch`: a name under `refs/heads/`, with no revision syntax. */
+export function isGitBranchName(name: string): boolean {
+  if (name.length === 0 || name === "HEAD" || name === "@" || name.startsWith("-")) return false;
+  if (name.startsWith("/") || name.endsWith("/") || name.endsWith(".")) return false;
+  if (name.includes("//") || name.includes("..") || name.includes("@{")) return false;
+  // Control characters, space, and the characters git reserves for revision syntax.
+  for (const char of name) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f || "~^:?*[\\".includes(char)) return false;
+  }
+  return name
+    .split("/")
+    .every((part) => part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+export const SandboxBranchName = TrimmedNonEmptyString.check(
+  Schema.makeFilter(isGitBranchName, { expected: "a git branch name" }),
+).pipe(Schema.brand("SandboxBranchName"));
+export type SandboxBranchName = typeof SandboxBranchName.Type;
+
+/** Where the sandbox's task branch starts: the remote's default branch, or a named remote branch. */
+export const SandboxBase = Schema.Union([
+  Schema.TaggedStruct("default", {}),
+  Schema.TaggedStruct("branch", { name: SandboxBranchName }),
+]);
+export type SandboxBase = typeof SandboxBase.Type;
+
+/** What a launch names. The owner never looks at a local checkout. */
+export const SandboxSource = Schema.Struct({
+  remoteUrl: SandboxRemoteUrl,
+  base: SandboxBase,
+});
+export type SandboxSource = typeof SandboxSource.Type;
+
+/** The remote branch and commit the guest pinned `SandboxSource.base` to. */
+export const SandboxResolvedBase = Schema.Struct({
+  branch: TrimmedNonEmptyString,
+  commit: TrimmedNonEmptyString,
+});
+export type SandboxResolvedBase = typeof SandboxResolvedBase.Type;
 
 export const SandboxLaunchInput = Schema.Struct({
   id: SandboxId,
   accountId: SandboxAccountId,
   title: TrimmedNonEmptyString,
   message: TrimmedNonEmptyString,
-  repository: SandboxRepository,
+  source: SandboxSource,
   /** The guest resolves its own provider instance for this driver. */
   driver: ProviderDriverKind,
   model: TrimmedNonEmptyString,
@@ -241,7 +270,9 @@ export const SandboxView = Schema.Struct({
   title: Schema.String,
   /** The first message, which the seed thread starts with. */
   message: Schema.String,
-  repository: SandboxRepository,
+  source: SandboxSource,
+  /** Null until the guest has cloned and pinned the base. */
+  resolvedBase: Schema.NullOr(SandboxResolvedBase),
   /** The thread the sandbox starts with, in its own environment. */
   threadId: ThreadId,
   desired: SandboxDesired,

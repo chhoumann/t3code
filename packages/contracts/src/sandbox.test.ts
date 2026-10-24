@@ -1,27 +1,67 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { SandboxRepository } from "./sandbox.ts";
+import { SandboxBranchName, SandboxRemoteUrl, SandboxSource } from "./sandbox.ts";
 
-const decode = Schema.decodeUnknownExit(SandboxRepository);
-const decodeSync = Schema.decodeUnknownSync(SandboxRepository);
-const PROJECT = { name: "origin", url: "https://github.com/pingdotgg/t3code.git" };
-const FORK = { name: "fork", url: "https://github.com/chhoumann/t3code.git" };
+const isRemoteUrl = Schema.is(SandboxRemoteUrl);
+const isBranchName = Schema.is(SandboxBranchName);
+const decodeSource = Schema.decodeUnknownExit(SandboxSource);
 
-describe("SandboxRepository", () => {
-  it("names the remote it tracks among its remotes", () => {
-    const repository = { remotes: [FORK, PROJECT], trackedRemote: "fork", commit: null };
-    expect(decodeSync(repository)).toEqual(repository);
+describe("SandboxRemoteUrl", () => {
+  it.each([
+    "https://github.com/pingdotgg/t3code.git",
+    "https://github.com/pingdotgg/t3code",
+    "https://gitlab.example.com:8443/group/sub/project",
+  ])("accepts %s", (url) => {
+    expect(isRemoteUrl(url)).toBe(true);
   });
 
   it.each([
-    ["no remotes", { remotes: [], trackedRemote: "origin", commit: null }],
-    ["a tracked remote it lacks", { remotes: [PROJECT], trackedRemote: "fork", commit: null }],
-    [
-      "two remotes of one name",
-      { remotes: [PROJECT, { ...FORK, name: "origin" }], trackedRemote: "origin", commit: null },
-    ],
-  ])("refuses %s", (_, repository) => {
-    expect(decode(repository)._tag).toBe("Failure");
+    ["an SSH remote", "git@github.com:pingdotgg/t3code.git"],
+    ["an ssh:// remote", "ssh://git@github.com/pingdotgg/t3code.git"],
+    ["a plain http remote", "http://github.com/pingdotgg/t3code"],
+    ["a local path", "/home/user/projects/t3code"],
+    ["a URL carrying credentials", "https://user:token@github.com/pingdotgg/t3code"],
+    ["a URL with a query token", "https://github.com/pingdotgg/t3code?access_token=x"],
+    ["a host alone", "https://github.com"],
+  ])("refuses %s", (_, url) => {
+    expect(isRemoteUrl(url)).toBe(false);
+  });
+});
+
+describe("SandboxBranchName", () => {
+  it.each(["main", "release/2.x", "feat/issue-12_fix", "v1.0", "a/b/c"])("accepts %s", (name) => {
+    expect(isBranchName(name)).toBe(true);
+  });
+
+  it.each([
+    ["HEAD", "HEAD"],
+    ["an option-looking name", "-x"],
+    ["a revision range", "main..dev"],
+    ["reflog syntax", "main@{1}"],
+    ["a parent selector", "main^"],
+    ["an ancestor selector", "main~2"],
+    ["a refspec", "main:dev"],
+    ["a lock file", "main.lock"],
+    ["a hidden component", "feat/.hidden"],
+    ["a trailing slash", "main/"],
+    ["a space", "my branch"],
+    ["a wildcard", "release/*"],
+    ["a trailing dot", "main."],
+  ])("refuses %s", (_, name) => {
+    expect(isBranchName(name)).toBe(false);
+  });
+});
+
+describe("SandboxSource", () => {
+  it("names a repository at its default branch or at a branch", () => {
+    const remoteUrl = "https://github.com/pingdotgg/t3code.git";
+    expect(decodeSource({ remoteUrl, base: { _tag: "default" } })._tag).toBe("Success");
+    expect(decodeSource({ remoteUrl, base: { _tag: "branch", name: "release/2.x" } })._tag).toBe(
+      "Success",
+    );
+    expect(decodeSource({ remoteUrl, base: { _tag: "branch", name: "HEAD" } })._tag).toBe(
+      "Failure",
+    );
   });
 });
