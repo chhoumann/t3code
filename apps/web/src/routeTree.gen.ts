@@ -38,6 +38,7 @@ import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 import { Route as ChatSandboxEnvironmentIdSandboxIdRouteImport } from './routes/_chat.sandbox.$environmentId.$sandboxId'
+import { Route as SettingsSandboxesGithubCallbackEnvironmentIdRouteImport } from './routes/settings.sandboxes_.github.callback.$environmentId'
 
 const WelcomeRoute = WelcomeRouteImport.update({
   id: '/welcome',
@@ -186,6 +187,12 @@ const ChatSandboxEnvironmentIdSandboxIdRoute =
     path: '/sandbox/$environmentId/$sandboxId',
     getParentRoute: () => ChatRoute,
   } as any)
+const SettingsSandboxesGithubCallbackEnvironmentIdRoute =
+  SettingsSandboxesGithubCallbackEnvironmentIdRouteImport.update({
+    id: '/sandboxes_/github/callback/$environmentId',
+    path: '/sandboxes/github/callback/$environmentId',
+    getParentRoute: () => SettingsRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -216,6 +223,7 @@ export interface FileRoutesByFullPath {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
+  '/settings/sandboxes/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
@@ -246,6 +254,7 @@ export interface FileRoutesByTo {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
+  '/settings/sandboxes/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -278,6 +287,7 @@ export interface FileRoutesById {
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/_chat/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
+  '/settings/sandboxes_/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -310,6 +320,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/sandbox/$environmentId/$sandboxId'
+    | '/settings/sandboxes/github/callback/$environmentId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
@@ -340,6 +351,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/sandbox/$environmentId/$sandboxId'
+    | '/settings/sandboxes/github/callback/$environmentId'
   id:
     | '__root__'
     | '/_chat'
@@ -371,6 +383,7 @@ export interface FileRouteTypes {
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
     | '/_chat/sandbox/$environmentId/$sandboxId'
+    | '/settings/sandboxes_/github/callback/$environmentId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -589,6 +602,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSandboxEnvironmentIdSandboxIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/settings/sandboxes_/github/callback/$environmentId': {
+      id: '/settings/sandboxes_/github/callback/$environmentId'
+      path: '/sandboxes/github/callback/$environmentId'
+      fullPath: '/settings/sandboxes/github/callback/$environmentId'
+      preLoaderRoute: typeof SettingsSandboxesGithubCallbackEnvironmentIdRouteImport
+      parentRoute: typeof SettingsRoute
+    }
   }
 }
 
@@ -629,6 +649,7 @@ interface SettingsRouteChildren {
   SettingsSnapShotRoute: typeof SettingsSnapShotRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
   SettingsStorageRoute: typeof SettingsStorageRoute
+  SettingsSandboxesGithubCallbackEnvironmentIdRoute: typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 
 const SettingsRouteChildren: SettingsRouteChildren = {
@@ -647,6 +668,8 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsSnapShotRoute: SettingsSnapShotRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
   SettingsStorageRoute: SettingsStorageRoute,
+  SettingsSandboxesGithubCallbackEnvironmentIdRoute:
+    SettingsSandboxesGithubCallbackEnvironmentIdRoute,
 }
 
 const SettingsRouteWithChildren = SettingsRoute._addFileChildren(

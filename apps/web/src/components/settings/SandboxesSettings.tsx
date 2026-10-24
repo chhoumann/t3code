@@ -44,6 +44,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectSandboxSettings } from "./ProjectSandboxSettings";
+import { SandboxGitHubSection } from "./SandboxGitHubSection";
 import { searchableSetting } from "./settingsSearch";
 import {
   SANDBOX_SIZE_LABELS,
@@ -245,6 +246,7 @@ function SandboxOwnerSection(props: {
           })
         )}
       </SettingsSection>
+      <SandboxGitHubSection owner={owner} />
       {ownerSandboxes.length > 0 ? (
         <SettingsSection title="Sandboxes">
           {ownerSandboxes.map((sandbox) => (

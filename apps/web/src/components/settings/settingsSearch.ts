@@ -1026,7 +1026,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "sandboxes",
     title: "Sandbox accounts",
     to: "/settings/sandboxes",
-    searchTerms: ["new sandbox boat cloud vm machine api key remote setup script"],
+    searchTerms: [
+      "new sandbox boat cloud vm machine api key remote setup script github app connect repositories",
+    ],
   },
   {
     id: "archive",
