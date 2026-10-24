@@ -1114,6 +1114,12 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   receiveProviderAuthCallback?: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback?: (authorizationUrl: string) => Promise<void>;
+  /**
+   * Posts a GitHub App manifest from the system browser, which the renderer
+   * cannot: its window never navigates away from the app. GitHub returns to
+   * the desktop through the `t3code://app` callback route.
+   */
+  openGitHubAppManifest?: (form: { action: string; manifest: string }) => Promise<void>;
   openExternal: (url: string) => Promise<boolean>;
   openSystemSettings?: (pane: SystemSettingsPane) => Promise<boolean>;
   checkSystemPermission?: (pane: SystemSettingsPane) => Promise<boolean>;

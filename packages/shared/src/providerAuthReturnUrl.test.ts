@@ -13,6 +13,18 @@ describe("provider auth return destinations", () => {
       ).toBe(`${scheme}://app/settings/providers?instanceId=work`);
     },
   );
+  it("keeps GitHub's callback query only on the sandbox GitHub callback route", () => {
+    expect(
+      providerAuthReturnUrl(
+        "t3code://app/settings/sandboxes/github/callback/env-1?code=abc&state=xyz&installation_id=9&setup_action=install&other=1",
+      ),
+    ).toBe(
+      "t3code://app/settings/sandboxes/github/callback/env-1?code=abc&state=xyz&installation_id=9&setup_action=install",
+    );
+    expect(providerAuthReturnUrl("t3code://app/settings/sandboxes?code=abc")).toBe(
+      "t3code://app/settings/sandboxes",
+    );
+  });
   it.each([
     "t3code://attacker/welcome",
     "t3code://app/welcome/../evil",
