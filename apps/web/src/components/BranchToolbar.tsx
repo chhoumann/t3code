@@ -47,6 +47,10 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
+import {
+  BranchToolbarSandboxSource,
+  type BranchToolbarSandboxSourceHandle,
+} from "./BranchToolbarSandboxSource";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -82,8 +86,10 @@ import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
 
 export interface BranchToolbarHandle {
+  /** Opens the base picker instead while the draft launches a sandbox. */
   openBranchPicker: () => void;
   usePreviousWorktree: () => void;
+  openSandboxRepository: () => void;
 }
 
 interface BranchToolbarProps {
@@ -681,6 +687,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   contextStripVisible = true,
 }: BranchToolbarProps) {
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
+  const sandboxSourceRef = useRef<BranchToolbarSandboxSourceHandle>(null);
   const threadRef = scopeThreadRef(environmentId, threadId);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   // The composer retains resolved thread details while bootstrap cleanup can remove its shell.
@@ -719,18 +726,21 @@ export const BranchToolbar = memo(function BranchToolbar({
   useImperativeHandle(
     ref,
     () => ({
-      openBranchPicker: () => branchSelectorRef.current?.open(),
+      openBranchPicker: () =>
+        sandboxSelected ? sandboxSourceRef.current?.openBase() : branchSelectorRef.current?.open(),
       usePreviousWorktree: () => {
         if (!showGitControls || !canUsePreviousWorktree || !previousWorktreeSeed) return;
         onUsePreviousWorktree();
         onComposerFocusRequest?.();
       },
+      openSandboxRepository: () => sandboxSourceRef.current?.openRepository(),
     }),
     [
       canUsePreviousWorktree,
       onComposerFocusRequest,
       onUsePreviousWorktree,
       previousWorktreeSeed,
+      sandboxSelected,
       showGitControls,
     ],
   );
@@ -784,6 +794,15 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
+          />
+        ) : null}
+        {panelSection !== "branch" && sandboxSelected && draftId ? (
+          <BranchToolbarSandboxSource
+            draftId={draftId}
+            environmentId={environmentId}
+            project={activeProject}
+            disabled={envLocked}
+            displayMode="panel"
           />
         ) : null}
         {panelSection !== "workspace" && !sandboxSelected ? (
@@ -899,6 +918,19 @@ export const BranchToolbar = memo(function BranchToolbar({
           data-chat-resting-composer-controls-host="true"
           className="flex min-w-0 flex-1 items-center justify-start overflow-x-clip overflow-y-visible"
         />
+      ) : null}
+
+      {sandboxSelected && draftId ? (
+        <div className="flex min-w-0 flex-initial justify-end @3xl/composer-surface:ml-auto">
+          <BranchToolbarSandboxSource
+            ref={sandboxSourceRef}
+            draftId={draftId}
+            environmentId={environmentId}
+            project={activeProject}
+            disabled={envLocked}
+            displayMode="toolbar"
+          />
+        </div>
       ) : null}
 
       {showGitControls && !sandboxSelected ? (

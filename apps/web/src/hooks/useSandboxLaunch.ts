@@ -3,10 +3,9 @@ import { sandboxCommandFailure } from "@t3tools/client-runtime/state/sandboxes";
 import type {
   ProviderDriverKind,
   ProviderInteractionMode,
-  RepositoryIdentity,
   RuntimeMode,
+  SandboxSource,
 } from "@t3tools/contracts";
-import { sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { useNavigate } from "@tanstack/react-router";
 
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -20,8 +19,7 @@ export interface SandboxLaunchRequest {
   readonly message: string;
   /** Attachments and context the composer holds besides the message. */
   readonly extrasCount: number;
-  /** The draft's project, whose remote the sandbox clones. */
-  readonly repositoryIdentity: RepositoryIdentity | null;
+  readonly source: SandboxSource;
   readonly driver: ProviderDriverKind;
   readonly model: string;
   readonly runtimeMode: RuntimeMode;
@@ -30,8 +28,8 @@ export interface SandboxLaunchRequest {
 
 /**
  * Launches a draft's new sandbox and opens it in place of the draft. The
- * sandbox clones the project's remote at its default branch and starts its
- * own thread from the message, so nothing local travels. Resolves with the
+ * sandbox clones the source's repository from its base and starts its own
+ * thread from the message, so nothing local travels. Resolves with the
  * reason it did not launch, or null.
  */
 export function useSandboxLaunch() {
@@ -42,10 +40,6 @@ export function useSandboxLaunch() {
     if (request.extrasCount > 0) {
       return "A sandbox starts from your message alone. Remove attachments and context to start one.";
     }
-    const source = sandboxSourceForProject(request.repositoryIdentity);
-    if (source === null) {
-      return "A sandbox clones the project from its remote repository. Add one to start a sandbox.";
-    }
     const { target } = request;
     const result = await launch({
       environmentId: target.ownerEnvironmentId,
@@ -54,7 +48,7 @@ export function useSandboxLaunch() {
         accountId: target.accountId,
         title: deriveThreadTitleSeed({ text: request.message, attachments: [] }),
         message: request.message,
-        source,
+        source: request.source,
         driver: request.driver,
         model: request.model,
         runtimeMode: request.runtimeMode,

@@ -1,15 +1,21 @@
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import {
   EnvironmentId,
   SandboxAccountId,
   type SandboxAccountConfig,
+  SandboxBranchName,
+  SandboxRemoteUrl,
   type VcsRef,
 } from "@t3tools/contracts";
+import { repositoryIdentityFromRemotes } from "@t3tools/shared/git";
 import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   deriveSandboxRunChoices,
   resolveSandboxDraftSend,
+  resolveSandboxDraftSource,
+  sandboxBaseSuggestions,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
@@ -350,5 +356,81 @@ describe("resolveSandboxDraftSend", () => {
 
   it("sends a draft that picked no sandbox in its own environment", () => {
     expect(resolveSandboxDraftSend(null, [choice])).toEqual({ _tag: "Environment" });
+  });
+});
+
+describe("resolveSandboxDraftSource", () => {
+  const checkout = repositoryIdentityFromRemotes(
+    [{ name: "origin", url: "https://github.com/Example/App.git" }],
+    sourceControlClients,
+  );
+  const other = SandboxRemoteUrl.make("https://github.com/Example/Other.git");
+  const release = { _tag: "branch" as const, name: SandboxBranchName.make("release") };
+
+  it("clones the project's remote from the default branch", () => {
+    expect(resolveSandboxDraftSource({}, checkout)).toEqual({
+      remoteUrl: "https://github.com/Example/App.git",
+      base: { _tag: "default" },
+    });
+  });
+
+  it("clones the repository the draft names instead of its project's, from its base", () => {
+    expect(resolveSandboxDraftSource({ remoteUrl: other, base: release }, checkout)).toEqual({
+      remoteUrl: other,
+      base: release,
+    });
+  });
+
+  it("has no source for a project without a remote until the draft names a repository", () => {
+    expect(resolveSandboxDraftSource({ base: release }, null)).toBeNull();
+    expect(resolveSandboxDraftSource({ remoteUrl: other }, null)).toEqual({
+      remoteUrl: other,
+      base: { _tag: "default" },
+    });
+  });
+});
+
+describe("sandboxBaseSuggestions", () => {
+  const ref = (name: string, remoteName?: string): VcsRef => ({
+    name,
+    current: false,
+    isDefault: false,
+    worktreePath: null,
+    isRemote: remoteName !== undefined,
+    ...(remoteName === undefined ? {} : { remoteName }),
+  });
+  const refs = [
+    ref("main"),
+    ref("local-only"),
+    ref("origin/main", "origin"),
+    ref("origin/feature/login", "origin"),
+    ref("upstream/release", "upstream"),
+  ];
+
+  it("offers the branches of the remote the sandbox clones, by name", () => {
+    const plain = repositoryIdentityFromRemotes(
+      [{ name: "origin", url: "https://github.com/Example/App.git" }],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, plain)).toEqual(["main", "feature/login"]);
+  });
+
+  it("offers a fork's own branches, not its upstream's", () => {
+    const fork = repositoryIdentityFromRemotes(
+      [
+        { name: "upstream", url: "https://github.com/Example/App.git" },
+        { name: "origin", url: "https://github.com/Me/App.git" },
+      ],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, fork)).toEqual(["main", "feature/login"]);
+  });
+
+  it("offers the sole remote's branches whatever it is named", () => {
+    const upstreamOnly = repositoryIdentityFromRemotes(
+      [{ name: "upstream", url: "https://github.com/Example/App.git" }],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, upstreamOnly)).toEqual(["release"]);
   });
 });

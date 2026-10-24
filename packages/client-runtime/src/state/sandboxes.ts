@@ -5,7 +5,10 @@ import {
   type ExecutionEnvironmentCapabilities,
   type OrchestrationV2ThreadShell,
   SandboxAccountId,
+  type SandboxBase,
+  SandboxBranchName,
   SandboxError,
+  type SandboxRemoteUrl,
   type SandboxStatus,
   type SandboxView,
   type ServerSettings,
@@ -19,9 +22,11 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
+import { sandboxRemoteUrl } from "@t3tools/shared/sandboxProject";
 
 import type { EnvironmentConnectionPhase } from "../connection/presentation.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { normalizePastedCloneUrl } from "../operations/projects.ts";
 import {
   SandboxRegistrations,
   type SandboxIndexEntry,
@@ -467,6 +472,23 @@ export function sandboxAccountChoices(
 
 export function sandboxLaunchLabel(accountLabel: string): string {
   return `New sandbox · ${accountLabel}`;
+}
+
+/**
+ * A typed or pasted repository, `owner/repo` or an SSH or HTTPS URL, as a
+ * sandbox clones it. Null when it has no HTTPS form.
+ */
+export function sandboxRemoteUrlFromInput(input: string): SandboxRemoteUrl | null {
+  return sandboxRemoteUrl(normalizePastedCloneUrl(input));
+}
+
+const isSandboxBranchName = Schema.is(SandboxBranchName);
+
+/** A typed base: empty for the remote's default branch, else a branch name. Null when it is neither. */
+export function parseSandboxBase(input: string): SandboxBase | null {
+  const name = input.trim();
+  if (name.length === 0) return { _tag: "default" };
+  return isSandboxBranchName(name) ? { _tag: "branch", name } : null;
 }
 
 const isSandboxError = Schema.is(SandboxError);

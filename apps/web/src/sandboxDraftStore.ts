@@ -1,4 +1,11 @@
-import { EnvironmentId, SandboxAccountId, SandboxId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  SandboxAccountId,
+  SandboxBase,
+  SandboxId,
+  SandboxRemoteUrl,
+  type SandboxSource,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
@@ -16,6 +23,10 @@ const SandboxDraftTarget = Schema.Struct({
   ownerEnvironmentId: EnvironmentId,
   accountId: SandboxAccountId,
   sandboxId: SandboxId,
+  /** The repository to clone in place of the draft's project's. */
+  remoteUrl: Schema.optionalKey(SandboxRemoteUrl),
+  /** Omitted starts from the remote's default branch. */
+  base: Schema.optionalKey(SandboxBase),
 });
 export type SandboxDraftTarget = typeof SandboxDraftTarget.Type;
 
@@ -24,11 +35,13 @@ const decodeTargets = Schema.decodeUnknownOption(PersistedTargets);
 
 interface SandboxDraftStoreState {
   readonly targets: Readonly<Record<string, SandboxDraftTarget>>;
+  /** Keeps the draft's repository and base across a change of account. */
   readonly choose: (
     draftId: DraftId,
     ownerEnvironmentId: EnvironmentId,
     accountId: SandboxAccountId,
   ) => void;
+  readonly setSource: (draftId: DraftId, source: Partial<SandboxSource>) => void;
   readonly clear: (draftId: DraftId) => void;
 }
 
@@ -44,9 +57,20 @@ export const useSandboxDraftStore = create<SandboxDraftStoreState>()(
           return {
             targets: {
               ...state.targets,
-              [draftId]: { ownerEnvironmentId, accountId, sandboxId: SandboxId.make(randomUUID()) },
+              [draftId]: {
+                ...current,
+                ownerEnvironmentId,
+                accountId,
+                sandboxId: SandboxId.make(randomUUID()),
+              },
             },
           };
+        }),
+      setSource: (draftId, source) =>
+        set((state) => {
+          const current = state.targets[draftId];
+          if (current === undefined) return state;
+          return { targets: { ...state.targets, [draftId]: { ...current, ...source } } };
         }),
       clear: (draftId) =>
         set((state) => {

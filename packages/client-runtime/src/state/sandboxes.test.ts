@@ -17,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import { AsyncResult } from "effect/reactivity";
 
 import {
+  parseSandboxBase,
   pendingSandboxThreads,
   sandboxAccountChoices,
   sandboxCommandFailure,
@@ -25,6 +26,7 @@ import {
   sandboxLaunchPanel,
   sandboxLaunchStageIndex,
   sandboxPresence,
+  sandboxRemoteUrlFromInput,
   sandboxWakeStatus,
   sessionWorkGrant,
   type WorkGrant,
@@ -305,6 +307,34 @@ describe("sandboxAccountChoices", () => {
     expect(sandboxAccountChoices(OWNER, config(undefined))).toEqual([]);
     expect(sandboxAccountChoices(OWNER, config(false))).toEqual([]);
     expect(sandboxAccountChoices(OWNER, null)).toEqual([]);
+  });
+});
+
+describe("sandboxRemoteUrlFromInput", () => {
+  it.each([
+    ["GitHub shorthand", "octocat/Hello-World"],
+    ["an SSH URL", "git@github.com:octocat/Hello-World.git"],
+    ["an HTTPS URL", "https://github.com/octocat/Hello-World.git"],
+  ])("clones %s over HTTPS", (_, input) => {
+    expect(sandboxRemoteUrlFromInput(` ${input} `)).toBe(REMOTE);
+  });
+
+  it("has nothing to clone for a local path", () => {
+    expect(sandboxRemoteUrlFromInput("~/code/hello-world")).toBeNull();
+  });
+});
+
+describe("parseSandboxBase", () => {
+  it("starts from the default branch when no branch is typed", () => {
+    expect(parseSandboxBase("  ")).toEqual({ _tag: "default" });
+  });
+
+  it("starts from a typed branch", () => {
+    expect(parseSandboxBase(" feature/login ")).toEqual({ _tag: "branch", name: "feature/login" });
+  });
+
+  it.each(["two words", "main~1", "feature..x", "-main"])("refuses %s", (input) => {
+    expect(parseSandboxBase(input)).toBeNull();
   });
 });
 

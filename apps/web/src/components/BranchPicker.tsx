@@ -41,6 +41,7 @@ export function BranchPicker({
   isFetchingNextPage,
   onLoadNext,
   statusText,
+  searchPlaceholder = "Search refs...",
   originControl,
   popupProps,
   renderItem,
@@ -60,6 +61,7 @@ export function BranchPicker({
   isFetchingNextPage: boolean;
   onLoadNext: () => void;
   statusText: string | null;
+  searchPlaceholder?: string;
   originControl?: { checked: boolean; onCheckedChange: (checked: boolean) => void } | undefined;
   popupProps: Omit<ComponentProps<typeof ComboboxPopup>, "children">;
   renderItem: (value: string, index: number) => ReactNode;
@@ -171,7 +173,7 @@ export function BranchPicker({
       {children}
       <ComboboxPopup {...popupProps}>
         <ComboboxSearchInput
-          placeholder="Search refs..."
+          placeholder={searchPlaceholder}
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {

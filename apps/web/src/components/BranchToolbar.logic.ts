@@ -1,14 +1,22 @@
 import type {
   EnvironmentId,
   EnvironmentMachineKind,
+  RepositoryIdentity,
   SandboxAccountId,
+  SandboxBranchName,
+  SandboxSource,
   VcsRef,
   ProjectId,
   WorktreeSubmodules,
 } from "@t3tools/contracts";
-import { sandboxAccountChoices, sandboxLaunchLabel } from "@t3tools/client-runtime/state/sandboxes";
+import {
+  parseSandboxBase,
+  sandboxAccountChoices,
+  sandboxLaunchLabel,
+} from "@t3tools/client-runtime/state/sandboxes";
 import * as Schema from "effect/Schema";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
+import { sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { toSortableTimestamp } from "../lib/threadSort";
 export {
   dedupeRemoteBranchesWithLocalMatches,
@@ -85,6 +93,36 @@ export function resolveSandboxDraftSend(
       candidate.accountId === target.accountId,
   );
   return choice === undefined ? { _tag: "Unavailable" } : { _tag: "Sandbox", choice };
+}
+
+/**
+ * What a sandbox draft clones: the repository it names, else its project's
+ * remote, from the base it picked. Null when neither names a repository.
+ */
+export function resolveSandboxDraftSource(
+  target: Partial<SandboxSource>,
+  projectIdentity: RepositoryIdentity | null,
+): SandboxSource | null {
+  const remoteUrl = target.remoteUrl ?? sandboxSourceForProject(projectIdentity)?.remoteUrl;
+  return remoteUrl === undefined ? null : { remoteUrl, base: target.base ?? { _tag: "default" } };
+}
+
+/**
+ * Branches a project's checkout knows on the remote its sandbox clones,
+ * offered as bases by name. The sandbox fetches the branch itself, so
+ * nothing about the local checkout travels.
+ */
+export function sandboxBaseSuggestions(
+  refs: ReadonlyArray<VcsRef>,
+  identity: RepositoryIdentity,
+): SandboxBranchName[] {
+  // The remote `sandboxSourceForProject` clones.
+  const remoteName = identity.origin === undefined ? identity.locator.remoteName : "origin";
+  return refs.flatMap((ref) => {
+    if (!ref.isRemote || ref.remoteName !== remoteName) return [];
+    const base = parseSandboxBase(ref.name.slice(remoteName.length + 1));
+    return base?._tag === "branch" ? [base.name] : [];
+  });
 }
 
 /** "Add to another machine" stays muted until hovered: easy to find, quieter than the machines. */

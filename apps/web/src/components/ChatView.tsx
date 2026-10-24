@@ -289,13 +289,14 @@ import {
   deriveSandboxRunChoices,
   resolveEffectiveEnvMode,
   resolveSandboxDraftSend,
+  resolveSandboxDraftSource,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import { useSandboxLaunch } from "../hooks/useSandboxLaunch";
 import { useSandboxDraftStore, useSandboxDraftTarget } from "../sandboxDraftStore";
-import { readCanSendWork, sandboxes } from "../state/sandboxes";
+import { sandboxes } from "../state/sandboxes";
 import { useHeldSandboxWork } from "./chat/useHeldSandboxWork";
 import {
   getProviderStatusBannerKey,
@@ -1175,9 +1176,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
-  // A new sandbox clones the project, so only a draft in a real project offers one.
+  // A draft whose project has no remote names the repository its sandbox clones.
   const sandboxRunChoices =
-    isLocalDraftThread && activeProject !== null && !activeProjectIsScratch
+    isLocalDraftThread && activeProject !== null
       ? deriveSandboxRunChoices(
           environments.filter((environment) => environment.connection.phase === "connected"),
         )
@@ -2932,6 +2933,11 @@ export default function ChatView(props: ChatViewProps) {
     if (!sendCtx?.providerAvailable) return;
     const message = promptRef.current.trim();
     if (message.length === 0) return;
+    const source = resolveSandboxDraftSource(target, activeProject?.repositoryIdentity ?? null);
+    if (source === null) {
+      branchToolbarRef.current?.openSandboxRepository();
+      return;
+    }
     sendInFlightRef.current = true;
     const error = await launchFromDraft({
       draftId: sandboxDraftId,
@@ -2944,7 +2950,7 @@ export default function ChatView(props: ChatViewProps) {
         sendCtx.previewAnnotations.length +
         sendCtx.reviewComments.length +
         sendCtx.threadContexts.length,
-      repositoryIdentity: activeProject?.repositoryIdentity ?? null,
+      source,
       driver: sendCtx.selectedProvider,
       model: sendCtx.selectedModel,
       runtimeMode,
