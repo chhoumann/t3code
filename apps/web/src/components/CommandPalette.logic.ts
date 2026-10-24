@@ -23,11 +23,14 @@ import {
   type EnvironmentMachineKind,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type SandboxRemoteUrl,
   type SourceControlDiscoveryResult,
   type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
+import { parseSandboxBase } from "@t3tools/client-runtime/state/sandboxes";
+import type { SandboxRunChoice } from "./BranchToolbar.logic";
 import { type ReactNode } from "react";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
@@ -732,6 +735,8 @@ export type AddProjectCloneFlow =
       readonly step: "repository";
       readonly environmentId: EnvironmentId;
       readonly source: AddProjectRemoteSource;
+      /** Opens a new sandbox's draft for the repository instead of cloning it here. */
+      readonly sandbox?: SandboxRunChoice;
     }
   | {
       readonly step: "confirm";
@@ -740,11 +745,29 @@ export type AddProjectCloneFlow =
       readonly repositoryInput: string;
       readonly repository: SourceControlRepositoryInfo | null;
       readonly remoteUrl: string;
+    }
+  | {
+      readonly step: "base";
+      readonly environmentId: EnvironmentId;
+      readonly source: AddProjectRemoteSource;
+      readonly sandbox: SandboxRunChoice;
+      readonly repositoryTitle: string;
+      readonly remoteUrl: SandboxRemoteUrl;
     };
+
+/** What Enter does with the typed base of a sandbox, or why it cannot. */
+export function sandboxBaseStepMessage(query: string): string {
+  const base = parseSandboxBase(query);
+  if (base === null) return `"${query.trim()}" is not a valid branch name.`;
+  return base._tag === "default"
+    ? "Press Enter to start from the default branch."
+    : `Press Enter to start from ${base.name}.`;
+}
 
 export function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string | null {
   if (!flow) return null;
   if (flow.step === "confirm") return null;
+  if (flow.step === "base") return "Branch to start from, or empty for the default branch";
   if (flow.source === "url") {
     return "Enter Git clone URL";
   }

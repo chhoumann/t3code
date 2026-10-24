@@ -10,6 +10,7 @@ import {
   reduceCommandPaletteUiState,
   createCommandPaletteSearchState,
   reduceCommandPaletteSearchState,
+  sandboxBaseStepMessage,
   type CommandPaletteUiState,
 } from "./CommandPalette.logic";
 
@@ -812,5 +813,19 @@ describe("returning from file and content search", () => {
     expect(closed).toEqual({ open: false, mode: "files", openIntent: null });
     expect(reduceCommandPaletteUiState(closed, { _tag: "BackToCommand" })).toEqual(closed);
     expect(reduceCommandPaletteUiState(closed, { _tag: "SetOpen", open: true })).toEqual(root);
+  });
+});
+
+describe("sandboxBaseStepMessage", () => {
+  it("starts from the default branch until a branch is typed", () => {
+    expect(sandboxBaseStepMessage("")).toMatch(/default branch/);
+  });
+
+  it("names the typed branch it will start from", () => {
+    expect(sandboxBaseStepMessage(" release/2.0 ")).toMatch(/release\/2\.0/);
+  });
+
+  it("says a typed name cannot be a branch", () => {
+    expect(sandboxBaseStepMessage("main~1")).toMatch(/not a valid branch name/);
   });
 });
