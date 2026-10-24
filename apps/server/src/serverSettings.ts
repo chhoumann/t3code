@@ -173,15 +173,16 @@ function ensureProviderInstanceMutationAllowed(
   return Effect.void;
 }
 
-/** The sandbox accounts and the project defaults kept for each of them. */
+/** The sandbox settings only their services write: accounts, their project defaults, and the GitHub App. */
 export type SandboxAccountSettings = Pick<
   ServerSettings,
-  "sandboxAccounts" | "sandboxProjectDefaults"
+  "sandboxAccounts" | "sandboxProjectDefaults" | "sandboxGitHubApp"
 >;
 
 const sandboxAccountSettingsOf = (settings: ServerSettings): SandboxAccountSettings => ({
   sandboxAccounts: settings.sandboxAccounts,
   sandboxProjectDefaults: settings.sandboxProjectDefaults,
+  sandboxGitHubApp: settings.sandboxGitHubApp,
 });
 
 export class ServerSettingsService extends Context.Service<
@@ -203,9 +204,10 @@ export class ServerSettingsService extends Context.Service<
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     /**
-     * Replace the sandbox accounts, which the settings patch cannot change,
-     * along with the project defaults kept for them. `update` runs while
-     * settings writes are paused, so it sees the values it replaces.
+     * Replace the sandbox settings the settings patch cannot change: the
+     * accounts, the project defaults kept for them, and the GitHub App.
+     * `update` runs while settings writes are paused, so it sees the values
+     * it replaces.
      */
     readonly updateSandboxAccounts: <E, R>(
       update: (current: SandboxAccountSettings) => Effect.Effect<SandboxAccountSettings, E, R>,

@@ -208,6 +208,81 @@ export type SandboxAccountSaveInput = typeof SandboxAccountSaveInput.Type;
 export const SandboxAccountRemoveInput = Schema.Struct({ id: SandboxAccountId });
 export type SandboxAccountRemoveInput = typeof SandboxAccountRemoveInput.Type;
 
+/** The GitHub user who authorized the owner's App, as `GET /user` reports them. */
+export const SandboxGitHubUser = Schema.Struct({
+  login: TrimmedNonEmptyString,
+  name: Schema.NullOr(Schema.String),
+  email: Schema.NullOr(Schema.String),
+});
+export type SandboxGitHubUser = typeof SandboxGitHubUser.Type;
+
+/**
+ * The owner's GitHub App in its server settings. The App's client secret and
+ * the App user's tokens live only in the owner's secret store, so this is safe
+ * to show any client.
+ */
+export const SandboxGitHubAppConfig = Schema.Struct({
+  appId: Schema.Int,
+  slug: TrimmedNonEmptyString,
+  clientId: TrimmedNonEmptyString,
+  /** Where GitHub may send the browser after authorizing; fixed when the App was created. */
+  callbackUrls: Schema.Array(TrimmedNonEmptyString),
+  connection: Schema.Union([
+    Schema.TaggedStruct("disconnected", {}),
+    Schema.TaggedStruct("connected", { user: SandboxGitHubUser }),
+    /** The refresh chain broke; nothing refreshes until the user authorizes again. */
+    Schema.TaggedStruct("reauthorize", { user: SandboxGitHubUser }),
+  ]),
+});
+export type SandboxGitHubAppConfig = typeof SandboxGitHubAppConfig.Type;
+
+/**
+ * The client route GitHub sends the browser to after creating, installing, or
+ * authorizing the App. The route relays the query to the owner it names.
+ */
+export const sandboxGitHubCallbackPath = (environmentId: EnvironmentId): string =>
+  `/settings/sandboxes/github/callback/${environmentId}`;
+
+export const SandboxGitHubBeginInput = Schema.Struct({
+  /** `register` creates the App, then installs it; `authorize` reconnects an existing App. */
+  step: Schema.Literals(["register", "authorize"]),
+  /** This client's `sandboxGitHubCallbackPath` as an absolute URL. */
+  callbackUrl: TrimmedNonEmptyString,
+});
+export type SandboxGitHubBeginInput = typeof SandboxGitHubBeginInput.Type;
+
+export const SandboxGitHubFlowStart = Schema.Union([
+  /** POST `manifest` to `action` from the browser; GitHub creates the App and returns to the callback. */
+  Schema.TaggedStruct("manifest", {
+    state: TrimmedNonEmptyString,
+    action: TrimmedNonEmptyString,
+    manifest: Schema.String,
+  }),
+  /** Open `url`; GitHub asks the user to authorize and returns to the callback. */
+  Schema.TaggedStruct("authorize", { state: TrimmedNonEmptyString, url: TrimmedNonEmptyString }),
+]);
+export type SandboxGitHubFlowStart = typeof SandboxGitHubFlowStart.Type;
+
+/** What the callback route relays. The state is single-use and expires. */
+export const SandboxGitHubCompleteInput = Schema.Struct({
+  state: TrimmedNonEmptyString,
+  code: TrimmedNonEmptyString,
+});
+export type SandboxGitHubCompleteInput = typeof SandboxGitHubCompleteInput.Type;
+
+export const SandboxGitHubFlowNext = Schema.Union([
+  /** Open `url` to install the App on repositories; GitHub authorizes the user on the way back. */
+  Schema.TaggedStruct("install", { url: TrimmedNonEmptyString }),
+  Schema.TaggedStruct("connected", {}),
+]);
+export type SandboxGitHubFlowNext = typeof SandboxGitHubFlowNext.Type;
+
+export const SandboxGitHubDisconnectInput = Schema.Struct({
+  /** Also forget the App registration, so the next connect creates a new App. */
+  forgetApp: Schema.Boolean,
+});
+export type SandboxGitHubDisconnectInput = typeof SandboxGitHubDisconnectInput.Type;
+
 export const SandboxUpdateInput = Schema.Struct({ id: SandboxId, desired: SandboxDesired });
 export type SandboxUpdateInput = typeof SandboxUpdateInput.Type;
 
@@ -233,6 +308,8 @@ export const SandboxErrorCode = Schema.Literals([
   /** The account's API key lacks provider actions sandboxes need; see `missingActions`. */
   "key-missing-actions",
   "provider",
+  /** GitHub refused or could not be reached; the message says which. */
+  "github",
   "unavailable",
 ]);
 export type SandboxErrorCode = typeof SandboxErrorCode.Type;

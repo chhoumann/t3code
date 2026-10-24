@@ -309,6 +309,7 @@ const make = Effect.gen(function* () {
             removed = config;
             const { [accountId]: _removed, ...sandboxAccounts } = current.sandboxAccounts;
             return {
+              ...current,
               sandboxAccounts,
               sandboxProjectDefaults: Object.fromEntries(
                 Object.entries(current.sandboxProjectDefaults).filter(

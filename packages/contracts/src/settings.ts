@@ -20,7 +20,12 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
-import { SandboxAccountConfig, SandboxAccountId, SandboxProjectDefaults } from "./sandbox.ts";
+import {
+  SandboxAccountConfig,
+  SandboxAccountId,
+  SandboxGitHubAppConfig,
+  SandboxProjectDefaults,
+} from "./sandbox.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1318,6 +1323,14 @@ export const ServerSettings = Schema.Struct({
   /** Repository/account bindings, keyed by sandboxProjectKey on the owning environment. */
   sandboxProjectDefaults: Schema.Record(Schema.String, SandboxProjectDefaults).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /**
+   * The GitHub App this environment hands its sandboxes user tokens from.
+   * Written only by the App connection as it registers, authorizes, and
+   * disconnects; the settings patch cannot change it.
+   */
+  sandboxGitHubApp: Schema.NullOr(SandboxGitHubAppConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),

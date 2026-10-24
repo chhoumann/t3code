@@ -1,6 +1,7 @@
 import { SandboxError, type SandboxErrorCode } from "@t3tools/contracts";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import type * as GitHubAppConnection from "./GitHubAppConnection.ts";
 import type * as SandboxAccounts from "./SandboxAccounts.ts";
 import type { SandboxGuestError } from "./SandboxGuest.ts";
 import type { SandboxProviderError } from "./SandboxProvider.ts";
@@ -17,6 +18,7 @@ export type SandboxFailure =
   | SandboxAccounts.SandboxAccountKeyScopeError
   | SandboxAccounts.SandboxAccountInUseError
   | SandboxAccounts.SandboxAccountStoreError
+  | GitHubAppConnection.GitHubAppConnectionError
   | SandboxProviderError
   | SandboxGuestError
   | ServerSecretStore.SecretStoreError;
@@ -40,6 +42,8 @@ const codeOf = (error: SandboxFailure): SandboxErrorCode => {
       return "account-in-use";
     case "SandboxProviderError":
       return "provider";
+    case "GitHubAppConnectionError":
+      return "github";
     case "SandboxGuestError":
     case "SandboxPersistenceError":
     case "SandboxAccountStoreError":

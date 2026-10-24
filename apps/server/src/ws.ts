@@ -126,6 +126,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
+import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
 import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
 import { toSandboxError } from "./sandbox/sandboxErrors.ts";
 import * as SandboxService from "./sandbox/SandboxService.ts";
@@ -1233,6 +1234,7 @@ const layerWsSandboxRpc = (currentSession: EnvironmentAuth.AuthenticatedSession)
     Effect.gen(function* () {
       const sandboxes = yield* SandboxService.SandboxService;
       const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
+      const githubApp = yield* GitHubAppConnection.GitHubAppConnectionSetup;
       return ServerWsSandboxRpcGroup.of({
         [WS_METHODS.sandboxesSubscribe]: (_input) =>
           sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
@@ -1253,6 +1255,12 @@ const layerWsSandboxRpc = (currentSession: EnvironmentAuth.AuthenticatedSession)
           sandboxAccounts.save(input).pipe(Effect.mapError(toSandboxError)),
         [WS_METHODS.sandboxesRemoveAccount]: (input) =>
           sandboxAccounts.remove(input.id).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubBegin]: (input) =>
+          githubApp.begin(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubComplete]: (input) =>
+          githubApp.complete(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubDisconnect]: (input) =>
+          githubApp.disconnect(input).pipe(Effect.mapError(toSandboxError)),
       });
     }),
   );

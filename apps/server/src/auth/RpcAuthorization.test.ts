@@ -345,6 +345,9 @@ describe("sandbox RPC authorization", () => {
     WS_METHODS.sandboxesConnect,
     WS_METHODS.sandboxesSaveAccount,
     WS_METHODS.sandboxesRemoveAccount,
+    WS_METHODS.sandboxesGitHubBegin,
+    WS_METHODS.sandboxesGitHubComplete,
+    WS_METHODS.sandboxesGitHubDisconnect,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -414,6 +417,21 @@ describe("sandbox RPC authorization", () => {
               record("saveAccount").pipe(Effect.as({ ...account, env: [] })),
             ),
             group.toLayerHandler(WS_METHODS.sandboxesRemoveAccount, () => record("removeAccount")),
+            group.toLayerHandler(WS_METHODS.sandboxesGitHubBegin, () =>
+              record("githubBegin").pipe(
+                Effect.as({
+                  _tag: "authorize" as const,
+                  state: "state",
+                  url: "https://github.com",
+                }),
+              ),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesGitHubComplete, () =>
+              record("githubComplete").pipe(Effect.as({ _tag: "connected" as const })),
+            ),
+            group.toLayerHandler(WS_METHODS.sandboxesGitHubDisconnect, () =>
+              record("githubDisconnect"),
+            ),
             RpcAuthorization.layer(scopes),
           ),
         ),
@@ -440,6 +458,15 @@ describe("sandbox RPC authorization", () => {
           env: [],
         }),
         removeAccount: client[WS_METHODS.sandboxesRemoveAccount]({ id: accountId }),
+        githubBegin: client[WS_METHODS.sandboxesGitHubBegin]({
+          step: "authorize",
+          callbackUrl: "http://localhost:3000/settings/sandboxes/github/callback/env",
+        }),
+        githubComplete: client[WS_METHODS.sandboxesGitHubComplete]({
+          state: "state",
+          code: "code",
+        }),
+        githubDisconnect: client[WS_METHODS.sandboxesGitHubDisconnect]({ forgetApp: false }),
       };
       return { calls, handled };
     });
@@ -455,7 +482,13 @@ describe("sandbox RPC authorization", () => {
           requiredPermission: AuthOrchestrationOperateScope,
         });
       }
-      for (const call of [calls.saveAccount, calls.removeAccount]) {
+      for (const call of [
+        calls.saveAccount,
+        calls.removeAccount,
+        calls.githubBegin,
+        calls.githubComplete,
+        calls.githubDisconnect,
+      ]) {
         expect(yield* Effect.flip(call)).toMatchObject({
           requiredPermission: AuthSettingsWriteScope,
         });
@@ -477,10 +510,23 @@ describe("sandbox RPC authorization", () => {
       });
       expect(handled).toEqual(["launch", "update"]);
 
+      expect(yield* Effect.flip(calls.githubBegin)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+
       const settings = yield* connect([AuthSettingsWriteScope]);
       yield* settings.calls.saveAccount;
       yield* settings.calls.removeAccount;
-      expect(settings.handled).toEqual(["saveAccount", "removeAccount"]);
+      yield* settings.calls.githubBegin;
+      yield* settings.calls.githubComplete;
+      yield* settings.calls.githubDisconnect;
+      expect(settings.handled).toEqual([
+        "saveAccount",
+        "removeAccount",
+        "githubBegin",
+        "githubComplete",
+        "githubDisconnect",
+      ]);
     }).pipe(Effect.scoped),
   );
 });

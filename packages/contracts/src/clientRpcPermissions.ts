@@ -55,6 +55,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.sandboxesUpdate]: AuthOrchestrationOperateScope,
   [WS_METHODS.sandboxesSaveAccount]: AuthSettingsWriteScope,
   [WS_METHODS.sandboxesRemoveAccount]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesGitHubBegin]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesGitHubComplete]: AuthSettingsWriteScope,
+  [WS_METHODS.sandboxesGitHubDisconnect]: AuthSettingsWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

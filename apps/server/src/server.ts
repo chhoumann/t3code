@@ -196,7 +196,7 @@ import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale"
 import * as ServerActivation from "./serverActivation.ts";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as BoatSandboxProvider from "./sandbox/BoatSandboxProvider.ts";
-import { GitHubAppConnection } from "./sandbox/GitHubAppConnection.ts";
+import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
 import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
 import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
 import * as SandboxGuest from "./sandbox/SandboxGuest.ts";
@@ -568,18 +568,12 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
-// No App user is connected until the GitHub App connection service lands; its layer replaces this.
-const layerGitHubAppConnectionNone = Layer.succeed(
-  GitHubAppConnection,
-  GitHubAppConnection.of({ current: () => Effect.succeed(null), generations: Stream.empty }),
-);
-
 // Sandbox machines this environment owns. Building the service plans every
 // unsettled sandbox again, so a restart picks up each one where it stopped.
 const layerSandboxes = SandboxService.layer.pipe(
   Layer.provide(SandboxService.layerT3BuildFromConfig),
-  Layer.provide(layerGitHubAppConnectionNone),
   Layer.provideMerge(SandboxAccounts.layer),
+  Layer.provideMerge(GitHubAppConnection.layer),
   Layer.provide(SandboxGuest.layer),
   Layer.provide(BoatSandboxProvider.layer),
   Layer.provide(NodeSocket.layerWebSocketConstructor),

@@ -29,6 +29,11 @@ import {
   SandboxConnectInput,
   SandboxConnectResult,
   SandboxError,
+  SandboxGitHubBeginInput,
+  SandboxGitHubCompleteInput,
+  SandboxGitHubDisconnectInput,
+  SandboxGitHubFlowNext,
+  SandboxGitHubFlowStart,
   SandboxLaunchInput,
   SandboxManagedByOwnerError,
   SandboxUpdateInput,
@@ -544,6 +549,9 @@ export const WS_METHODS = {
   sandboxesConnect: "sandboxes.connect",
   sandboxesSaveAccount: "sandboxes.saveAccount",
   sandboxesRemoveAccount: "sandboxes.removeAccount",
+  sandboxesGitHubBegin: "sandboxes.github.begin",
+  sandboxesGitHubComplete: "sandboxes.github.complete",
+  sandboxesGitHubDisconnect: "sandboxes.github.disconnect",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -1915,6 +1923,26 @@ const WsSandboxesRemoveAccountRpc = Rpc.make(WS_METHODS.sandboxesRemoveAccount, 
   error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
 });
 
+/** Starts a GitHub App flow the client finishes in a browser; the callback route relays its result. */
+const WsSandboxesGitHubBeginRpc = Rpc.make(WS_METHODS.sandboxesGitHubBegin, {
+  payload: SandboxGitHubBeginInput,
+  success: SandboxGitHubFlowStart,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Relays GitHub's callback. Refused for a state it did not issue, used already, or expired. */
+const WsSandboxesGitHubCompleteRpc = Rpc.make(WS_METHODS.sandboxesGitHubComplete, {
+  payload: SandboxGitHubCompleteInput,
+  success: SandboxGitHubFlowNext,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Revokes the App user's authorization on GitHub and forgets their tokens. */
+const WsSandboxesGitHubDisconnectRpc = Rpc.make(WS_METHODS.sandboxesGitHubDisconnect, {
+  payload: SandboxGitHubDisconnectInput,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
 const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   payload: SecretRequestAnswerInput,
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
@@ -1973,6 +2001,9 @@ export const WsSandboxRpcGroup = RpcGroup.make(
   WsSandboxesConnectRpc,
   WsSandboxesSaveAccountRpc,
   WsSandboxesRemoveAccountRpc,
+  WsSandboxesGitHubBeginRpc,
+  WsSandboxesGitHubCompleteRpc,
+  WsSandboxesGitHubDisconnectRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsCoreRpcGroup = RpcGroup.make(
