@@ -2,8 +2,8 @@ import type {
   BranchNamingOptions,
   GitRemote,
   RepositoryIdentity,
-  VcsRef,
   SourceControlProviderInfo,
+  VcsRef,
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
   VcsStatusResult,
@@ -11,7 +11,6 @@ import type {
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
-import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
 export const WORKTREE_BRANCH_PREFIX = "t3";
 const TEMP_WORKTREE_HEX_TOKEN = "[0-9a-f]{8}";
@@ -127,41 +126,32 @@ export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
 }
 
-/**
- * Azure alone addresses one repository under two names that share no part: `ssh.dev.azure.com` and
- * `v3/{org}/{project}/{repo}` over SSH, against `dev.azure.com` and `{org}/{project}/_git/{repo}`
- * everywhere a person sees it. A project cloned over SSH would otherwise be a different repository
- * to every comparison made against a pull request URL, which arrives in the web spelling.
- */
-function azureDevOpsRepositoryKey(host: string, segments: ReadonlyArray<string>): string | null {
-  if (host !== "ssh.dev.azure.com" && host !== "vs-ssh.visualstudio.com") return null;
-  const [marker, organization, project, repository] = segments;
-  if (segments.length !== 4 || marker !== "v3") return null;
-  if (!organization || !project || !repository) return null;
-  return host === "ssh.dev.azure.com"
-    ? `dev.azure.com/${organization}/${project}/_git/${repository}`
-    : `${organization}.visualstudio.com/${project}/_git/${repository}`;
-}
-
-export function normalizeGitRemoteUrl(value: string): string {
-  const normalized = value
+function lowerCaseRemote(value: string): string {
+  return value
     .trim()
     .replace(/\/+$/g, "")
     .replace(/\.git$/i, "")
     .toLowerCase();
+}
+
+/**
+ * The host and repository path a remote names, lower case and without a port, or null for a
+ * remote that names no host, such as a local path.
+ */
+export function parseGitRemoteRepository(
+  value: string,
+): { readonly host: string; readonly path: string } | null {
+  const normalized = lowerCaseRemote(value);
 
   if (/^(?:ssh|https?|git):\/\//i.test(normalized)) {
     try {
       const url = new URL(normalized);
       const repositorySegments = url.pathname.split("/").filter((segment) => segment.length > 0);
       if (url.hostname && repositorySegments.length > 1) {
-        return (
-          azureDevOpsRepositoryKey(url.hostname, repositorySegments) ??
-          `${url.hostname}/${repositorySegments.join("/")}`
-        );
+        return { host: url.hostname, path: repositorySegments.join("/") };
       }
     } catch {
-      return normalized;
+      return null;
     }
   }
 
@@ -171,11 +161,17 @@ export function normalizeGitRemoteUrl(value: string): string {
     : /^(?:[a-zA-Z0-9._-]+@)?([^@:/\\\s]+):\/?([^/\s]+(?:\/[^/\s]+)+)$/i.exec(normalized);
   const scpHost = scpStyleHostAndPath?.[1];
   const scpPath = scpStyleHostAndPath?.[2];
-  if (scpHost && scpPath) {
-    return azureDevOpsRepositoryKey(scpHost, scpPath.split("/")) ?? `${scpHost}/${scpPath}`;
-  }
+  return scpHost && scpPath ? { host: scpHost, path: scpPath } : null;
+}
 
-  return normalized;
+/**
+ * `host/path` for a remote that names a host, otherwise the remote itself, lower case. A host that
+ * spells repositories differently over SSH has its source control registry's
+ * `repositoryKeyFromRemote` rewrite this, so persisted keys come from that, not from here.
+ */
+export function normalizeGitRemoteUrl(value: string): string {
+  const repository = parseGitRemoteRepository(value);
+  return repository === null ? lowerCaseRemote(value) : `${repository.host}/${repository.path}`;
 }
 
 function parseGitConfigValue(raw: string): string {
@@ -253,20 +249,6 @@ export function parseOriginUrlFromGitConfig(configText: string): string | null {
   return originUrl ?? firstRemoteUrl;
 }
 
-export function parseGitHubRepositoryNameWithOwnerFromRemoteUrl(url: string | null): string | null {
-  const trimmed = url?.trim() ?? "";
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  const match =
-    /^(?:git@github\.com:|ssh:\/\/(?:git@)?github\.com\/|https:\/\/github\.com\/|git:\/\/github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(
-      trimmed,
-    );
-  const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
-  return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
-}
-
 function deriveLocalBranchNameCandidatesFromRemoteRef(
   branchName: string,
   remoteName?: string,
@@ -320,10 +302,13 @@ export function dedupeRemoteBranchesWithLocalMatches(
   });
 }
 
-export function detectSourceControlProviderFromGitRemoteUrl(
-  remoteUrl: string,
-): SourceControlProviderInfo | null {
-  return detectSourceControlProviderFromRemoteUrl(remoteUrl);
+/**
+ * How a source control registry reads remotes. Its `repositoryKeyFromRemote` is the persisted
+ * spelling of a repository, so helpers here that key repositories take one.
+ */
+export interface RemoteRecognizer {
+  readonly recognizeRemote: (remoteUrl: string) => SourceControlProviderInfo | null;
+  readonly repositoryKeyFromRemote: (remoteUrl: string) => string;
 }
 
 /** Each remote and its fetch URL, from `git remote -v`. */
@@ -387,16 +372,18 @@ function repositoryPathOf(canonicalKey: string, remoteUrl: string): string {
  */
 export function repositoryIdentityFromRemotes(
   remotes: Arr.NonEmptyReadonlyArray<GitRemote>,
+  recognizer: RemoteRecognizer,
 ): RepositoryIdentity {
   const primary = pickPrimaryRemote(remotes);
-  const canonicalKey = normalizeGitRemoteUrl(primary.url);
-  const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(primary.url);
+  const canonicalKey = recognizer.repositoryKeyFromRemote(primary.url);
+  const sourceControlProvider = recognizer.recognizeRemote(primary.url);
   const repositoryPath = repositoryPathOf(canonicalKey, primary.url);
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
   const originUrl = remotes.find((remote) => remote.name === "origin")?.url;
-  const originKey = originUrl === undefined ? canonicalKey : normalizeGitRemoteUrl(originUrl);
+  const originKey =
+    originUrl === undefined ? canonicalKey : recognizer.repositoryKeyFromRemote(originUrl);
   const originPath = originUrl === undefined ? "" : repositoryPathOf(originKey, originUrl);
 
   return {

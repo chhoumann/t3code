@@ -7,7 +7,7 @@ import type {
   SandboxRepository,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
-import { normalizeGitRemoteUrl, pickPrimaryRemote, repositoryIdentityFromRemotes } from "./git.ts";
+import { pickPrimaryRemote, repositoryIdentityFromRemotes, type RemoteRecognizer } from "./git.ts";
 
 /**
  * The remotes a sandbox's clone gets from a checkout: the one its branch
@@ -33,11 +33,14 @@ export function sandboxRemotes(
  * thread groups with the checkout's, and the launch reads the checkout's
  * sandbox defaults.
  */
-export function sandboxProject(repository: SandboxRepository): {
+export function sandboxProject(
+  repository: SandboxRepository,
+  recognizer: RemoteRecognizer,
+): {
   readonly title: string;
   readonly repositoryIdentity: RepositoryIdentity;
 } {
-  const repositoryIdentity = repositoryIdentityFromRemotes(repository.remotes);
+  const repositoryIdentity = repositoryIdentityFromRemotes(repository.remotes, recognizer);
   return {
     title:
       repositoryIdentity.locator.remoteUrl
@@ -50,8 +53,12 @@ export function sandboxProject(repository: SandboxRepository): {
 }
 
 /** All checkouts of a repository share a binding, separately for each cloud account. */
-export function sandboxProjectKey(accountId: SandboxAccountId, remoteUrl: string): string {
-  return JSON.stringify([accountId, normalizeGitRemoteUrl(remoteUrl)]);
+export function sandboxProjectKey(
+  accountId: SandboxAccountId,
+  remoteUrl: string,
+  recognizer: RemoteRecognizer,
+): string {
+  return JSON.stringify([accountId, recognizer.repositoryKeyFromRemote(remoteUrl)]);
 }
 
 /** Whether `key` is one of the account's `sandboxProjectKey` bindings. */

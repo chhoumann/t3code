@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -394,7 +395,11 @@ describe("SandboxService", () => {
         yield* Effect.gen(function* () {
           const settings = yield* ServerSettings.ServerSettingsService;
           // What the project's settings page writes: its repository identity's canonical key.
-          const key = sandboxProjectKey(ACCOUNT_ID, "github.com/octocat/hello-world");
+          const key = sandboxProjectKey(
+            ACCOUNT_ID,
+            "github.com/octocat/hello-world",
+            sourceControlDefinitions,
+          );
           yield* settings.updateSettings({
             sandboxProjectDefaults: {
               [key]: { template: "quickadd-dev", size: "large", stopAfterHours: 0.25 },

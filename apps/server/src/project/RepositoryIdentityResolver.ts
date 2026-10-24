@@ -14,6 +14,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { explicitBareRepositoryEnv } from "../vcs/VcsProcess.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -127,7 +128,10 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     (remote) => !isLocalRemoteUrl(remote.url),
   );
   return Arr.isReadonlyArrayNonEmpty(remotes)
-    ? { ...repositoryIdentityFromRemotes(remotes), rootPath: cacheKey.rootPath }
+    ? {
+        ...repositoryIdentityFromRemotes(remotes, sourceControlDefinitions),
+        rootPath: cacheKey.rootPath,
+      }
     : null;
 });
 

@@ -1,3 +1,5 @@
+import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -54,6 +56,7 @@ import {
 } from "@t3tools/shared/codexArtifactTemplates";
 import {
   declinePendingApprovals,
+  sendApprovalFeedback,
   type ApprovalResponder,
   type ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
@@ -72,7 +75,16 @@ import type { QueuedRunEdit } from "../../state/queued-run-edit";
 import type { FollowUpBehavior } from "../../lib/followUpBehavior";
 import type { ActiveTurnComposerAction } from "@t3tools/client-runtime/state/composer-dispatch";
 import * as Haptics from "expo-haptics";
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   AppState,
   Keyboard,
@@ -87,6 +99,7 @@ import {
   KeyboardController,
   KeyboardStickyView,
   useKeyboardState,
+  useReanimatedKeyboardAnimation,
 } from "react-native-keyboard-controller";
 import Animated, {
   Easing,
@@ -104,8 +117,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceContentWidth } from "../layout/workspace-content-width";
 import { useNativeWorkspaceColumnsSupported } from "../../native/NativeWorkspaceColumns";
 import {
+  useDeviceType,
   useDuoBottomBarInset,
   useNativeColumnLayoutMetrics,
+  useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { collectProviderUsageLimits } from "@t3tools/shared/usageLimits";
@@ -126,7 +141,12 @@ import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
-import { parentThreadIsBelow } from "../../lib/android-workspace-navigation";
+import { claimThreadOpen } from "@t3tools/client-runtime/state/thread-search";
+import {
+  finishThreadMessageJump,
+  pendingThreadMessageJump,
+  subscribeThreadMessageJump,
+} from "./threadMessageJump";
 import {
   clearThreadComposerError,
   threadComposerErrorsAtom,
@@ -160,9 +180,6 @@ import {
 } from "./pendingUserInputLayout";
 import {
   COMPOSER_COLLAPSED_CHROME,
-  COMPOSER_EXPANDED_CHROME,
-  COMPOSER_LAYOUT_TRANSITION,
-  COMPOSER_TRANSITION_DURATION_MS,
   THREAD_COMPOSER_BOTTOM_GUTTER,
   ThreadComposer,
 } from "./ThreadComposer";
@@ -173,9 +190,22 @@ import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
+import { useOpenLinkedThread } from "./useOpenLinkedThread";
 import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
 
 export interface ThreadDetailScreenProps {
+  readonly header?: React.ReactNode;
+  readonly draftMode?: {
+    readonly content: (
+      headerInset: number,
+      bottomInset: number,
+      availableHeight: number,
+    ) => React.ReactNode;
+    readonly controls: React.ReactNode;
+    readonly editorRef: React.RefObject<ComposerEditorHandle | null>;
+    readonly sendBlockedReason: string | null;
+    readonly interactionLocked: boolean;
+  };
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
   readonly canOperateThread: boolean;
@@ -247,13 +277,16 @@ export interface ThreadDetailScreenProps {
   readonly onResumeQueue: (() => Promise<void>) | null;
   readonly onSendMessage: (
     followUp?: ActiveTurnComposerAction,
-    beforeDispatch?: () => Promise<boolean>,
+    beforeDispatch?: (
+      text: string,
+      hasAttachmentsOrContext: boolean,
+    ) => Promise<boolean | "responded">,
   ) => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly canSwitchThreadProvider: boolean;
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
-  readonly onUpdateThreadInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onUpdateThreadInteractionMode?: (interactionMode: ProviderInteractionMode) => void;
   readonly onRespondToApproval: ApprovalResponder;
   readonly onSelectUserInputOption: (
     requestId: RuntimeRequestId,
@@ -387,6 +420,36 @@ function ThreadVisitWatermark(props: {
   const wakeIsLatestUpdate = selectedThreadUpdatedAt === selectedThreadWokeAt;
   const selectedThreadLastVisitedAt = thread.lastVisitedAt;
   const selectedThreadCompletedAt = thread.latestRun?.completedAt;
+  // Opening a thread is one visit that also counts toward search ranking; a
+  // palette pick already sent it with the query. The watermark effect below
+  // skips it.
+  const recordedOpenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!showContent) return;
+    if (recordedOpenRef.current === selectedThreadKey) return;
+    recordedOpenRef.current = selectedThreadKey;
+    // Recorded here even when the server cannot take opens, so recents follow it.
+    const claimed = claimThreadOpen(props.environmentId, selectedThreadId, Date.now());
+    if (!claimed || selectedThreadLastVisitedAt === undefined) return;
+    lastDispatchedVisitRef.current = `${selectedThreadKey}:${selectedThreadUpdatedAt}`;
+    lastVisitDispatchRef.current = { threadKey: selectedThreadKey, at: Date.now() };
+    void visitThread({
+      environmentId: props.environmentId,
+      input: {
+        threadId: selectedThreadId,
+        visitedAt: selectedThreadUpdatedAt,
+        opened: true,
+      },
+    });
+  }, [
+    props.environmentId,
+    selectedThreadId,
+    selectedThreadKey,
+    selectedThreadLastVisitedAt,
+    selectedThreadUpdatedAt,
+    showContent,
+    visitThread,
+  ]);
   useEffect(() => {
     if (!showContent || selectedThreadLastVisitedAt === undefined) return;
     const threadUpdatedAtMs = Date.parse(selectedThreadUpdatedAt);
@@ -440,7 +503,17 @@ function ThreadVisitWatermark(props: {
 
 export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
+  const deviceType = useDeviceType();
+  const workspace = useWorkspaceTabs();
+  const sidebarSearchActive =
+    deviceType === "duo-unfolded" &&
+    workspace?.state.tabs[workspace.state.selectedTab].searchMode === "active";
+  // Keep the last input owner through keyboard dismissal, so closing sidebar
+  // search cannot briefly lift the composer into the keyboard's closing frame.
+  const [composerOwnsKeyboard, setComposerOwnsKeyboard] = useState(false);
+  if (sidebarSearchActive && composerOwnsKeyboard) setComposerOwnsKeyboard(false);
   const navigation = useNavigation();
+  const openLinkedThread = useOpenLinkedThread();
   const { session: voiceInputSession } = useGlobalVoiceInput();
   const reportedModelSelection = useThreadReportedModelSelection(props.selectedThreadDetailRef);
   const deviceState = useEnvironmentQuery(
@@ -457,7 +530,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const browserTabs = useThreadServerBrowserTabs({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
-    enabled: props.serverConfig?.environment.capabilities.serverBrowser === true,
+    enabled:
+      !props.draftMode && props.serverConfig?.environment.capabilities.serverBrowser === true,
   });
   const openBrowserPreview = (tabId?: string) => {
     Keyboard.dismiss();
@@ -498,6 +572,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const handleOwnedInputFocusChange = (focused: boolean) => {
     ownedInputFocusedRef.current = focused;
     if (focused) {
+      if (deviceType === "duo-folded" || deviceType === "duo-unfolded")
+        setComposerOwnsKeyboard(true);
       setKeyboardStateSuspect(false);
     }
   };
@@ -505,6 +581,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const navigationHeaderHeight = useContext(HeaderHeightContext) ?? insets.top + 44;
   const [screenMetrics, setScreenMetrics] = useState<NativeLayoutMetrics | null>(null);
   const columnMetrics = useNativeColumnLayoutMetrics();
+  const windowMetrics = useNativeLayoutMetrics();
   const nativeMetrics = usesNativeWorkspaceColumns ? columnMetrics : screenMetrics;
   const controlInsets = deriveBottomControlInsets(nativeMetrics);
   const agentLabel = `${props.selectedThread.modelSelection.instanceId} agent`;
@@ -517,38 +594,46 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const queuedCount = useThreadQueuedCount(props.selectedThreadDetailRef);
   const turnSubagents = useThreadTurnSubagents(props.selectedThreadDetailRef);
   const agentsSegment = resolveSubagentPillSegment(turnSubagents);
-  const composerEditorRef = useRef<ComposerEditorHandle>(null);
+  const defaultComposerEditorRef = useRef<ComposerEditorHandle>(null);
+  const composerEditorRef = props.draftMode?.editorRef ?? defaultComposerEditorRef;
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
   const editingRunId = props.queuedRunEdit?.runId ?? null;
   useEffect(() => {
     if (editingRunId === null) return;
     const frame = requestAnimationFrame(() => composerEditorRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [editingRunId]);
+  }, [editingRunId, composerEditorRef]);
   const composerOverlayRef = useRef<ViewInstance>(null);
   const listRef = useRef<LegendListRef>(null);
   const feedTouchStartRef = useRef<{ pageX: number; pageY: number } | null>(null);
   const selectedThreadKeyRef = useRef(selectedThreadKey);
   const lastScrolledSubmittedMessageIdRef = useRef<MessageId | null>(null);
-  const [composerExpanded, setComposerExpanded] = useState(false);
+  const [composerHeight, setComposerHeight] = useState<number | null>(null);
   const [anchorMessageId, setAnchorMessageId] = useState<MessageId | null>(null);
   const [submittedMessageId, setSubmittedMessageId] = useState<MessageId | null>(null);
   const [endFollowEnabled, setEndFollowEnabled] = useState(true);
-  // Android Back hides the keyboard without blurring. Keep its safe-area padding
-  // fixed through the animation and cancel it with matching composer/list offsets.
+  // Keep the bottom padding fixed while the keyboard animates. Changing it at
+  // keyboardDidHide makes the composer land low, then jump back above the safe area.
   const bottomBarInset = useDuoBottomBarInset();
+  const hasSidebarTabBar = useSidebarWorkspaceTabs() === "picker";
+  // A pushed screen temporarily inherits the outgoing tab bar's safe area.
+  // Use the window edge so hiding that bar cannot move the composer mid-push.
+  const bottomSafeArea =
+    Platform.OS === "ios" ? (windowMetrics?.safeArea.bottom ?? insets.bottom) : insets.bottom;
   // The pill already adds its own gutter; iPad and Duo align its edge with the native bar.
   const alignedBottomInset =
     bottomBarInset ??
-    (Platform.OS === "ios" && Platform.isPad ? Math.max(insets.bottom, 12) : undefined);
-  // A hardware keyboard can focus the editor without occupying any screen height.
-  const composerBottomInset =
-    Platform.OS === "ios" && (composerExpanded || liveKeyboardHeight > 0)
-      ? 0
-      : alignedBottomInset !== undefined
-        ? Math.max(0, alignedBottomInset - THREAD_COMPOSER_BOTTOM_GUTTER)
-        : Math.max(insets.bottom, 12);
-  const composerKeyboardOffset = Platform.OS === "android" ? composerBottomInset : 0;
+    (Platform.OS === "ios" && Platform.isPad
+      ? Math.max(bottomSafeArea, 12) - (hasSidebarTabBar ? 5 : 0)
+      : undefined);
+  // The Duo's floating sidebar pill ends three points below the composer's usual gutter.
+  const composerBottomInset = Math.max(
+    0,
+    (alignedBottomInset !== undefined
+      ? alignedBottomInset - THREAD_COMPOSER_BOTTOM_GUTTER
+      : Math.max(bottomSafeArea, 12)) - (hasSidebarTabBar ? 3 : 0),
+  );
+  const composerKeyboardOffset = composerBottomInset;
   const contentPresentationKind = props.contentPresentation.kind;
   const realThreadSyncLabel = (() => {
     switch (props.threadSyncStatus) {
@@ -664,7 +749,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       environmentLabel: props.environmentLabel,
       onReconnect: props.onReconnectEnvironment,
     });
-    if (connectionStatus !== null) {
+    if (connectionStatus !== null && !props.draftMode) {
       return connectionStatus;
     }
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
@@ -779,6 +864,39 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       (entry) => "acknowledged" in entry && entry.acknowledged === true,
     );
   const selectedThreadFeed = props.selectedThreadFeed;
+  // A palette message result opens the thread at that message: earlier
+  // history loads until the message is in the feed, which then scrolls to it.
+  const jumpMessageId = useSyncExternalStore(subscribeThreadMessageJump, () =>
+    pendingThreadMessageJump(selectedThreadKey),
+  );
+  const jumpMessageLoaded =
+    jumpMessageId !== null &&
+    selectedThreadFeed.some((entry) => entry.type === "message" && entry.id === jumpMessageId);
+  // A jump this screen never reached lets go when the thread closes.
+  useEffect(() => () => finishThreadMessageJump(selectedThreadKey), [selectedThreadKey]);
+  const historyForJump = props.historyControls;
+  // History down to the message in one request; another page if it is not
+  // there yet.
+  const loadEarlierForJump = useEffectEvent(() => {
+    if (jumpMessageId !== null) historyForJump?.onLoadThrough(jumpMessageId);
+  });
+  useEffect(() => {
+    if (jumpMessageId === null || jumpMessageLoaded || contentPresentationKind !== "ready") return;
+    if (historyForJump?.loading) return;
+    if (!historyForJump?.hasMoreHistory || historyForJump.error !== null) {
+      finishThreadMessageJump(selectedThreadKey);
+      return;
+    }
+    loadEarlierForJump();
+  }, [
+    contentPresentationKind,
+    historyForJump?.error,
+    historyForJump?.hasMoreHistory,
+    historyForJump?.loading,
+    jumpMessageId,
+    jumpMessageLoaded,
+    selectedThreadKey,
+  ]);
   const hasCompactableConversation =
     selectedThreadFeed.some(
       (entry) =>
@@ -789,8 +907,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     ) ||
     (props.historyControls?.hasMoreHistory === true &&
       props.selectedThread.latestUserMessageAt !== null);
-  const composerChrome = composerExpanded ? COMPOSER_EXPANDED_CHROME : COMPOSER_COLLAPSED_CHROME;
-  const composerOverlapHeight = composerChrome + composerBottomInset;
+  const composerOverlapHeight =
+    composerHeight ?? COMPOSER_COLLAPSED_CHROME + (hasSidebarTabBar ? 14 : 0) + composerBottomInset;
   const [collapsedUserInputRequestId, setCollapsedUserInputRequestId] =
     useState<RuntimeRequestId | null>(null);
   const activeUserInputRequestId = props.activePendingUserInput?.requestId ?? null;
@@ -840,10 +958,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     );
   const userInputCollapsed =
     activeUserInputRequestId !== null && collapsedUserInputRequestId === activeUserInputRequestId;
-  // The card's height RESERVES keyboard space at all times instead of tracking the keyboard:
-  // transforms (the sticky translation) apply same-frame on the UI thread while layout props lag
-  // a Yoga pass behind, so any height that follows the keyboard flashes the card over the nav
-  // header on the way up.
+  // A height React sets from keyboard state lags the sticky translation by a Yoga pass and
+  // flashes over the nav header on the way up, so the usage panel reserves the keyboard instead.
   const [lastKnownKeyboardHeight, setLastKnownKeyboardHeight] = useState(0);
   useEffect(() => {
     if (liveKeyboardHeight > 0 && liveKeyboardHeight !== lastKnownKeyboardHeight) {
@@ -852,12 +968,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   }, [lastKnownKeyboardHeight, liveKeyboardHeight]);
   const reservedKeyboardHeight =
     lastKnownKeyboardHeight > 0 ? lastKnownKeyboardHeight : ESTIMATED_KEYBOARD_HEIGHT;
-  const pendingUserInputMaxHeight = derivePendingUserInputMaxHeight({
-    windowHeight,
-    keyboardHeight: reservedKeyboardHeight,
-    navigationHeaderHeight,
-    composerOverlapHeight: composerBottomInset,
-  });
+  // Waiting for a visibility render misses the first keyboard frames.
+  const keyboardStickyEnabled =
+    Platform.OS === "ios"
+      ? deviceType !== "duo-unfolded" || (composerOwnsKeyboard && !sidebarSearchActive)
+      : !keyboardStateSuspect;
   const estimatedOverlayHeight = composerOverlapHeight;
   // The overlay's measured height includes the home-indicator inset (the
   // composer pads it), but contentInsetAdjustmentBehavior="automatic" makes
@@ -873,7 +988,9 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     composerOverlayRef,
     Math.max(0, estimatedOverlayHeight - nativeInsetOvercount),
     -nativeInsetOvercount,
-    Platform.OS === "ios" ? COMPOSER_TRANSITION_DURATION_MS : 0,
+    // The composer already reports its animated height on each layout.
+    // Easing these samples again makes the feed trail behind it.
+    0,
   );
   // Android lays the screen out below its opaque header and reports a zero
   // header height, so the window height overstates the room by the header.
@@ -882,6 +999,18 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     setScreenHeight(event.nativeEvent.layout.height);
   }, []);
   const screenAreaHeight = screenHeight ?? windowHeight;
+  // The question card reads the keyboard frame on the UI thread, in the same frame the sticky
+  // view translates, so it gets the full height while the keyboard is closed and never crosses
+  // the header while the keyboard moves.
+  const { height: keyboardTranslation } = useReanimatedKeyboardAnimation();
+  const pendingUserInputMaxHeight = useDerivedValue(() =>
+    derivePendingUserInputMaxHeight({
+      windowHeight: screenAreaHeight,
+      keyboardHeight: keyboardStickyEnabled ? -keyboardTranslation.value : 0,
+      navigationHeaderHeight,
+      composerOverlapHeight: composerBottomInset,
+    }),
+  );
   // The usage panel stacks with the composer and any approval card, so it gets
   // whatever room they leave below the header. Measured only while it is open
   // so typing in the composer does not re-render the screen.
@@ -906,9 +1035,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     usageLimitsLayout.overlay > 0
       ? usageLimitsLayout.overlay - usageLimitsLayout.panel
       : composerOverlapHeight;
-  // The keyboard is reserved even while closed, like the question card, so the
-  // panel never grows over the header while the keyboard animates. The floor
-  // keeps the close row on screen when the stack below leaves no room at all.
+  // The floor keeps the close row on screen when the stack below leaves no room at all.
   const usageLimitsMaxHeight = Math.max(
     USAGE_LIMITS_PANEL_MIN_HEIGHT,
     Math.min(
@@ -1179,18 +1306,40 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const approvalsToDecline = props.activePendingApprovals;
     const declineBeforeDispatch =
       approvalsToDecline.length > 0 && props.activePendingUserInput === null
-        ? async () =>
-            props.respondingApprovalId === null &&
-            (await declinePendingApprovals(approvalsToDecline, props.onRespondToApproval)) &&
-            selectedThreadKeyRef.current === targetThreadKey &&
-            // A draft edited or pasted into during the decline isn't what the user sent.
-            stillSendable?.() !== false &&
-            // An approval that arrived during the decline would block the redirect; the draft
-            // stays so the next send declines it too.
-            !activePendingApprovalsRef.current.some(
-              (approval) =>
-                !approvalsToDecline.some((declined) => declined.requestId === approval.requestId),
+        ? async (text: string, hasAttachmentsOrContext: boolean) => {
+            if (
+              selectedThreadKeyRef.current !== targetThreadKey ||
+              stillSendable?.() === false ||
+              props.respondingApprovalId !== null
             )
+              return false;
+            const feedbackTarget = approvalsToDecline[0];
+            if (feedbackTarget?.supportsFeedback) {
+              if (hasAttachmentsOrContext) {
+                Dialog.alert(
+                  "Approval feedback",
+                  "Send approval feedback without attachments or added context.",
+                );
+                return false;
+              }
+              return (await sendApprovalFeedback(feedbackTarget, text, props.onRespondToApproval))
+                ? ("responded" as const)
+                : false;
+            }
+            return (
+              props.respondingApprovalId === null &&
+              (await declinePendingApprovals(approvalsToDecline, props.onRespondToApproval)) &&
+              selectedThreadKeyRef.current === targetThreadKey &&
+              // A draft edited or pasted into during the decline isn't what the user sent.
+              stillSendable?.() !== false &&
+              // An approval that arrived during the decline would block the redirect; the draft
+              // stays so the next send declines it too.
+              !activePendingApprovalsRef.current.some(
+                (approval) =>
+                  !approvalsToDecline.some((declined) => declined.requestId === approval.requestId),
+              )
+            );
+          }
         : undefined;
     const messageId = await props.onSendMessage(followUp, declineBeforeDispatch);
     if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {
@@ -1207,6 +1356,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
         hasStartedTurn: props.selectedThread.latestRun !== null,
         hasUserMessage,
         queuedMessageCount: props.selectedThreadQueueCount,
+        deliveryDeferred: props.connectionStateLabel !== "connected",
       }),
     );
     composerEditorRef.current?.blur();
@@ -1253,7 +1403,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     });
   };
 
-  const showScrollToEndButton = contentPresentationKind === "ready" && !endFollowEnabled;
+  const showScrollToEndButton =
+    !props.draftMode && contentPresentationKind === "ready" && !endFollowEnabled;
   const { themeAppearance } = useAppearancePreferences();
   const isDarkMode = themeAppearance === "dark";
 
@@ -1293,9 +1444,19 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       <ThreadVisitWatermark
         environmentId={props.environmentId}
         selectedThread={props.selectedThread}
-        showContent={showContent}
+        showContent={showContent && !props.draftMode}
       />
-      {showContent ? (
+      {props.draftMode ? (
+        props.draftMode.content(
+          navigationHeaderHeight,
+          liveKeyboardHeight + estimatedOverlayHeight + 24,
+          screenAreaHeight -
+            navigationHeaderHeight -
+            liveKeyboardHeight -
+            estimatedOverlayHeight -
+            24,
+        )
+      ) : showContent ? (
         <View
           style={{ flex: 1 }}
           onTouchStart={handleFeedTouchStart}
@@ -1344,6 +1505,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
               listRef={listRef}
               freeze={freeze}
               anchorMessageId={anchorMessageId}
+              jumpToMessageId={jumpMessageLoaded ? jumpMessageId : null}
+              onJumpedToMessage={() => finishThreadMessageJump(selectedThreadKey)}
               submittedMessageId={submittedMessageId}
               contentInsetEndAdjustment={combinedContentInsetEndAdjustment}
               keyboardOffset={composerKeyboardOffset}
@@ -1382,8 +1545,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
 
       {showContent ? (
         <KeyboardStickyView
-          // Waiting for a visibility render misses the first keyboard frames.
-          enabled={Platform.OS === "ios" || !keyboardStateSuspect}
+          enabled={keyboardStickyEnabled}
           pointerEvents="box-none"
           style={{ position: "absolute", bottom: 0, left: 0, right: 0, top: 0 }}
           offset={{ closed: 0, opened: composerKeyboardOffset }}
@@ -1393,7 +1555,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
               coordinate space. Its top and height can then animate together
               instead of the auto-sized host jumping to Yoga's destination. */}
             <Animated.View
-              layout={COMPOSER_LAYOUT_TRANSITION}
               pointerEvents="box-none"
               style={[
                 {
@@ -1587,32 +1748,30 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onOpenParent={
                           props.selectedThread.lineage.parentThreadId === null
                             ? null
-                            : () => {
-                                const parent = {
+                            : () =>
+                                openLinkedThread({
                                   environmentId: String(props.environmentId),
                                   threadId: String(props.selectedThread.lineage.parentThreadId),
-                                };
-                                navigation.dispatch((state) =>
-                                  parentThreadIsBelow(state, parent)
-                                    ? StackActions.pop()
-                                    : StackActions.push("Thread", parent),
-                                );
-                              }
+                                })
                         }
                       />
                     </View>
                   ) : (
                     <>
                       <ThreadComposer
+                        isDraft={Boolean(props.draftMode)}
                         canOperateThread={props.canOperateThread}
                         reportedModelSelection={reportedModelSelection}
                         editorRef={composerEditorRef}
                         placeholder={
                           props.activePendingApproval
-                            ? "Send a message to decline and redirect the agent"
+                            ? props.activePendingApproval.supportsFeedback
+                              ? "Send feedback to decline this request"
+                              : "Send a message to decline and redirect the agent"
                             : "Ask the repo agent, or run a command…"
                         }
                         contentMaxWidth={contentMaxWidth}
+                        draftControls={props.draftMode?.controls}
                         connectionState={props.connectionStateLabel}
                         environmentLabel={props.environmentLabel}
                         selectedThread={props.selectedThread}
@@ -1629,11 +1788,14 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         // the draft: queueing them against a thread id the server may
                         // still reject would strand them in the outbox.
                         sendBlockedReason={
-                          props.creationState?.kind === "preparing" &&
-                          !props.creationState.serverOwned
-                            ? "Starting the task…"
-                            : null
+                          props.draftMode
+                            ? props.draftMode.sendBlockedReason
+                            : props.creationState?.kind === "preparing" &&
+                                !props.creationState.serverOwned
+                              ? "Starting the task…"
+                              : null
                         }
+                        interactionLocked={props.draftMode?.interactionLocked}
                         draftKey={props.composerDraftKey ?? undefined}
                         followUpBehavior={
                           props.activePendingApprovals.length > 0 &&
@@ -1667,7 +1829,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onUpdateModelSelection={props.onUpdateThreadModelSelection}
                         onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
                         onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
-                        onExpandedChange={setComposerExpanded}
+                        onHeightChange={setComposerHeight}
                         onEditorFocusChange={handleOwnedInputFocusChange}
                       />
                     </>

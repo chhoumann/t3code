@@ -1,10 +1,27 @@
-import { SandboxAccountId, repositoryGroupingKeyOf } from "@t3tools/contracts";
+import {
+  SandboxAccountId,
+  SourceControlProviderKind,
+  repositoryGroupingKeyOf,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   resolveSandboxProjectDefaults,
   sandboxProject,
   sandboxProjectKey,
 } from "./sandboxProject.ts";
+import { normalizeGitRemoteUrl, type RemoteRecognizer } from "./git.ts";
+
+const recognizer: RemoteRecognizer = {
+  recognizeRemote: (remoteUrl) =>
+    normalizeGitRemoteUrl(remoteUrl).startsWith("github.com/")
+      ? {
+          kind: SourceControlProviderKind.make("github"),
+          name: "GitHub",
+          baseUrl: "https://github.com",
+        }
+      : null,
+  repositoryKeyFromRemote: normalizeGitRemoteUrl,
+};
 
 const account = { size: "small" as const, stopAfterHours: 2 };
 
@@ -12,17 +29,25 @@ describe("sandbox project defaults", () => {
   it("shares a repository binding across SSH and HTTPS without crossing accounts", () => {
     const personal = SandboxAccountId.make("personal");
     const work = SandboxAccountId.make("work");
-    const key = sandboxProjectKey(personal, "https://github.com/chhoumann/quickadd.git");
-    expect(sandboxProjectKey(personal, "git@github.com:chhoumann/quickadd.git")).toBe(key);
-    expect(sandboxProjectKey(work, "https://github.com/chhoumann/quickadd.git")).not.toBe(key);
+    const key = sandboxProjectKey(
+      personal,
+      "https://github.com/chhoumann/quickadd.git",
+      recognizer,
+    );
+    expect(sandboxProjectKey(personal, "git@github.com:chhoumann/quickadd.git", recognizer)).toBe(
+      key,
+    );
+    expect(
+      sandboxProjectKey(work, "https://github.com/chhoumann/quickadd.git", recognizer),
+    ).not.toBe(key);
   });
 
   it("keys a project's settings, which hold its canonical key, like a launch from its remote", () => {
     const personal = SandboxAccountId.make("personal");
-    expect(sandboxProjectKey(personal, "github.com/chhoumann/quickadd")).toBe(
+    expect(sandboxProjectKey(personal, "github.com/chhoumann/quickadd", recognizer)).toBe(
       '["personal","github.com/chhoumann/quickadd"]',
     );
-    expect(sandboxProjectKey(personal, "git@github.com:chhoumann/QuickAdd.git")).toBe(
+    expect(sandboxProjectKey(personal, "git@github.com:chhoumann/QuickAdd.git", recognizer)).toBe(
       '["personal","github.com/chhoumann/quickadd"]',
     );
   });
@@ -49,11 +74,14 @@ describe("sandboxProject", () => {
 
   it("names the project after its checkout and identifies it by its only remote", () => {
     expect(
-      sandboxProject({
-        remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
-        trackedRemote: "origin",
-        commit: null,
-      }),
+      sandboxProject(
+        {
+          remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
+          trackedRemote: "origin",
+          commit: null,
+        },
+        recognizer,
+      ),
     ).toEqual({
       title: "Hello-World",
       repositoryIdentity: {
@@ -72,28 +100,34 @@ describe("sandboxProject", () => {
   });
 
   it("groups a launch from a fork-tracking branch with a checkout whose origin is the project", () => {
-    const project = sandboxProject({
-      remotes: [
-        { name: "fork", url: FORK },
-        { name: "origin", url: PROJECT },
-      ],
-      trackedRemote: "fork",
-      commit: null,
-    });
+    const project = sandboxProject(
+      {
+        remotes: [
+          { name: "fork", url: FORK },
+          { name: "origin", url: PROJECT },
+        ],
+        trackedRemote: "fork",
+        commit: null,
+      },
+      recognizer,
+    );
     expect(project.title).toBe("t3code");
     expect(project.repositoryIdentity.canonicalKey).toBe("github.com/pingdotgg/t3code");
     expect(repositoryGroupingKeyOf(project.repositoryIdentity)).toBe("github.com/pingdotgg/t3code");
   });
 
   it("groups a launch from a fork that is origin with the fork, under the project's key", () => {
-    const project = sandboxProject({
-      remotes: [
-        { name: "origin", url: FORK },
-        { name: "upstream", url: PROJECT },
-      ],
-      trackedRemote: "origin",
-      commit: null,
-    });
+    const project = sandboxProject(
+      {
+        remotes: [
+          { name: "origin", url: FORK },
+          { name: "upstream", url: PROJECT },
+        ],
+        trackedRemote: "origin",
+        commit: null,
+      },
+      recognizer,
+    );
     expect(project.title).toBe("t3code");
     expect(project.repositoryIdentity.canonicalKey).toBe("github.com/pingdotgg/t3code");
     expect(repositoryGroupingKeyOf(project.repositoryIdentity)).toBe("github.com/chhoumann/t3code");

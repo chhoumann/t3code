@@ -55,6 +55,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -597,7 +598,7 @@ const make = Effect.gen(function* () {
           ...repository,
           sandboxId: record.id,
           branch: `t3/sandbox-${record.id.slice(0, 8)}`,
-          path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository).title}`,
+          path: `${SANDBOX_HOME_PROJECTS}/${sandboxProject(repository, sourceControlDefinitions).title}`,
         };
         const scripts = yield* guest.cloneCheckout(resolved, yield* machineId, checkout);
         yield* asOwner(record, resolved, yield* machineId, (token) =>
@@ -832,7 +833,9 @@ const make = Effect.gen(function* () {
             (yield* settings.getSettings.pipe(persistence)).sandboxProjectDefaults[
               sandboxProjectKey(
                 input.accountId,
-                sandboxProject(input.repository).repositoryIdentity.canonicalKey,
+                sandboxProject(input.repository, sourceControlDefinitions).repositoryIdentity
+                  .canonicalKey,
+                sourceControlDefinitions,
               )
             ],
           );

@@ -10,6 +10,7 @@ import * as Redacted from "effect/Redacted";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
@@ -262,9 +263,14 @@ describe("SandboxAccounts", () => {
       yield* accounts.save({ ...input, id: personal, label: "Personal", apiKey: "key", env: [] });
       yield* settings.updateSettings({
         sandboxProjectDefaults: {
-          [sandboxProjectKey(ID, "github.com/octocat/hello-world")]: { template: "work" },
-          [sandboxProjectKey(ID, "github.com/octocat/website")]: { template: null },
-          [sandboxProjectKey(personal, "github.com/octocat/hello-world")]: { template: "mine" },
+          [sandboxProjectKey(ID, "github.com/octocat/hello-world", sourceControlDefinitions)]: {
+            template: "work",
+          },
+          [sandboxProjectKey(ID, "github.com/octocat/website", sourceControlDefinitions)]: {
+            template: null,
+          },
+          [sandboxProjectKey(personal, "github.com/octocat/hello-world", sourceControlDefinitions)]:
+            { template: "mine" },
         },
       });
 
@@ -320,9 +326,8 @@ describe("SandboxAccounts", () => {
       const readding = yield* Effect.forkChild(
         accounts.save({ ...input, env: [{ name: "TOKEN", value: "new" }] }),
       );
-      for (let turn = 0; turn < 100 && readding.pollUnsafe() === undefined; turn++) {
-        yield* Effect.yieldNow;
-      }
+      // One yield parks it on the account lock, which it takes first.
+      yield* Effect.yieldNow;
       yield* Deferred.succeed(gate.release, undefined);
       yield* Fiber.join(dropping);
       yield* Fiber.join(readding);
@@ -369,9 +374,8 @@ describe("SandboxAccounts", () => {
       );
       yield* Deferred.await(reading);
       const removing = yield* Effect.forkChild(accounts.remove(ID).pipe(Effect.flip));
-      for (let turn = 0; turn < 100 && removing.pollUnsafe() === undefined; turn++) {
-        yield* Effect.yieldNow;
-      }
+      // One yield parks it on the account lock, which it takes first.
+      yield* Effect.yieldNow;
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(launching);
 

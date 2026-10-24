@@ -22,6 +22,7 @@ import { HttpClient } from "effect/http";
 import { Socket } from "effect/socket";
 
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { FLOCK_SHIM, TIMEOUT_SHIM } from "../testUtils/flockShim.ts";
 import {
   SANDBOX_ENV_FILE,
@@ -335,7 +336,7 @@ describe("renderCloneCommand", () => {
         const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
         const { rootPath: _local, ...localIdentity } = (yield* resolver.resolve(local)) ?? {};
         const { rootPath: _guest, ...guestIdentity } = (yield* resolver.resolve(checkout)) ?? {};
-        const pending = sandboxProject(repository).repositoryIdentity;
+        const pending = sandboxProject(repository, sourceControlDefinitions).repositoryIdentity;
         const projectMain = git(checkout, "rev-parse", `refs/remotes/${otherRemote}/main`);
         const projectHead = git(project, "rev-parse", "main");
         NodeFS.rmSync(root, { recursive: true, force: true });

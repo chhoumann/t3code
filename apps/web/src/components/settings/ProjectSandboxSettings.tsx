@@ -1,3 +1,4 @@
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
@@ -47,7 +48,7 @@ export function ProjectSandboxSettings({ repository }: { repository: string | nu
       (candidate) =>
         repository !== null &&
         candidate.owner.serverConfig?.settings.sandboxProjectDefaults[
-          sandboxProjectKey(candidate.accountId, repository)
+          sandboxProjectKey(candidate.accountId, repository, sourceControlClients)
         ] !== undefined,
     ) ??
     choices[0];
@@ -55,7 +56,7 @@ export function ProjectSandboxSettings({ repository }: { repository: string | nu
     return null;
   const account = choice.owner.serverConfig.settings.sandboxAccounts[choice.accountId];
   if (account === undefined) return null;
-  const projectKey = sandboxProjectKey(choice.accountId, repository);
+  const projectKey = sandboxProjectKey(choice.accountId, repository, sourceControlClients);
   const saved = choice.owner.serverConfig.settings.sandboxProjectDefaults[projectKey];
   return (
     <SettingsSection title="Sandboxes">
