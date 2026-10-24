@@ -161,7 +161,13 @@ export const layerT3BuildFromConfig = Layer.effect(
     if (Option.isNone(tarball)) return { kind: "npm", version: packageJson.version } as const;
     const fileSystem = yield* FileSystem.FileSystem;
     const bytes = yield* fileSystem.readFile(tarball.value);
-    return { kind: "tarball", version: packageJson.version, bytes } as const;
+    // The guest installs a runtime once per version, and a template keeps the
+    // one it has, so each packed build gets its own version.
+    const digest = yield* Effect.promise(() => crypto.subtle.digest("SHA-256", bytes));
+    const hash = Array.from(new Uint8Array(digest).subarray(0, 6), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return { kind: "tarball", version: `${packageJson.version}+${hash}`, bytes } as const;
   }),
 );
 
