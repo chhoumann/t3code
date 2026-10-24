@@ -252,6 +252,7 @@ describe("SandboxAccounts", () => {
           settled_revision: 1,
           create_key: "key",
           credentials_stale: 0,
+          restart_pending: 0,
           created_at: 0,
           updated_at: 0,
         })}`;
@@ -382,6 +383,7 @@ describe("SandboxAccounts", () => {
                 settled_revision: 0,
                 create_key: "key",
                 credentials_stale: 0,
+                restart_pending: 0,
                 created_at: 0,
                 updated_at: 0,
               })}`;
