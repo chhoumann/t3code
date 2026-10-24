@@ -1,55 +1,61 @@
 import type {
-  GitRemote,
   RepositoryIdentity,
   SandboxAccountId,
   SandboxMachineSize,
   SandboxProjectDefaults,
-  SandboxRepository,
+  SandboxSource,
 } from "@t3tools/contracts";
-import * as Arr from "effect/Array";
-import { pickPrimaryRemote, repositoryIdentityFromRemotes, type RemoteRecognizer } from "./git.ts";
+import { SandboxRemoteUrl } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import { cloneUrlForProtocol } from "./cloneUrl.ts";
+import { repositoryIdentityFromRemotes, type RemoteRecognizer } from "./git.ts";
+
+const HTTPS_CLONE_URL = /^https:\/\/(?:[^@/\s]+@)?([^/\s?#]+)\/([^\s?#]+?)\/*$/;
+const decodeRemoteUrl = Schema.decodeUnknownOption(SandboxRemoteUrl);
 
 /**
- * The remotes a sandbox's clone gets from a checkout: the one its branch
- * tracks, and the ones `repositoryIdentityFromRemotes` reads, so the clone
- * resolves to the checkout's repository identity.
+ * `url` as the guest clones it: SSH rewritten to HTTPS, credentials and a
+ * trailing slash dropped. Null for a remote that has no HTTPS form, such as a
+ * local path or a custom SSH port.
  */
-export function sandboxRemotes(
-  remotes: Arr.NonEmptyReadonlyArray<GitRemote>,
-  tracked: GitRemote,
-): Arr.NonEmptyReadonlyArray<GitRemote> {
-  const candidates: Arr.NonEmptyReadonlyArray<GitRemote> = [
-    tracked,
-    pickPrimaryRemote(remotes),
-    ...remotes.filter((remote) => remote.name === "origin"),
-  ];
-  return Arr.dedupeWith(candidates, (left, right) => left.name === right.name);
+export function sandboxRemoteUrl(url: string): SandboxRemoteUrl | null {
+  const https = cloneUrlForProtocol(url, "https");
+  const parts = https === null ? null : HTTPS_CLONE_URL.exec(https);
+  if (parts === null) return null;
+  const [, host, path] = parts;
+  const option = decodeRemoteUrl(`https://${host}/${path}`);
+  return option._tag === "Some" ? option.value : null;
 }
 
 /**
- * The project a sandbox's environment creates for its clone, named after the
- * checkout directory. The clone has the launching checkout's remotes under
- * their names, so it resolves to the checkout's repository identity: its
- * thread groups with the checkout's, and the launch reads the checkout's
- * sandbox defaults.
+ * The repository a sandbox for a checkout clones, at the remote's default
+ * branch: `origin` when the checkout is a fork, else the primary remote. The
+ * same pick `repositoryGroupingKeyOf` names, so the sandbox groups with the
+ * checkout and reads its sandbox defaults. Null without a cloneable remote.
  */
-export function sandboxProject(
-  repository: SandboxRepository,
+export function sandboxSourceForProject(identity: RepositoryIdentity | null): SandboxSource | null {
+  if (identity === null) return null;
+  const url =
+    identity.origin === undefined ? identity.locator.remoteUrl : identity.origin.remoteUrl;
+  const remoteUrl = url === undefined ? null : sandboxRemoteUrl(url);
+  return remoteUrl === null ? null : { remoteUrl, base: { _tag: "default" } };
+}
+
+/**
+ * The identity of the clone a source makes, which has one remote, `origin`.
+ * The guest resolves the same identity from its clone, so grouping, defaults,
+ * and the guest project agree without copying remote lists.
+ */
+export function sandboxRepositoryIdentity(
+  source: SandboxSource,
   recognizer: RemoteRecognizer,
-): {
-  readonly title: string;
-  readonly repositoryIdentity: RepositoryIdentity;
-} {
-  const repositoryIdentity = repositoryIdentityFromRemotes(repository.remotes, recognizer);
-  return {
-    title:
-      repositoryIdentity.locator.remoteUrl
-        .replace(/\/+$/, "")
-        .split(/[/:]/)
-        .at(-1)
-        ?.replace(/\.git$/, "") || "project",
-    repositoryIdentity,
-  };
+): RepositoryIdentity {
+  return repositoryIdentityFromRemotes([{ name: "origin", url: source.remoteUrl }], recognizer);
+}
+
+/** The guest project's title, and the name of its clone directory. */
+export function sandboxProjectTitle(identity: RepositoryIdentity): string {
+  return identity.name ?? "project";
 }
 
 /** All checkouts of a repository share a binding, separately for each cloud account. */

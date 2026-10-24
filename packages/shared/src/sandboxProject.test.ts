@@ -1,15 +1,24 @@
 import {
   SandboxAccountId,
+  SandboxRemoteUrl,
   SourceControlProviderKind,
   repositoryGroupingKeyOf,
+  type RepositoryIdentity,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   resolveSandboxProjectDefaults,
-  sandboxProject,
   sandboxProjectKey,
+  sandboxProjectTitle,
+  sandboxRemoteUrl,
+  sandboxRepositoryIdentity,
+  sandboxSourceForProject,
 } from "./sandboxProject.ts";
-import { normalizeGitRemoteUrl, type RemoteRecognizer } from "./git.ts";
+import {
+  normalizeGitRemoteUrl,
+  repositoryIdentityFromRemotes,
+  type RemoteRecognizer,
+} from "./git.ts";
 
 const recognizer: RemoteRecognizer = {
   recognizeRemote: (remoteUrl) =>
@@ -24,6 +33,16 @@ const recognizer: RemoteRecognizer = {
 };
 
 const account = { size: "small" as const, stopAfterHours: 2 };
+const PROJECT = "https://github.com/pingdotgg/t3code.git";
+const FORK = "git@github.com:chhoumann/t3code.git";
+const FORK_HTTPS = SandboxRemoteUrl.make("https://github.com/chhoumann/t3code.git");
+const defaultBase = { _tag: "default" } as const;
+
+/** What a checkout's enrichment reports for these remotes. */
+const checkout = (remotes: ReadonlyArray<{ name: string; url: string }>): RepositoryIdentity => {
+  const [first, ...rest] = remotes;
+  return repositoryIdentityFromRemotes([first!, ...rest], recognizer);
+};
 
 describe("sandbox project defaults", () => {
   it("shares a repository binding across SSH and HTTPS without crossing accounts", () => {
@@ -68,68 +87,106 @@ describe("sandbox project defaults", () => {
   });
 });
 
-describe("sandboxProject", () => {
-  const PROJECT = "https://github.com/pingdotgg/t3code.git";
-  const FORK = "git@github.com:chhoumann/t3code.git";
+describe("sandboxRemoteUrl", () => {
+  it.each([
+    [
+      "an SSH remote",
+      "git@github.com:chhoumann/t3code.git",
+      "https://github.com/chhoumann/t3code.git",
+    ],
+    [
+      "an ssh:// remote",
+      "ssh://git@github.com/chhoumann/t3code.git",
+      "https://github.com/chhoumann/t3code.git",
+    ],
+    [
+      "an HTTPS remote",
+      "https://github.com/chhoumann/t3code",
+      "https://github.com/chhoumann/t3code",
+    ],
+    [
+      "a trailing slash",
+      "https://github.com/chhoumann/t3code/",
+      "https://github.com/chhoumann/t3code",
+    ],
+    [
+      "embedded credentials",
+      "https://user:token@github.com/chhoumann/t3code.git",
+      "https://github.com/chhoumann/t3code.git",
+    ],
+  ])("clones %s over HTTPS", (_, url, expected) => {
+    expect(sandboxRemoteUrl(url)).toBe(expected);
+  });
 
-  it("names the project after its checkout and identifies it by its only remote", () => {
-    expect(
-      sandboxProject(
-        {
-          remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
-          trackedRemote: "origin",
-          commit: null,
-        },
-        recognizer,
-      ),
-    ).toEqual({
-      title: "Hello-World",
-      repositoryIdentity: {
-        canonicalKey: "github.com/octocat/hello-world",
-        locator: {
-          source: "git-remote",
-          remoteName: "origin",
-          remoteUrl: "https://github.com/octocat/Hello-World.git",
-        },
-        displayName: "octocat/Hello-World",
-        provider: "github",
-        owner: "octocat",
-        name: "Hello-World",
-      },
+  it.each([
+    ["a local path", "/home/user/projects/t3code"],
+    ["a custom SSH port", "ssh://git@github.com:2222/chhoumann/t3code.git"],
+  ])("has no HTTPS form for %s", (_, url) => {
+    expect(sandboxRemoteUrl(url)).toBeNull();
+  });
+});
+
+describe("sandboxSourceForProject", () => {
+  it("clones a plain checkout's remote at the default branch, whatever the checkout's state", () => {
+    expect(sandboxSourceForProject(checkout([{ name: "origin", url: FORK }]))).toEqual({
+      remoteUrl: FORK_HTTPS,
+      base: defaultBase,
     });
   });
 
-  it("groups a launch from a fork-tracking branch with a checkout whose origin is the project", () => {
-    const project = sandboxProject(
-      {
-        remotes: [
-          { name: "fork", url: FORK },
-          { name: "origin", url: PROJECT },
-        ],
-        trackedRemote: "fork",
-        commit: null,
-      },
-      recognizer,
+  it("clones the fork that is origin, which the checkout groups under", () => {
+    const identity = checkout([
+      { name: "origin", url: FORK },
+      { name: "upstream", url: PROJECT },
+    ]);
+    const source = sandboxSourceForProject(identity);
+    expect(source).toEqual({ remoteUrl: FORK_HTTPS, base: defaultBase });
+    expect(sandboxRepositoryIdentity(source!, recognizer).canonicalKey).toBe(
+      repositoryGroupingKeyOf(identity),
     );
-    expect(project.title).toBe("t3code");
-    expect(project.repositoryIdentity.canonicalKey).toBe("github.com/pingdotgg/t3code");
-    expect(repositoryGroupingKeyOf(project.repositoryIdentity)).toBe("github.com/pingdotgg/t3code");
   });
 
-  it("groups a launch from a fork that is origin with the fork, under the project's key", () => {
-    const project = sandboxProject(
+  it("clones the project when origin is the project and a fork is another remote", () => {
+    const identity = checkout([
+      { name: "fork", url: FORK },
+      { name: "origin", url: PROJECT },
+    ]);
+    const source = sandboxSourceForProject(identity);
+    expect(source?.remoteUrl).toBe(PROJECT);
+    expect(sandboxRepositoryIdentity(source!, recognizer).canonicalKey).toBe(
+      repositoryGroupingKeyOf(identity),
+    );
+  });
+
+  it("has no source without a repository or a cloneable remote", () => {
+    expect(sandboxSourceForProject(null)).toBeNull();
+    expect(
+      sandboxSourceForProject(checkout([{ name: "origin", url: "/srv/git/t3code" }])),
+    ).toBeNull();
+  });
+});
+
+describe("sandboxRepositoryIdentity", () => {
+  it("names the project after the repository and identifies it by its one remote", () => {
+    const identity = sandboxRepositoryIdentity(
       {
-        remotes: [
-          { name: "origin", url: FORK },
-          { name: "upstream", url: PROJECT },
-        ],
-        trackedRemote: "origin",
-        commit: null,
+        remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/Hello-World.git"),
+        base: defaultBase,
       },
       recognizer,
     );
-    expect(project.title).toBe("t3code");
-    expect(project.repositoryIdentity.canonicalKey).toBe("github.com/pingdotgg/t3code");
-    expect(repositoryGroupingKeyOf(project.repositoryIdentity)).toBe("github.com/chhoumann/t3code");
+    expect(identity).toEqual({
+      canonicalKey: "github.com/octocat/hello-world",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "https://github.com/octocat/Hello-World.git",
+      },
+      displayName: "octocat/Hello-World",
+      provider: "github",
+      owner: "octocat",
+      name: "Hello-World",
+    });
+    expect(sandboxProjectTitle(identity)).toBe("Hello-World");
   });
 });
