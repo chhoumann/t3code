@@ -9,7 +9,7 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
-import { sandboxProject } from "@t3tools/shared/sandboxProject";
+import { sandboxProjectTitle, sandboxRepositoryIdentity } from "@t3tools/shared/sandboxProject";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
@@ -1121,7 +1121,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     if (pending.length === 0) return EMPTY_PENDING_SANDBOX_ROWS;
     const rows = new Map<string, PendingSandboxRowData>();
     for (const entry of pending) {
-      const project = sandboxProject(entry.view.repository, sourceControlClients);
+      const repositoryIdentity = sandboxRepositoryIdentity(entry.view.source, sourceControlClients);
+      const project = { title: sandboxProjectTitle(repositoryIdentity), repositoryIdentity };
       const { group, label } = resolveSandboxProjectGroup({
         groups: projectGroups,
         mode: projectGroupingSettings.sidebarProjectGroupingMode,

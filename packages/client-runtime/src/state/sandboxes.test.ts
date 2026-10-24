@@ -7,10 +7,10 @@ import {
   type SandboxAccountConfig,
   SandboxError,
   SandboxId,
+  SandboxRemoteUrl,
   type SandboxStatus,
   type SandboxView,
   ThreadId,
-  type VcsStatusResult,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -25,7 +25,6 @@ import {
   sandboxLaunchPanel,
   sandboxLaunchStageIndex,
   sandboxPresence,
-  sandboxRepositoryFor,
   sandboxWakeStatus,
   sessionWorkGrant,
   type WorkGrant,
@@ -37,24 +36,6 @@ import type { EnvironmentShellStatus } from "./shell.ts";
 
 const OWNER = EnvironmentId.make("environment-owner");
 const REMOTE = "https://github.com/octocat/Hello-World.git";
-const HEAD = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d";
-
-const pushed: VcsStatusResult = {
-  isRepo: true,
-  hasPrimaryRemote: true,
-  remotes: [{ name: "origin", url: REMOTE }],
-  trackedRemote: "origin",
-  isDefaultRef: true,
-  refName: "main",
-  headCommit: HEAD,
-  hasWorkingTreeChanges: false,
-  workingTree: { files: [], insertions: 0, deletions: 0 },
-  hasUpstream: true,
-  aheadCount: 0,
-  behindCount: 2,
-  pr: null,
-};
-
 const account = (label: string): SandboxAccountConfig => ({
   label,
   provider: "boat",
@@ -63,110 +44,6 @@ const account = (label: string): SandboxAccountConfig => ({
   stopAfterHours: 8,
   machineSetupScript: null,
   env: [],
-});
-
-describe("sandboxRepositoryFor", () => {
-  const PROJECT = "https://github.com/pingdotgg/t3code.git";
-  const FORK = "git@github.com:chhoumann/t3code.git";
-  const onBranch = (
-    trackedRemote: string,
-    remotes: VcsStatusResult["remotes"],
-  ): VcsStatusResult => ({
-    ...pushed,
-    remotes,
-    trackedRemote,
-    isDefaultRef: false,
-    refName: "fix",
-  });
-
-  it("pins the remote at the current commit once it is pushed, even when behind", () => {
-    expect(sandboxRepositoryFor(pushed)).toEqual({
-      _tag: "Ready",
-      repository: {
-        remotes: [{ name: "origin", url: REMOTE }],
-        trackedRemote: "origin",
-        commit: HEAD,
-      },
-    });
-  });
-
-  it("clones the fork a branch tracks and keeps origin, when origin is the project", () => {
-    const status = onBranch("fork", [
-      { name: "fork", url: FORK },
-      { name: "origin", url: PROJECT },
-      { name: "colleague", url: "https://github.com/hubot/t3code.git" },
-    ]);
-    expect(sandboxRepositoryFor(status)).toEqual({
-      _tag: "Ready",
-      repository: {
-        remotes: [
-          { name: "fork", url: FORK },
-          { name: "origin", url: PROJECT },
-        ],
-        trackedRemote: "fork",
-        commit: HEAD,
-      },
-    });
-  });
-
-  it("clones origin when it is the fork the branch tracks, and keeps upstream", () => {
-    const status = onBranch("origin", [
-      { name: "origin", url: FORK },
-      { name: "upstream", url: PROJECT },
-    ]);
-    expect(sandboxRepositoryFor(status)).toEqual({
-      _tag: "Ready",
-      repository: {
-        remotes: [
-          { name: "origin", url: FORK },
-          { name: "upstream", url: PROJECT },
-        ],
-        trackedRemote: "origin",
-        commit: HEAD,
-      },
-    });
-  });
-
-  it("keeps the remote the identity falls back to without origin or upstream", () => {
-    const status = onBranch("work", [
-      { name: "mirror", url: PROJECT },
-      { name: "work", url: FORK },
-    ]);
-    expect(sandboxRepositoryFor(status)).toEqual({
-      _tag: "Ready",
-      repository: {
-        remotes: [
-          { name: "work", url: FORK },
-          { name: "mirror", url: PROJECT },
-        ],
-        trackedRemote: "work",
-        commit: HEAD,
-      },
-    });
-  });
-
-  it.each([
-    ["not-a-repository", { ...pushed, isRepo: false }],
-    ["no-remote", { ...pushed, remotes: [], trackedRemote: undefined }],
-    ["no-commit", { ...pushed, headCommit: undefined }],
-    ["uncommitted-changes", { ...pushed, hasWorkingTreeChanges: true }],
-    ["uncommitted-changes", { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: true }],
-    ["not-pushed", { ...pushed, aheadCount: 1 }],
-    ["not-pushed", { ...pushed, hasUpstream: false, trackedRemote: undefined }],
-    // A branch that tracks another local branch has an upstream but no remote.
-    ["not-pushed", { ...pushed, trackedRemote: undefined }],
-  ] as const)("refuses with %s", (problem, status) => {
-    expect(sandboxRepositoryFor(status)).toEqual({ _tag: "Refused", problem });
-  });
-
-  it("launches when only untracked files changed, since they never travel anyway", () => {
-    const status = { ...pushed, hasWorkingTreeChanges: true, hasTrackedChanges: false };
-    expect(sandboxRepositoryFor(status)).toMatchObject({ _tag: "Ready" });
-  });
-
-  it("refuses before the status has loaded", () => {
-    expect(sandboxRepositoryFor(null)).toEqual({ _tag: "Refused", problem: "not-a-repository" });
-  });
 });
 
 describe("sandboxPresence", () => {
@@ -317,11 +194,8 @@ describe("workGrantEnvironmentId", () => {
               accountId: SandboxAccountId.make("work"),
               title: "Fix the flaky test",
               message: "Fix the flaky test",
-              repository: {
-                remotes: [{ name: "origin", url: REMOTE }],
-                trackedRemote: "origin",
-                commit: HEAD,
-              },
+              source: { remoteUrl: SandboxRemoteUrl.make(REMOTE), base: { _tag: "default" } },
+              resolvedBase: null,
               threadId: ThreadId.make("thread-seed"),
               desired,
               revision: 1,
@@ -812,11 +686,8 @@ describe("pendingSandboxThreads", () => {
     accountId: SandboxAccountId.make("work"),
     title: id,
     message: "Fix the flaky test",
-    repository: {
-      remotes: [{ name: "origin", url: REMOTE }],
-      trackedRemote: "origin",
-      commit: HEAD,
-    },
+    source: { remoteUrl: SandboxRemoteUrl.make(REMOTE), base: { _tag: "default" } },
+    resolvedBase: null,
     threadId: ThreadId.make(`seed-${id}`),
     desired: "running",
     revision: 1,

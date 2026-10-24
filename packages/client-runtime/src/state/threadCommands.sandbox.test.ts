@@ -8,6 +8,7 @@ import {
   type OrchestrationV2Command,
   SandboxAccountId,
   SandboxId,
+  SandboxRemoteUrl,
   type SandboxStatus,
   type SandboxUpdateInput,
   type SandboxView,
@@ -61,11 +62,11 @@ const sandboxView = (
   accountId: SandboxAccountId.make("work"),
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
-  repository: {
-    remotes: [{ name: "origin", url: "https://example.test/repo.git" }],
-    trackedRemote: "origin",
-    commit: null,
+  source: {
+    remoteUrl: SandboxRemoteUrl.make("https://example.test/repo.git"),
+    base: { _tag: "default" },
   },
+  resolvedBase: null,
   threadId: ThreadId.make("thread-seed"),
   desired,
   revision,

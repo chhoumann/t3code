@@ -1,15 +1,12 @@
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import {
-  SANDBOX_REPOSITORY_PROBLEM_MESSAGE,
-  sandboxCommandFailure,
-  sandboxRepositoryFor,
-} from "@t3tools/client-runtime/state/sandboxes";
+import { sandboxCommandFailure } from "@t3tools/client-runtime/state/sandboxes";
 import type {
   ProviderDriverKind,
   ProviderInteractionMode,
+  RepositoryIdentity,
   RuntimeMode,
-  VcsStatusResult,
 } from "@t3tools/contracts";
+import { sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { useNavigate } from "@tanstack/react-router";
 
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -23,7 +20,8 @@ export interface SandboxLaunchRequest {
   readonly message: string;
   /** Attachments and context the composer holds besides the message. */
   readonly extrasCount: number;
-  readonly gitStatus: VcsStatusResult | null;
+  /** The draft's project, whose remote the sandbox clones. */
+  readonly repositoryIdentity: RepositoryIdentity | null;
   readonly driver: ProviderDriverKind;
   readonly model: string;
   readonly runtimeMode: RuntimeMode;
@@ -32,9 +30,9 @@ export interface SandboxLaunchRequest {
 
 /**
  * Launches a draft's new sandbox and opens it in place of the draft. The
- * sandbox clones the pushed commit and starts its own thread from the
- * message, so nothing local travels. Resolves with the reason it did not
- * launch, or null.
+ * sandbox clones the project's remote at its default branch and starts its
+ * own thread from the message, so nothing local travels. Resolves with the
+ * reason it did not launch, or null.
  */
 export function useSandboxLaunch() {
   const navigate = useNavigate();
@@ -44,9 +42,9 @@ export function useSandboxLaunch() {
     if (request.extrasCount > 0) {
       return "A sandbox starts from your message alone. Remove attachments and context to start one.";
     }
-    const repository = sandboxRepositoryFor(request.gitStatus);
-    if (repository._tag === "Refused") {
-      return SANDBOX_REPOSITORY_PROBLEM_MESSAGE[repository.problem];
+    const source = sandboxSourceForProject(request.repositoryIdentity);
+    if (source === null) {
+      return "A sandbox clones the project from its remote repository. Add one to start a sandbox.";
     }
     const { target } = request;
     const result = await launch({
@@ -56,7 +54,7 @@ export function useSandboxLaunch() {
         accountId: target.accountId,
         title: deriveThreadTitleSeed({ text: request.message, attachments: [] }),
         message: request.message,
-        repository: repository.repository,
+        source,
         driver: request.driver,
         model: request.model,
         runtimeMode: request.runtimeMode,

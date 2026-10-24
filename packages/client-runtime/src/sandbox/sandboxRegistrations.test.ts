@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   SandboxAccountId,
   SandboxId,
+  SandboxRemoteUrl,
   type SandboxStatus,
   type SandboxView,
   ThreadId,
@@ -40,11 +41,11 @@ const view = (
     accountId: SandboxAccountId.make("work"),
     title: "Fix the bug",
     message: "Fix the bug in hello.txt",
-    repository: {
-      remotes: [{ name: "origin", url: "https://github.com/octocat/Hello-World.git" }],
-      trackedRemote: "origin",
-      commit: null,
+    source: {
+      remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/Hello-World.git"),
+      base: { _tag: "default" },
     },
+    resolvedBase: null,
     threadId: ThreadId.make("thread-seed"),
     desired,
     revision: 1,

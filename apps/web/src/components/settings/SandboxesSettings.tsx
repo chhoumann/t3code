@@ -4,6 +4,7 @@ import {
   sandboxCommandFailure,
 } from "@t3tools/client-runtime/state/sandboxes";
 import {
+  repositoryGroupingKeyOf,
   resolveEnvironmentMachineKind,
   SandboxAccountId,
   type EnvironmentId,
@@ -73,10 +74,12 @@ export function SandboxesSettings() {
   const canSave = useAtomValue(
     sandboxes.saveAccount.permissionAtom(defaultOwner?.environmentId ?? null),
   );
-  const repository =
+  const identity =
     scope.kind === "project" || scope.kind === "checkout"
-      ? scope.members[0]?.repositoryIdentity?.canonicalKey
+      ? scope.members[0]?.repositoryIdentity
       : null;
+  // A sandbox clones the repository the checkout groups under, so its defaults key with it.
+  const repository = identity ? repositoryGroupingKeyOf(identity) : null;
   if (repository) {
     return (
       <SettingsPageContainer>

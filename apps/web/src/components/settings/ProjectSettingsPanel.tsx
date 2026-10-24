@@ -12,7 +12,11 @@ import {
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
 import { AsyncResult } from "effect/reactivity";
-import { type EnvironmentId, type ProjectIconOverride } from "@t3tools/contracts";
+import {
+  repositoryGroupingKeyOf,
+  type EnvironmentId,
+  type ProjectIconOverride,
+} from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { InfoIcon, Trash2Icon } from "lucide-react";
@@ -179,6 +183,10 @@ function ProjectDetail({
     group.memberProjects.find(
       (member) => environmentById.get(member.environmentId)?.serverConfig != null,
     ) ?? group.memberProjects[0]!;
+  // A sandbox clones the repository the checkout groups under, so its defaults key with it.
+  const sandboxRepository = representative.repositoryIdentity
+    ? repositoryGroupingKeyOf(representative.repositoryIdentity)
+    : null;
   const threads = useThreadShells();
   const updateProject = useOrchestrationCommand(projectEnvironment.update, {
     reportFailure: false,
@@ -550,8 +558,8 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectSandboxSettings
-          key={representative.repositoryIdentity?.canonicalKey}
-          repository={representative.repositoryIdentity?.canonicalKey ?? null}
+          key={sandboxRepository ?? undefined}
+          repository={sandboxRepository}
         />
         <ProjectActionsSettings />
         {hasMultipleCheckouts ? checkoutChoices : null}

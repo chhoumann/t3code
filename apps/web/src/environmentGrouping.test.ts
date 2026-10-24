@@ -1,6 +1,6 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { sandboxProject } from "@t3tools/shared/sandboxProject";
-import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { sandboxProjectTitle, sandboxRepositoryIdentity } from "@t3tools/shared/sandboxProject";
+import { EnvironmentId, ProjectId, ProviderInstanceId, SandboxRemoteUrl } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { deriveLogicalProjectKeyFromSettings } from "./logicalProject";
@@ -282,14 +282,14 @@ describe("environment grouping", () => {
 
 describe("resolveSandboxProjectGroup", () => {
   const sandboxEnvironmentId = EnvironmentId.make("env-sandbox");
-  const cloned = sandboxProject(
+  const clonedIdentity = sandboxRepositoryIdentity(
     {
-      remotes: [{ name: "origin", url: "https://github.com/Example/Shared-Repo.git" }],
-      trackedRemote: "origin",
-      commit: null,
+      remoteUrl: SandboxRemoteUrl.make("https://github.com/Example/Shared-Repo.git"),
+      base: { _tag: "default" },
     },
     sourceControlClients,
   );
+  const cloned = { title: sandboxProjectTitle(clonedIdentity), repositoryIdentity: clonedIdentity };
   const snapshots = (projects: Project[], mode: "repository" | "separate") =>
     buildSidebarProjectSnapshots({
       projects,

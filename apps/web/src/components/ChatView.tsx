@@ -2944,7 +2944,7 @@ export default function ChatView(props: ChatViewProps) {
         sendCtx.previewAnnotations.length +
         sendCtx.reviewComments.length +
         sendCtx.threadContexts.length,
-      gitStatus: gitStatusQuery.data ?? null,
+      repositoryIdentity: activeProject?.repositoryIdentity ?? null,
       driver: sendCtx.selectedProvider,
       model: sendCtx.selectedModel,
       runtimeMode,
