@@ -722,10 +722,13 @@ const trace = Effect.fn("SandboxTracer.trace")(function* (
     const envFileRound = yield* exec(
       `grep -c '^T3_TRACER_ROUND="${envRound}"$' ${SANDBOX_ENV_FILE} || true`,
     );
+    const bootedAt = yield* exec("uptime -s");
     yield* say(
-      `round ${round}: setup ran on ${boots} boots; last run ${lastRun.split(" ").at(-1)}; sandbox.env round ${envRound}: ${envFileRound === "1" ? "yes" : "no"}`,
+      `round ${round}: setup ran on ${boots} boots (booted ${bootedAt}); last run ${lastRun.split(" ").at(-1)}; sandbox.env round ${envRound}: ${envFileRound === "1" ? "yes" : "no"}`,
     );
-    yield* check(boots === round + 1, `the machine setup ran on boot ${round + 1}`);
+    // Boat resumes a machine from memory rather than booting it, so the setup
+    // re-runs through the credential refresh, checked below, not at boot.
+    yield* check(boots === 1, "the resume kept the machine's boot");
     yield* check(envFileRound === "1", `sandbox.env carries round ${envRound}`);
     yield* check(lastRun.endsWith(`round=${envRound}`), "the setup re-ran with the new env");
     if (flags["agent-proxy"]) {
