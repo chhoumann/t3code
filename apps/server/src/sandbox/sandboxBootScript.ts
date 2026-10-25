@@ -107,16 +107,21 @@ function renderInstall(source: SandboxT3Source): ReadonlyArray<string> {
       `ln -sfn ${runtime}/t3 ${shellQuote(SANDBOX_T3_BIN)}`,
     ];
   }
+  // `t3 service install` runs the runtime named by its package version, and a
+  // template keeps the one it has, so a marker names the packed build in it.
+  const packageVersion = source.version.split("+")[0] ?? source.version;
+  const packed = `"$T3CODE_HOME/runtime/versions/"${shellQuote(packageVersion)}`;
   return [
-    `RUNTIME=${runtime}`,
-    `if [ ! -f "$RUNTIME/.install-complete" ]; then`,
+    `RUNTIME=${packed}`,
+    `if [ "$(cat "$RUNTIME/.sandbox-build" 2>/dev/null)" != ${shellQuote(source.version)} ]; then`,
     `  STAGING="$T3CODE_HOME/runtime/versions/.staging-sandbox"`,
     `  rm -rf "$STAGING" && mkdir -p "$STAGING"`,
     `  tar -xzf ${shellQuote(SANDBOX_T3_TARBALL)} -C "$STAGING" --strip-components=1`,
     `  NODE_BIN="$(command -v node)"`,
     `  printf '#!/bin/sh\\nexec %s "$(dirname "$(readlink -f "$0")")/dist/bin.mjs" "$@"\\n' "$NODE_BIN" > "$STAGING/t3"`,
     `  chmod 755 "$STAGING/t3"`,
-    `  printf '%s\\n' ${shellQuote(source.version)} > "$STAGING/.install-complete"`,
+    `  printf '%s\\n' ${shellQuote(packageVersion)} > "$STAGING/.install-complete"`,
+    `  printf '%s\\n' ${shellQuote(source.version)} > "$STAGING/.sandbox-build"`,
     `  rm -rf "$RUNTIME" && mv "$STAGING" "$RUNTIME"`,
     `fi`,
     `rm -f ${shellQuote(SANDBOX_T3_TARBALL)}`,
