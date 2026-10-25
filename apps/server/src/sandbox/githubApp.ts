@@ -91,11 +91,13 @@ export const authorizeUrl = (clientId: string, redirectUri: string, state: strin
 };
 
 /**
- * How a GitHub call failed. `Transport` means no answer arrived, so GitHub may
- * or may not have acted on the request; the other two mean it answered.
+ * How a GitHub call failed. `Transport` means no answer arrived, and
+ * `InvalidBody` that a success answer could not be read: either way GitHub may
+ * have acted on the request. `Status` and `OAuth` are answers that refused it.
  */
 export type GitHubApiFailure =
   | { readonly _tag: "Transport"; readonly cause: unknown }
+  | { readonly _tag: "InvalidBody"; readonly status: number; readonly cause: unknown }
   | { readonly _tag: "Status"; readonly status: number }
   | { readonly _tag: "OAuth"; readonly error: string; readonly description: string | undefined };
 
@@ -142,6 +144,13 @@ const status = (response: HttpClientResponse.HttpClientResponse): GitHubApiFailu
   _tag: "Status",
   status: response.status,
 });
+/** A body that could not be read or decoded: a refusal's body does not matter, a success's does. */
+const unreadable =
+  (response: HttpClientResponse.HttpClientResponse) =>
+  (cause: unknown): GitHubApiFailure =>
+    isOk(response.status)
+      ? { _tag: "InvalidBody", status: response.status, cause }
+      : status(response);
 
 const send = (http: HttpClient.HttpClient, request: HttpClientRequest.HttpClientRequest) =>
   http
@@ -152,12 +161,12 @@ const send = (http: HttpClient.HttpClient, request: HttpClientRequest.HttpClient
     )
     .pipe(Effect.mapError(transport));
 
-/** The answer's JSON, or a `Status` failure when the answer is not OK or has no readable body. */
+/** The answer's JSON: a `Status` failure when it is not OK, `InvalidBody` when OK but unreadable. */
 const okJson = <A>(decode: (input: unknown) => Effect.Effect<A, Schema.SchemaError>) =>
   Effect.fn("githubApp.okJson")(function* (response: HttpClientResponse.HttpClientResponse) {
     if (!isOk(response.status)) return yield* Effect.fail(status(response));
-    const json = yield* response.json.pipe(Effect.mapError(() => status(response)));
-    return yield* decode(json).pipe(Effect.mapError(() => status(response)));
+    const json = yield* response.json.pipe(Effect.mapError(unreadable(response)));
+    return yield* decode(json).pipe(Effect.mapError(unreadable(response)));
   });
 
 /** `POST /app-manifests/{code}/conversions`: the App GitHub just created from the manifest. */
@@ -177,7 +186,7 @@ const tokenEndpoint = Effect.fn("githubApp.tokenEndpoint")(function* (
       HttpClientRequest.bodyUrlParams(params),
     ),
   );
-  const json = yield* response.json.pipe(Effect.mapError(() => status(response)));
+  const json = yield* response.json.pipe(Effect.mapError(unreadable(response)));
   if (isOAuthRefusal(json)) {
     return yield* Effect.fail<GitHubApiFailure>({
       _tag: "OAuth",
@@ -186,7 +195,7 @@ const tokenEndpoint = Effect.fn("githubApp.tokenEndpoint")(function* (
     });
   }
   if (!isOk(response.status)) return yield* Effect.fail(status(response));
-  return yield* decodeTokenGrant(json).pipe(Effect.mapError(() => status(response)));
+  return yield* decodeTokenGrant(json).pipe(Effect.mapError(unreadable(response)));
 });
 
 export const exchangeCode = (

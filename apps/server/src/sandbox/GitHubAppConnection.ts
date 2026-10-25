@@ -104,8 +104,8 @@ export class GitHubAppConnectionSetup extends Context.Service<
 
 /**
  * The one secret the App user's tokens live in. `rotating` is written before
- * the single refresh request; found again at startup, it means the answer was
- * lost and the chain is broken.
+ * the single refresh request and stays while its answer is unknown: GitHub is
+ * then asked about the old token, at the next attempt or the next start.
  */
 const TokenEnvelope = Schema.Struct({
   generation: Schema.Int,
@@ -164,9 +164,11 @@ const apiFailure = (action: string) => (reason: githubApp.GitHubApiFailure) =>
   failure(
     reason._tag === "Transport"
       ? `Could not reach GitHub to ${action}.`
-      : reason._tag === "Status"
-        ? `GitHub refused to ${action} (HTTP ${reason.status}).`
-        : `GitHub refused to ${action}: ${reason.description ?? reason.error}.`,
+      : reason._tag === "InvalidBody"
+        ? `GitHub's answer to ${action} could not be read.`
+        : reason._tag === "Status"
+          ? `GitHub refused to ${action} (HTTP ${reason.status}).`
+          : `GitHub refused to ${action}: ${reason.description ?? reason.error}.`,
   );
 
 const connectionOf = (envelope: TokenEnvelope | null): SandboxGitHubAppConfig["connection"] =>
@@ -298,12 +300,45 @@ const make = Effect.gen(function* () {
           ),
         );
 
+  /** The chain is broken: nothing refreshes until the user signs in again. */
+  const markReauthorize = (envelope: TokenEnvelope) => {
+    const broken = { ...envelope, state: "reauthorize" as const };
+    return writeEnvelope(broken).pipe(Effect.andThen(mirror(broken)));
+  };
+  const reauthorize = failure(REAUTHORIZE_MESSAGE, true);
+
+  /**
+   * Settles a refresh with no usable answer, after which GitHub may or may
+   * not have rotated. Its word on the old access token tells: still accepted
+   * means it did not, and the envelope is ready again; refused means it did
+   * and the new tokens are lost, so the user must sign in again. An expired
+   * token is refused either way and an unreachable GitHub says nothing, so
+   * the envelope stays `rotating` for the next attempt to send the same
+   * refresh again, which GitHub answers one way or the other.
+   */
+  const settleLostAnswer = Effect.fn("GitHubAppConnection.settleLostAnswer")(function* (
+    envelope: TokenEnvelope,
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    if (envelope.accessExpiresAt <= now) return "unknown" as const;
+    const probe = yield* Effect.result(githubApp.fetchUser(http, envelope.accessToken));
+    if (probe._tag === "Success") {
+      yield* writeEnvelope({ ...envelope, state: "ready" });
+      return "kept" as const;
+    }
+    if (probe.failure._tag === "Status" && probe.failure.status === 401) {
+      yield* markReauthorize(envelope);
+      return "broken" as const;
+    }
+    return "unknown" as const;
+  });
+
   /**
    * The one refresh. Runs under the mutex. `rotating` goes to disk first, so a
    * crash before the answer lands is told apart from a clean envelope at the
-   * next start. No answer at all leaves the chain's state unknown, which is
-   * the same as broken; an answer that refuses breaks it; any other answer
-   * means GitHub did not act, so the old tokens stay good.
+   * next start. An answer that refuses breaks the chain; a refusal to act
+   * leaves the old tokens good; no usable answer is settled by asking GitHub
+   * about the old token.
    */
   const rotate = Effect.fn("GitHubAppConnection.rotate")(function* (envelope: TokenEnvelope) {
     const registration = yield* readRegistration;
@@ -320,16 +355,25 @@ const make = Effect.gen(function* () {
       }),
     );
     if (result._tag === "Failure") {
-      if (result.failure._tag === "Status") {
-        yield* writeEnvelope({ ...envelope, state: "ready" });
-        return yield* apiFailure("refresh the connection")(result.failure);
+      const reason = result.failure;
+      const refreshFailed = apiFailure("refresh the connection")(reason);
+      switch (reason._tag) {
+        case "OAuth":
+          yield* markReauthorize(envelope);
+          return yield* reauthorize;
+        case "Status":
+          yield* writeEnvelope({ ...envelope, state: "ready" });
+          return yield* refreshFailed;
+        case "Transport":
+        case "InvalidBody": {
+          const settled = yield* settleLostAnswer(envelope);
+          return yield* settled === "broken" ? reauthorize : refreshFailed;
+        }
       }
-      yield* writeEnvelope({ ...envelope, state: "reauthorize" });
-      yield* mirror({ ...envelope, state: "reauthorize" });
-      return yield* failure(REAUTHORIZE_MESSAGE, true);
     }
+    // GitHub rotated, but a grant that never expires cannot carry the chain on.
     const grant = yield* expiring(result.success).pipe(
-      Effect.tapError(() => writeEnvelope({ ...envelope, state: "reauthorize" })),
+      Effect.tapError(() => markReauthorize(envelope)),
     );
     const now = yield* Clock.currentTimeMillis;
     const next = grantedEnvelope(
@@ -357,19 +401,26 @@ const make = Effect.gen(function* () {
     return yield* rotate(envelope);
   });
 
-  /** Sleeps until the token is a lead from expiring, refreshes, and repeats while a chain is ready. */
+  /**
+   * Sleeps until the token is a lead from expiring, refreshes, and repeats
+   * while the chain holds. A refresh whose answer is still unknown is sent
+   * again after the retry delay.
+   */
   const refreshLoop = Effect.gen(function* () {
     while (true) {
       const envelope = yield* readEnvelope;
-      if (envelope === null || envelope.state !== "ready") return;
+      if (envelope === null || envelope.state === "reauthorize") return;
       const now = yield* Clock.currentTimeMillis;
-      yield* Effect.sleep(
-        Duration.millis(
-          Math.max(0, envelope.accessExpiresAt - Duration.toMillis(REFRESH_LEAD) - now),
-        ),
-      );
+      if (envelope.state === "ready") {
+        yield* Effect.sleep(
+          Duration.millis(
+            Math.max(0, envelope.accessExpiresAt - Duration.toMillis(REFRESH_LEAD) - now),
+          ),
+        );
+      }
       const outcome = yield* Effect.result(mutex.withPermit(rotateIfShort(REFRESH_LEAD)));
-      if (outcome._tag === "Failure" && !outcome.failure.reauthorize) {
+      if (outcome._tag === "Failure") {
+        if (outcome.failure.reauthorize) return;
         yield* Effect.logWarning("GitHub token refresh failed; trying again later", {
           message: outcome.failure.message,
         });
@@ -577,13 +628,14 @@ const make = Effect.gen(function* () {
     );
   });
 
-  // A rotation this process never saw the end of cannot be trusted either way.
+  // A refresh this process never saw the end of: GitHub says what became of it.
   const found = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));
   const envelope =
-    found?.state === "rotating" ? { ...found, state: "reauthorize" as const } : found;
-  if (envelope !== found && envelope !== null) {
-    yield* writeEnvelope(envelope).pipe(Effect.ignore({ log: true }));
-  }
+    found?.state === "rotating"
+      ? yield* mutex
+          .withPermit(settleLostAnswer(found).pipe(Effect.andThen(readEnvelope)))
+          .pipe(Effect.orElseSucceed(() => found))
+      : found;
   const registration = yield* readRegistration.pipe(Effect.orElseSucceed(() => null));
   if (registration !== null) {
     const recorded = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
