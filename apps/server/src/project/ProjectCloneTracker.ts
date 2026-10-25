@@ -53,10 +53,11 @@ export class ProjectCloneTracker extends Context.Service<
      */
     readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
     /**
-     * Stops tracking a project's clone, interrupting it if it still runs and
-     * removing an unfinished checkout.
+     * Forgets a deleted project's clone: interrupts it if it still runs and
+     * removes the staging clone beside `workspaceRoot`, which an earlier
+     * server run may have left with nothing tracked here.
      */
-    readonly discard: (projectId: ProjectId) => Effect.Effect<void>;
+    readonly discard: (projectId: ProjectId, workspaceRoot: string) => Effect.Effect<void>;
     readonly get: (projectId: ProjectId) => Effect.Effect<ProjectCloneSnapshot | null>;
     readonly stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>>;
   }
@@ -441,17 +442,12 @@ export const make = Effect.gen(function* () {
 
   const discard: ProjectCloneTracker["Service"]["discard"] = Effect.fn(
     "ProjectCloneTracker.discard",
-  )(function* (projectId) {
+  )(function* (projectId, workspaceRoot) {
     const current = yield* Ref.get(clones);
-    const tracked = current.get(projectId);
-    if (!tracked) return;
-    if (tracked.fiber) yield* Fiber.interrupt(tracked.fiber);
-    // Git may have finished while the interrupt was landing; the project
-    // is going away either way, but a complete checkout is the user's.
-    const after = yield* get(projectId);
-    if (after?.phase !== "done") {
-      yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
-    }
+    const fiber = current.get(projectId)?.fiber;
+    if (fiber) yield* Fiber.interrupt(fiber);
+    // Only the staging clone goes; a published checkout is the user's.
+    yield* repositories.discardClone(workspaceRoot).pipe(Effect.ignore);
     yield* clearRetention(projectId);
     yield* remove(projectId);
   });
@@ -477,7 +473,7 @@ export const make = Effect.gen(function* () {
     start: (input, hooks) => locked(start(input, hooks)),
     cancel: (projectId) => locked(cancel(projectId)),
     retry: (projectId) => locked(retry(projectId)),
-    discard: (projectId) => locked(discard(projectId)),
+    discard: (projectId, workspaceRoot) => locked(discard(projectId, workspaceRoot)),
     get,
     stream,
   });

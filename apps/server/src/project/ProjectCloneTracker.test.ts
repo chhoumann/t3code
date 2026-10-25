@@ -388,11 +388,23 @@ describe("ProjectCloneTracker", () => {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       yield* tracker.start(startInput, harness.hooks);
       yield* Effect.yieldNow;
-      yield* tracker.discard(projectId);
+      yield* tracker.discard(projectId, "/workspace/t3code");
       expect(yield* tracker.get(projectId)).toBeNull();
       expect(harness.discarded).toEqual(["/workspace/t3code"]);
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.effect(
+    "discard removes the staging clone an earlier server run left, with nothing tracked",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+        yield* tracker.discard(projectId, "/workspace/t3code");
+        expect(harness.discarded).toEqual(["/workspace/t3code"]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("releases the claim when project creation fails", () => {
     const harness = makeHarness();

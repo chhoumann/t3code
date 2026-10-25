@@ -1906,8 +1906,9 @@ const layerWsCoreRpc = (
         const result = yield* projectMutationOperation(projectService, mutation).pipe(
           withCommandCaller,
         );
-        if (mutation.type === "project.delete")
-          yield* projectCloneTracker.discard(mutation.projectId);
+        if (mutation.type === "project.delete") {
+          yield* projectCloneTracker.discard(mutation.projectId, result.workspaceRoot);
+        }
         return result;
       });
 
