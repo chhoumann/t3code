@@ -212,19 +212,22 @@ const make = Effect.gen(function* () {
   };
 
   const clearEnvelope = secrets.remove(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
-  /** An envelope that cannot be read is no connection at all. It goes, so the user can connect again. */
-  const readEnvelope = Effect.gen(function* () {
+  /** What the store holds: no envelope, one, or one that cannot be decoded. Reading never writes. */
+  const readStoredEnvelope = Effect.gen(function* () {
     const bytes = yield* secrets.get(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
     if (Option.isNone(bytes)) return null;
     return yield* decodeEnvelope(textDecoder.decode(bytes.value)).pipe(
       Effect.catch((cause) =>
-        Effect.logWarning("GitHub App connection envelope unreadable; removed", { cause }).pipe(
-          Effect.andThen(clearEnvelope),
-          Effect.as(null),
+        Effect.logWarning("GitHub App connection envelope unreadable", { cause }).pipe(
+          Effect.as("unreadable" as const),
         ),
       ),
     );
   });
+  /** An envelope that cannot be read is no connection at all. */
+  const readEnvelope = readStoredEnvelope.pipe(
+    Effect.map((stored) => (stored === "unreadable" ? null : stored)),
+  );
   const writeEnvelope = (envelope: TokenEnvelope) =>
     secrets
       .set(ENVELOPE_SECRET_NAME, textEncoder.encode(encodeEnvelope(envelope)))
@@ -655,15 +658,19 @@ const make = Effect.gen(function* () {
 
   // A refresh this process never saw the end of is left to the refresh loop,
   // which sends it again at once. Starting never waits on GitHub.
-  const envelope = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));
-  const registration = yield* readRegistration.pipe(Effect.orElseSucceed(() => null));
-  if (registration !== null) {
-    const recorded = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))
-      ?.sandboxGitHubApp?.connection;
-    if (!Equal.equals(recorded, connectionOf(envelope))) {
-      yield* mirror(envelope).pipe(Effect.ignore({ log: true }));
-    }
-  }
+  const stored = yield* readStoredEnvelope.pipe(Effect.orElseSucceed(() => null));
+  const envelope = stored === "unreadable" ? null : stored;
+  yield* mutex
+    .withPermit(
+      Effect.gen(function* () {
+        // An envelope that cannot be read goes once, here, so the user can connect again.
+        if (stored === "unreadable") yield* clearEnvelope;
+        if ((yield* readRegistration) === null) return;
+        const recorded = (yield* settings.getSettings).sandboxGitHubApp?.connection;
+        if (!Equal.equals(recorded, connectionOf(envelope))) yield* mirror(envelope);
+      }),
+    )
+    .pipe(Effect.ignore({ log: true }));
   yield* scheduleRefresh;
 
   return Context.make(

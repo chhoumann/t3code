@@ -915,7 +915,7 @@ describe("GitHubAppConnection", () => {
       }),
   );
 
-  it.effect("an envelope that cannot be read counts as disconnected and is removed", () =>
+  it.effect("an envelope that cannot be read counts as disconnected, and start removes it", () =>
     Effect.gen(function* () {
       const { secrets, secretText, seedRegistration, start } = makeWorld();
       seedRegistration();
@@ -932,6 +932,15 @@ describe("GitHubAppConnection", () => {
         const again = yield* setup.begin({ step: "authorize", callbackUrl: CALLBACK_URL });
         const done = yield* setup.complete({ state: again.state, code: "install-code" });
         assert.strictEqual(done._tag, "connected");
+        assert.isNotNull(yield* connection.current(Duration.hours(1)));
+
+        // One that turns unreadable while running is left alone by every read, and signing in replaces it.
+        secrets.set("sandbox-github-app-user", new TextEncoder().encode("{not an envelope"));
+        assert.isNull(yield* connection.current(Duration.hours(1)));
+        assert.isNull(yield* connection.generation);
+        assert.strictEqual(secretText("sandbox-github-app-user"), "{not an envelope");
+        const once = yield* setup.begin({ step: "authorize", callbackUrl: CALLBACK_URL });
+        yield* setup.complete({ state: once.state, code: "install-code" });
         assert.isNotNull(yield* connection.current(Duration.hours(1)));
       }).pipe(Effect.provide(context));
     }),
