@@ -10,9 +10,62 @@ import {
   reduceCommandPaletteUiState,
   createCommandPaletteSearchState,
   reduceCommandPaletteSearchState,
+  resolveSandboxDraftProject,
   sandboxBaseStepMessage,
   type CommandPaletteUiState,
 } from "./CommandPalette.logic";
+
+describe("resolveSandboxDraftProject", () => {
+  const owner = EnvironmentId.make("owner");
+  const elsewhere = EnvironmentId.make("elsewhere");
+  const ref = (environmentId: EnvironmentId, id: string) => ({
+    environmentId,
+    projectId: ProjectId.make(id),
+  });
+  const projects = [
+    { environmentId: elsewhere, id: ProjectId.make("far") },
+    { environmentId: owner, id: ProjectId.make("owned-1") },
+    { environmentId: owner, id: ProjectId.make("owned-2") },
+  ];
+
+  it("prefers the current project on the owner, then the owner's default", () => {
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(owner, "current"),
+        defaultProject: ref(owner, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "current"));
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(elsewhere, "current"),
+        defaultProject: ref(owner, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "default"));
+  });
+
+  it("falls back to any project on the owner before giving up", () => {
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(elsewhere, "current"),
+        defaultProject: ref(elsewhere, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "owned-1"));
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: null,
+        defaultProject: null,
+        projects: projects.filter((project) => project.environmentId !== owner),
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {

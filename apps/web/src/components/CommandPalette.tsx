@@ -159,6 +159,7 @@ import {
   resolveWslProjectSelection,
 } from "../wslPaths";
 import {
+  resolveSandboxDraftProject,
   ADDON_ICON_CLASS,
   browseInputEndPaddingClass,
   buildBrowseGroups,
@@ -1241,12 +1242,15 @@ function OpenCommandPaletteDialog(props: {
   ): Promise<void> => {
     setOpen(false);
     const owner = choice.ownerEnvironmentId;
-    const ownerProject =
-      currentProjectEnvironmentId === owner && currentProjectId !== null
-        ? scopeProjectRef(owner, currentProjectId)
-        : defaultProjectRef?.environmentId === owner
-          ? defaultProjectRef
-          : null;
+    const ownerProject = resolveSandboxDraftProject({
+      owner,
+      current:
+        currentProjectEnvironmentId !== null && currentProjectId !== null
+          ? scopeProjectRef(currentProjectEnvironmentId, currentProjectId)
+          : null,
+      defaultProject: defaultProjectRef ?? null,
+      projects,
+    });
     if (scratchWorkspaceRootFor(owner) === null && ownerProject === null) {
       toastManager.add(
         stackedThreadToast({

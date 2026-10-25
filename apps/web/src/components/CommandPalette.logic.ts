@@ -10,6 +10,7 @@ import {
   type ThreadSearchSubject,
 } from "@t3tools/shared/paletteSearch";
 import { threadSearchSubject } from "@t3tools/client-runtime/state/thread-search";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
 import {
   addProjectRemoteSourceLabel,
@@ -23,7 +24,9 @@ import {
   type EnvironmentMachineKind,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type ProjectId,
   type SandboxRemoteUrl,
+  type ScopedProjectRef,
   type SourceControlDiscoveryResult,
   type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
@@ -754,6 +757,26 @@ export type AddProjectCloneFlow =
       readonly repositoryTitle: string;
       readonly remoteUrl: SandboxRemoteUrl;
     };
+
+/**
+ * The project a sandbox draft opens in on its owner, when the owner offers no
+ * scratch threads: the current project when it is the owner's, else the
+ * owner's default, else any project of the owner's. Null when it has none.
+ */
+export function resolveSandboxDraftProject(input: {
+  readonly owner: EnvironmentId;
+  readonly current: ScopedProjectRef | null;
+  readonly defaultProject: ScopedProjectRef | null;
+  readonly projects: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: ProjectId;
+  }>;
+}): ScopedProjectRef | null {
+  if (input.current?.environmentId === input.owner) return input.current;
+  if (input.defaultProject?.environmentId === input.owner) return input.defaultProject;
+  const owned = input.projects.find((project) => project.environmentId === input.owner);
+  return owned === undefined ? null : scopeProjectRef(owned.environmentId, owned.id);
+}
 
 /** What Enter does with the typed base of a sandbox, or why it cannot. */
 export function sandboxBaseStepMessage(query: string): string {
