@@ -24,6 +24,8 @@ describe("SandboxRemoteUrl", () => {
     ["a URL carrying credentials", "https://user:token@github.com/pingdotgg/t3code"],
     ["a URL with a query token", "https://github.com/pingdotgg/t3code?access_token=x"],
     ["a host alone", "https://github.com"],
+    ["a host and owner alone", "https://github.com/pingdotgg"],
+    ["an owner with an empty repository", "https://github.com/pingdotgg/"],
   ])("refuses %s", (_, url) => {
     expect(isRemoteUrl(url)).toBe(false);
   });

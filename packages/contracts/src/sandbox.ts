@@ -73,9 +73,11 @@ export type SandboxStatus = typeof SandboxStatus.Type;
  * CLI's HTTPS helper, so clients rewrite SSH before sending.
  */
 export const SandboxRemoteUrl = TrimmedNonEmptyString.check(
-  Schema.makeFilter((value: string) => /^https:\/\/[^@/\s?#]+\/[^\s?#]+$/.test(value), {
-    expected: "an https clone URL without credentials",
-  }),
+  Schema.makeFilter(
+    // Host, then at least an owner and a repository.
+    (value: string) => /^https:\/\/[^@/\s?#]+\/[^/\s?#]+\/[^\s?#]+$/.test(value),
+    { expected: "an https clone URL naming an owner and a repository, without credentials" },
+  ),
 ).pipe(Schema.brand("SandboxRemoteUrl"));
 export type SandboxRemoteUrl = typeof SandboxRemoteUrl.Type;
 
