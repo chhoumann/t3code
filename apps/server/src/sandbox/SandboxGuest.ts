@@ -24,7 +24,11 @@ import {
   WsRpcGroup,
   defaultInstanceIdForDriver,
   type MessageId,
-  type ProjectCloneSnapshot,
+  type ProjectCloneActionInput,
+  type ProjectCloneActionResult,
+  type ProjectCloneListEvent,
+  type ProjectCloneStartInput,
+  type ProjectCloneSubscribeInput,
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInteractionMode,
@@ -224,6 +228,84 @@ export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(functio
 });
 
 type GuestRpc = Effect.Success<ReturnType<typeof connectGuestRpc>>;
+
+/** The guest's clone RPCs that preparing a project drives; `E` is what reading the clone list can fail with. */
+export interface ProjectCloneRpc<E> {
+  readonly subscribeProjectClones: (
+    input: ProjectCloneSubscribeInput,
+    options: { readonly asQueue: true },
+  ) => Effect.Effect<Queue.Dequeue<ProjectCloneListEvent, E>, never, Scope.Scope>;
+  readonly "projectClone.start": (
+    input: ProjectCloneStartInput,
+  ) => Effect.Effect<unknown, { readonly _tag: string; readonly message: string }>;
+  readonly "projectClone.retry": (
+    input: ProjectCloneActionInput,
+  ) => Effect.Effect<ProjectCloneActionResult, { readonly _tag: string; readonly message: string }>;
+}
+
+const cloneRefused = (error: { readonly _tag: string; readonly message: string }) =>
+  new SandboxGuestError({
+    operation: "clone",
+    stderrTail: isRepositoryError(error) ? error.detail : error.message,
+  });
+
+/**
+ * Has the guest clone the project, or joins the clone it already runs, or
+ * retries the one that failed, and waits for the base it pins. The guest's
+ * clone list is read before anything is asked, so the clone's end cannot slip
+ * by between the two.
+ */
+export const prepareProjectOver = Effect.fn("SandboxGuest.prepareProjectOver")(
+  function* <E>(rpc: ProjectCloneRpc<E>, project: SandboxSeedProject) {
+    const clones = yield* rpc.subscribeProjectClones({}, { asQueue: true });
+    const snapshotOf = (list: ProjectCloneListEvent) =>
+      list.find((snapshot) => snapshot.projectId === project.projectId);
+    let snapshot = snapshotOf(yield* Queue.take(clones));
+    // Lists from before a start claimed its entry may still lack it. Once the
+    // entry has been seen, a list without it means the guest dropped the clone.
+    let seen = snapshot !== undefined;
+    if (snapshot === undefined) {
+      yield* rpc["projectClone.start"]({
+        projectId: project.projectId,
+        title: project.title,
+        createdAt: project.createdAt,
+        remoteUrl: project.source.remoteUrl,
+        destinationPath: project.path,
+        protocol: "https",
+        checkout: {
+          base: project.source.base,
+          reuseMatching: true,
+          importProjectScripts: true,
+        },
+      }).pipe(Effect.mapError(cloneRefused));
+    } else if (snapshot.phase === "failed" || snapshot.phase === "cancelled") {
+      yield* rpc["projectClone.retry"]({ projectId: project.projectId }).pipe(
+        Effect.mapError(cloneRefused),
+      );
+      snapshot = undefined;
+    }
+    while (snapshot === undefined || snapshot.phase === "running") {
+      const next = snapshotOf(yield* Queue.take(clones));
+      if (next === undefined) {
+        if (!seen) continue;
+        return yield* new SandboxGuestError({
+          operation: "clone",
+          stderrTail: "The sandbox stopped tracking the clone.",
+        });
+      }
+      seen = true;
+      snapshot = next;
+    }
+    if (snapshot.phase !== "done" || snapshot.base === undefined) {
+      return yield* new SandboxGuestError({
+        operation: "clone",
+        ...(snapshot.error === null ? {} : { stderrTail: snapshot.error }),
+      });
+    }
+    return snapshot.base;
+  },
+  Effect.mapError((cause) => (isGuestError(cause) ? cause : sessionCallError("clone")(cause))),
+);
 
 export class SandboxGuest extends Context.Service<
   SandboxGuest,
@@ -501,60 +583,8 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const cloneRefused = (error: { readonly _tag: string; readonly message: string }) =>
-    new SandboxGuestError({
-      operation: "clone",
-      stderrTail: isRepositoryError(error) ? error.detail : error.message,
-    });
-
   const prepareProject: SandboxGuest["Service"]["prepareProject"] = (target, project) =>
-    guestRpc("clone", CLONE_TIMEOUT, target, (rpc) =>
-      Effect.gen(function* () {
-        const clones = yield* rpc["subscribeProjectClones"]({}, { asQueue: true });
-        const snapshotOf = (list: ReadonlyArray<ProjectCloneSnapshot>) =>
-          list.find((snapshot) => snapshot.projectId === project.projectId);
-        // Subscribed before asking, so the clone's end cannot slip by between the two.
-        let snapshot = snapshotOf(yield* Queue.take(clones));
-        if (snapshot === undefined) {
-          yield* rpc["projectClone.start"]({
-            projectId: project.projectId,
-            title: project.title,
-            createdAt: project.createdAt,
-            remoteUrl: project.source.remoteUrl,
-            destinationPath: project.path,
-            protocol: "https",
-            checkout: {
-              base: project.source.base,
-              reuseMatching: true,
-              importProjectScripts: true,
-            },
-          }).pipe(Effect.mapError(cloneRefused));
-        } else if (snapshot.phase === "failed" || snapshot.phase === "cancelled") {
-          yield* rpc["projectClone.retry"]({ projectId: project.projectId }).pipe(
-            Effect.mapError(cloneRefused),
-          );
-          snapshot = undefined;
-        }
-        while (snapshot === undefined || snapshot.phase === "running") {
-          const next = snapshotOf(yield* Queue.take(clones));
-          if (next === undefined) {
-            if (snapshot === undefined) continue;
-            return yield* new SandboxGuestError({
-              operation: "clone",
-              stderrTail: "The sandbox stopped tracking the clone.",
-            });
-          }
-          snapshot = next;
-        }
-        if (snapshot.phase !== "done" || snapshot.base === undefined) {
-          return yield* new SandboxGuestError({
-            operation: "clone",
-            ...(snapshot.error === null ? {} : { stderrTail: snapshot.error }),
-          });
-        }
-        return snapshot.base;
-      }),
-    );
+    guestRpc("clone", CLONE_TIMEOUT, target, (rpc) => prepareProjectOver(rpc, project));
 
   const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (
     target,

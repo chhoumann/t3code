@@ -5,9 +5,18 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId, SandboxId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  SandboxId,
+  SandboxRemoteUrl,
+  type ProjectCloneListEvent,
+  type ProjectCloneSnapshot,
+  type ProjectCloneStartInput,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import { HttpClient } from "effect/http";
 import { Socket } from "effect/socket";
@@ -212,5 +221,158 @@ describe("SandboxGuest", () => {
         ]);
       }).pipe(Effect.provide(layer));
     },
+  );
+});
+
+const seedProject: SandboxGuest.SandboxSeedProject = {
+  projectId: ProjectId.make("project-1"),
+  title: "t3code",
+  path: "/home/user/projects/t3code",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  source: {
+    remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/t3code.git"),
+    base: { _tag: "default" },
+  },
+};
+const base = { branch: "main", commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d" };
+let sequence = 0;
+const clone = (
+  phase: ProjectCloneSnapshot["phase"],
+  extra: Partial<ProjectCloneSnapshot> = {},
+): ProjectCloneSnapshot => ({
+  projectId: seedProject.projectId,
+  remoteUrl: seedProject.source.remoteUrl,
+  destinationPath: seedProject.path,
+  repository: null,
+  phase,
+  stage: "receiving",
+  percent: null,
+  detail: null,
+  stalled: false,
+  error: null,
+  startedAt: seedProject.createdAt,
+  endedAt: null,
+  sequence: ++sequence,
+  ...extra,
+});
+const another = clone("running", { projectId: ProjectId.make("project-other") });
+
+/**
+ * A guest's clone service as seen over RPC: `lists` is what the subscription
+ * delivers; a start or a retry publishes the lists it is told to.
+ */
+const cloneRpc = (behavior: {
+  readonly onStart?: ReadonlyArray<ProjectCloneListEvent>;
+  readonly onRetry?: {
+    readonly applied: boolean;
+    readonly lists: ReadonlyArray<ProjectCloneListEvent>;
+  };
+}) =>
+  Effect.gen(function* () {
+    const lists = yield* Queue.unbounded<ProjectCloneListEvent>();
+    const calls: Array<{ start: ProjectCloneStartInput } | "retry"> = [];
+    const publish = (events: ReadonlyArray<ProjectCloneListEvent>) =>
+      Effect.forEach(events, (event) => Queue.offer(lists, event), { discard: true });
+    const rpc: SandboxGuest.ProjectCloneRpc<never> = {
+      subscribeProjectClones: () => Effect.succeed(lists),
+      "projectClone.start": (input) =>
+        Effect.gen(function* () {
+          calls.push({ start: input });
+          yield* publish(behavior.onStart ?? []);
+          return {};
+        }),
+      "projectClone.retry": () =>
+        Effect.gen(function* () {
+          calls.push("retry");
+          yield* publish(behavior.onRetry?.lists ?? []);
+          return { applied: behavior.onRetry?.applied ?? false };
+        }),
+    };
+    const prepare = SandboxGuest.prepareProjectOver(rpc, seedProject).pipe(Effect.scoped);
+    return { lists, calls, prepare };
+  });
+
+describe("prepareProjectOver", () => {
+  it.effect("starts the clone when the guest has none, and returns the base it pins", () =>
+    Effect.gen(function* () {
+      const { lists, calls, prepare } = yield* cloneRpc({
+        onStart: [
+          [another, clone("running")],
+          [another, clone("done", { base })],
+        ],
+      });
+      yield* Queue.offer(lists, [another]);
+      expect(yield* prepare).toEqual(base);
+      expect(calls).toEqual([
+        {
+          start: {
+            projectId: seedProject.projectId,
+            title: "t3code",
+            createdAt: seedProject.createdAt,
+            remoteUrl: seedProject.source.remoteUrl,
+            destinationPath: seedProject.path,
+            protocol: "https",
+            checkout: {
+              base: { _tag: "default" },
+              reuseMatching: true,
+              importProjectScripts: true,
+            },
+          },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("joins a clone the guest already runs instead of starting another", () =>
+    Effect.gen(function* () {
+      const { lists, calls, prepare } = yield* cloneRpc({});
+      yield* Queue.offer(lists, [clone("running", { percent: 40 })]);
+      yield* Queue.offer(lists, [clone("done", { base })]);
+      expect(yield* prepare).toEqual(base);
+      expect(calls).toEqual([]);
+    }),
+  );
+
+  it.effect("retries a clone that failed and waits for the retry's outcome", () =>
+    Effect.gen(function* () {
+      const { lists, calls, prepare } = yield* cloneRpc({
+        onRetry: { applied: true, lists: [[clone("running")], [clone("done", { base })]] },
+      });
+      yield* Queue.offer(lists, [clone("failed", { error: "fatal: could not read from remote" })]);
+      expect(yield* prepare).toEqual(base);
+      expect(calls).toEqual(["retry"]);
+    }),
+  );
+
+  it.effect("a clone that failed after being joined names git's reason", () =>
+    Effect.gen(function* () {
+      const { lists, prepare } = yield* cloneRpc({});
+      yield* Queue.offer(lists, [clone("running")]);
+      yield* Queue.offer(lists, [clone("failed", { error: "fatal: repository not found" })]);
+      const error = yield* Effect.flip(prepare);
+      expect(error.operation).toBe("clone");
+      expect(error.message).toContain("fatal: repository not found");
+    }),
+  );
+
+  it.effect("a finished clone without a pinned base is a failure, not a launch", () =>
+    Effect.gen(function* () {
+      const { lists, calls, prepare } = yield* cloneRpc({});
+      yield* Queue.offer(lists, [clone("done")]);
+      const error = yield* Effect.flip(prepare);
+      expect(error.operation).toBe("clone");
+      expect(calls).toEqual([]);
+    }),
+  );
+
+  it.effect("fails at once when the guest drops the clone as the retry is asked", () =>
+    Effect.gen(function* () {
+      const { lists, prepare } = yield* cloneRpc({
+        onRetry: { applied: false, lists: [[another]] },
+      });
+      yield* Queue.offer(lists, [another, clone("cancelled")]);
+      const error = yield* Effect.flip(prepare);
+      expect(error.message).toContain("stopped tracking");
+    }),
   );
 });
