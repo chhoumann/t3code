@@ -345,8 +345,8 @@ const make = Effect.gen(function* () {
    * The one refresh. Runs under the mutex. `rotating` goes to disk first, so a
    * crash before the answer lands is told apart from a clean envelope at the
    * next start. An answer that refuses breaks the chain. A refusal to act
-   * leaves the old tokens good. No usable answer is settled by asking GitHub
-   * about the old token.
+   * leaves the envelope as it was. No usable answer is settled by asking
+   * GitHub about the old token.
    */
   const rotate = Effect.fn("GitHubAppConnection.rotate")(function* (envelope: TokenEnvelope) {
     const registration = yield* readRegistration;
@@ -370,7 +370,9 @@ const make = Effect.gen(function* () {
           yield* markReauthorize(envelope);
           return yield* reauthorize;
         case "Status":
-          yield* writeEnvelope({ ...envelope, state: "ready" });
+          // GitHub did not act, so the envelope goes back to how it came in. A
+          // resend of a refresh whose first answer is unknown stays `rotating`.
+          yield* writeEnvelope(envelope);
           return yield* refreshFailed;
         case "Transport":
         case "InvalidBody": {

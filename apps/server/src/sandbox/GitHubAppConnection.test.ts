@@ -735,6 +735,38 @@ describe("GitHubAppConnection", () => {
     }),
   );
 
+  it.effect(
+    "a server error on a resent refresh keeps it under way instead of vouching for the old token",
+    () =>
+      Effect.gen(function* () {
+        const { github, envelope, start } = makeWorld();
+        const { context } = yield* start;
+        yield* Effect.gen(function* () {
+          const connection = yield* GitHubAppConnection.GitHubAppConnection;
+          yield* connect;
+          yield* TestClock.adjust(Duration.hours(6));
+          // GitHub rotated, the answer was lost, and GitHub could not be asked about the old token.
+          github.nextRefreshAnswer = "lost";
+          github.nextUserAnswer = "transport";
+          yield* connection.current(Duration.hours(3)).pipe(Effect.flip);
+          assert.strictEqual(envelope()?.state, "rotating");
+          assert.isNull(yield* connection.generation);
+
+          // The resend meets a server error. GitHub has still said nothing about the first refresh.
+          github.nextRefreshAnswer = "unavailable";
+          const error = yield* connection.current(Duration.hours(3)).pipe(Effect.flip);
+          assert.include(error.message, "503");
+          assert.strictEqual(envelope()?.state, "rotating");
+          assert.isNull(yield* connection.generation);
+          // The old token, which GitHub revoked with the first refresh, is never handed out again.
+          const old = yield* connection.current(Duration.hours(1)).pipe(Effect.result);
+          assert.strictEqual(old._tag, "Failure");
+          if (old._tag === "Failure") assert.isTrue(old.failure.reauthorize);
+          assert.strictEqual(envelope()?.state, "reauthorize");
+        }).pipe(Effect.provide(context));
+      }),
+  );
+
   it.effect("disconnect revokes the grant, forgets the tokens, and tells the stream", () =>
     Effect.gen(function* () {
       const { github, envelope, secretText, start } = makeWorld();
