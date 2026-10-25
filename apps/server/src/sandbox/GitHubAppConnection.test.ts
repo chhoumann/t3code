@@ -57,12 +57,12 @@ const makeGitHub = () => {
     } | null,
     /**
      * How the next refresh goes when not plainly with tokens: the request never
-     * arrives, GitHub rotates but the answer is lost or unreadable, or GitHub
-     * is down.
+     * arrives, GitHub rotates but the answer is lost or unreadable, GitHub is
+     * down, or GitHub never answers at all.
      */
-    nextRefreshAnswer: null as "transport" | "lost" | "garbled" | "unavailable" | null,
-    /** The next `GET /user` never arrives. */
-    nextUserAnswer: null as "transport" | null,
+    nextRefreshAnswer: null as "transport" | "lost" | "garbled" | "unavailable" | "hang" | null,
+    /** The next `GET /user` never arrives, or is never answered. */
+    nextUserAnswer: null as "transport" | "hang" | null,
     /** The next grant revocation never arrives. */
     nextRevokeAnswer: null as "transport" | null,
     revokedGrants: 0,
@@ -130,6 +130,7 @@ const makeGitHub = () => {
           const pending = github.nextRefreshAnswer;
           github.nextRefreshAnswer = null;
           if (pending === "transport") return yield* transportFailure(request);
+          if (pending === "hang") return yield* Effect.never;
           if (pending === "unavailable") return json({ message: "unavailable" }, 503);
           const token = params.get("refresh_token") ?? "";
           if (!github.liveRefreshTokens.delete(token)) return json({ error: "bad_refresh_token" });
@@ -154,9 +155,11 @@ const makeGitHub = () => {
         }
       }
       if (request.method === "GET" && path === "/user") {
-        if (github.nextUserAnswer === "transport") {
+        if (github.nextUserAnswer !== null) {
+          const pending = github.nextUserAnswer;
           github.nextUserAnswer = null;
-          return yield* transportFailure(request);
+          if (pending === "transport") return yield* transportFailure(request);
+          return yield* Effect.never;
         }
         const token = (recorded.headers["authorization"] ?? "").replace(/^Bearer /, "");
         if (!github.liveAccessTokens.has(token)) return json({}, 401);
@@ -532,49 +535,115 @@ describe("GitHubAppConnection", () => {
     }),
   );
 
-  it.effect("settles a refresh under way at startup by asking GitHub about the old token", () =>
+  it.effect("sends a refresh under way at startup again, in the background", () =>
     Effect.gen(function* () {
-      // GitHub still takes the old token: the refresh never happened, the chain is whole.
+      // GitHub never saw the first refresh: the one sent again carries the chain on.
       const kept = makeWorld();
+      kept.seedRegistration();
       kept.seedEnvelope("rotating", 8 * HOUR);
       kept.github.liveAccessTokens.add("access-seeded");
+      kept.github.liveRefreshTokens.add("refresh-seeded");
       const keptStarted = yield* kept.start;
       yield* Effect.gen(function* () {
         const connection = yield* GitHubAppConnection.GitHubAppConnection;
+        const refreshed = connection.generations.pipe(
+          Stream.filter((generation) => generation !== null && generation > 3),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        yield* advanceUntil(refreshed, Duration.minutes(1));
         assert.strictEqual(kept.envelope()?.state, "ready");
         const token = yield* connection.current(Duration.hours(1));
-        assert.strictEqual(Redacted.value(token!.token), "access-seeded");
-        assert.strictEqual(refreshesSent(kept.github), 0);
+        assert.strictEqual(Redacted.value(token!.token), "access-1");
+        assert.strictEqual(refreshesSent(kept.github), 1);
+        assert.strictEqual(probesSent(kept.github), 0);
       }).pipe(Effect.provide(keptStarted.context));
 
-      // GitHub refuses the old token: it rotated, and the new tokens went down with the process.
+      // GitHub acted on the first refresh, and its answer went down with the process: the chain is broken.
       const broken = makeWorld();
+      broken.seedRegistration();
       broken.seedEnvelope("rotating", 8 * HOUR);
       const brokenStarted = yield* broken.start;
       yield* Effect.gen(function* () {
         const connection = yield* GitHubAppConnection.GitHubAppConnection;
-        assert.strictEqual(broken.envelope()?.state, "reauthorize");
         const error = yield* connection.current(Duration.hours(1)).pipe(Effect.flip);
         assert.isTrue(error.reauthorize);
-        assert.strictEqual(refreshesSent(broken.github), 0);
+        assert.strictEqual(broken.envelope()?.state, "reauthorize");
+        const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
+        assert.strictEqual(settings.sandboxGitHubApp?.connection._tag, "reauthorize");
+        assert.strictEqual(refreshesSent(broken.github), 1);
       }).pipe(Effect.provide(brokenStarted.context));
-
-      // GitHub cannot be asked: the refresh stays under way and is sent again.
-      const unknown = makeWorld();
-      unknown.seedRegistration();
-      unknown.seedEnvelope("rotating", 8 * HOUR);
-      unknown.github.nextUserAnswer = "transport";
-      unknown.github.liveRefreshTokens.add("refresh-seeded");
-      const unknownStarted = yield* unknown.start;
-      yield* Effect.gen(function* () {
-        const connection = yield* GitHubAppConnection.GitHubAppConnection;
-        assert.strictEqual(unknown.envelope()?.state, "rotating");
-        assert.isNull(yield* connection.generation);
-        const token = yield* connection.current(Duration.hours(1));
-        assert.strictEqual(Redacted.value(token!.token), "access-1");
-        assert.strictEqual(unknown.envelope()?.state, "ready");
-      }).pipe(Effect.provide(unknownStarted.context));
     }),
+  );
+
+  it.effect(
+    "starts without waiting on GitHub when the refresh under way and the probe both hang",
+    () =>
+      Effect.gen(function* () {
+        const { github, envelope, seedEnvelope, seedRegistration, start } = makeWorld();
+        seedRegistration();
+        seedEnvelope("rotating", 8 * HOUR);
+        github.liveRefreshTokens.add("refresh-seeded");
+        const gate = { entered: Deferred.makeUnsafe<void>(), release: Deferred.makeUnsafe<void>() };
+        github.refreshGate = gate;
+        github.nextUserAnswer = "hang";
+        const { context } = yield* start;
+        yield* Effect.gen(function* () {
+          const connection = yield* GitHubAppConnection.GitHubAppConnection;
+          // The refresh went out again at once, without the timer sleeping first.
+          yield* Deferred.await(gate.entered);
+          assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+          assert.strictEqual(envelope()?.state, "rotating");
+          assert.isNull(yield* connection.generation);
+
+          // Neither the hung refresh nor the hung probe holds the connection past its time limit.
+          const refreshed = connection.generations.pipe(
+            Stream.filter((generation) => generation !== null && generation > 3),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+          yield* advanceUntil(refreshed, Duration.minutes(1));
+          assert.strictEqual(envelope()?.state, "ready");
+          assert.strictEqual(envelope()?.accessToken, "access-1");
+          assert.strictEqual(refreshesSent(github), 2);
+          assert.strictEqual(probesSent(github), 1);
+          // Two 30 second limits, then the retry delay.
+          const now = yield* Clock.currentTimeMillis;
+          assert.isAtLeast(now, 60_000 + 5 * 60_000);
+          assert.isBelow(now, 60_000 + 7 * 60_000);
+        }).pipe(Effect.provide(context));
+      }),
+  );
+
+  it.effect(
+    "gives up a refresh GitHub never answers after 30 seconds, as one that never arrived",
+    () =>
+      Effect.gen(function* () {
+        const { github, envelope, start } = makeWorld();
+        const { context } = yield* start;
+        yield* Effect.gen(function* () {
+          const connection = yield* GitHubAppConnection.GitHubAppConnection;
+          yield* connect;
+          yield* TestClock.adjust(Duration.hours(6));
+          const probesBefore = probesSent(github);
+          github.nextRefreshAnswer = "hang";
+          const error = yield* advanceUntil(
+            connection.current(Duration.hours(3)).pipe(Effect.flip),
+            Duration.seconds(10),
+          );
+          assert.include(error.message, "Could not reach GitHub");
+          assert.isFalse(error.reauthorize);
+          assert.isAtLeast(yield* Clock.currentTimeMillis, 6 * HOUR + 30_000);
+          assert.isBelow(yield* Clock.currentTimeMillis, 6 * HOUR + 60_000);
+          // GitHub still takes the old token, so it never rotated and the old tokens stand.
+          assert.strictEqual(envelope()?.state, "ready");
+          assert.strictEqual(envelope()?.accessToken, "access-1");
+          assert.strictEqual(refreshesSent(github), 1);
+          assert.strictEqual(probesSent(github) - probesBefore, 1);
+          const token = yield* connection.current(Duration.hours(3));
+          assert.strictEqual(Redacted.value(token!.token), "access-2");
+        }).pipe(Effect.provide(context));
+      }),
   );
 
   it.effect("does not ask GitHub about an old token that has expired, and refreshes again", () =>

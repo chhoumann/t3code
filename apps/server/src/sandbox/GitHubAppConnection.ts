@@ -104,8 +104,9 @@ export class GitHubAppConnectionSetup extends Context.Service<
 
 /**
  * The one secret the App user's tokens live in. `rotating` is written before
- * the single refresh request and stays while its answer is unknown. GitHub is
- * then asked about the old token, at the next attempt or the next start.
+ * the single refresh request and stays while its answer is unknown. The same
+ * refresh is then sent again, at the next attempt or the next start, and
+ * GitHub is asked about the old token when that too goes unanswered.
  */
 const TokenEnvelope = Schema.Struct({
   generation: Schema.Int,
@@ -414,7 +415,7 @@ const make = Effect.gen(function* () {
   /**
    * Sleeps until the token is a lead from expiring, refreshes, and repeats
    * while the chain holds. A refresh whose answer is still unknown is sent
-   * again after the retry delay.
+   * again after the retry delay, and one found under way at start at once.
    */
   const refreshLoop = Effect.gen(function* () {
     while (true) {
@@ -652,14 +653,9 @@ const make = Effect.gen(function* () {
     if (envelope !== null) yield* publish(null);
   }, mutex.withPermit);
 
-  // A refresh this process never saw the end of. GitHub says what became of it.
-  const found = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));
-  const envelope =
-    found?.state === "rotating"
-      ? yield* mutex
-          .withPermit(settleLostAnswer(found).pipe(Effect.andThen(readEnvelope)))
-          .pipe(Effect.orElseSucceed(() => found))
-      : found;
+  // A refresh this process never saw the end of is left to the refresh loop,
+  // which sends it again at once. Starting never waits on GitHub.
+  const envelope = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));
   const registration = yield* readRegistration.pipe(Effect.orElseSucceed(() => null));
   if (registration !== null) {
     const recorded = (yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null)))

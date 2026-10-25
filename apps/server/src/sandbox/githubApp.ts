@@ -5,6 +5,8 @@
  *
  * @module githubApp
  */
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
@@ -13,6 +15,8 @@ import * as Schema from "effect/Schema";
 
 const GITHUB_WEB = "https://github.com";
 const GITHUB_API = "https://api.github.com";
+/** The longest any call here may take. One GitHub never answers fails as `Transport`, which the connection settles like a lost answer. */
+const REQUEST_TIMEOUT = Duration.seconds(30);
 
 /**
  * Callback origins every App registers besides the creating client's, so the
@@ -152,6 +156,15 @@ const unreadable =
       ? { _tag: "InvalidBody", status: response.status, cause }
       : status(response);
 
+const bounded = <A>(call: Effect.Effect<A, GitHubApiFailure>): Effect.Effect<A, GitHubApiFailure> =>
+  call.pipe(
+    Effect.timeoutOrElse({
+      duration: REQUEST_TIMEOUT,
+      orElse: () =>
+        Effect.fail(transport(new Cause.TimeoutError("GitHub did not answer in time."))),
+    }),
+  );
+
 const send = (http: HttpClient.HttpClient, request: HttpClientRequest.HttpClientRequest) =>
   http
     .execute(
@@ -171,10 +184,12 @@ const okJson = <A>(decode: (input: unknown) => Effect.Effect<A, Schema.SchemaErr
 
 /** `POST /app-manifests/{code}/conversions`: the App GitHub just created from the manifest. */
 export const convertManifest = (http: HttpClient.HttpClient, code: string) =>
-  send(
-    http,
-    HttpClientRequest.post(`${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`),
-  ).pipe(Effect.flatMap(okJson(decodeManifestConversion)));
+  bounded(
+    send(
+      http,
+      HttpClientRequest.post(`${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`),
+    ).pipe(Effect.flatMap(okJson(decodeManifestConversion))),
+  );
 
 const tokenEndpoint = Effect.fn("githubApp.tokenEndpoint")(function* (
   http: HttpClient.HttpClient,
@@ -196,7 +211,7 @@ const tokenEndpoint = Effect.fn("githubApp.tokenEndpoint")(function* (
   }
   if (!isOk(response.status)) return yield* Effect.fail(status(response));
   return yield* decodeTokenGrant(json).pipe(Effect.mapError(unreadable(response)));
-});
+}, bounded);
 
 export const exchangeCode = (
   http: HttpClient.HttpClient,
@@ -225,10 +240,12 @@ export const refreshTokens = (
   });
 
 export const fetchUser = (http: HttpClient.HttpClient, accessToken: string) =>
-  send(
-    http,
-    HttpClientRequest.get(`${GITHUB_API}/user`).pipe(HttpClientRequest.bearerToken(accessToken)),
-  ).pipe(Effect.flatMap(okJson(decodeGitHubUser)));
+  bounded(
+    send(
+      http,
+      HttpClientRequest.get(`${GITHUB_API}/user`).pipe(HttpClientRequest.bearerToken(accessToken)),
+    ).pipe(Effect.flatMap(okJson(decodeGitHubUser))),
+  );
 
 /**
  * `DELETE /applications/{client_id}/grant`: revokes the user's authorization
@@ -239,18 +256,20 @@ export const revokeGrant = (
   http: HttpClient.HttpClient,
   input: { readonly clientId: string; readonly clientSecret: string; readonly accessToken: string },
 ) =>
-  send(
-    http,
-    HttpClientRequest.delete(
-      `${GITHUB_API}/applications/${encodeURIComponent(input.clientId)}/grant`,
+  bounded(
+    send(
+      http,
+      HttpClientRequest.delete(
+        `${GITHUB_API}/applications/${encodeURIComponent(input.clientId)}/grant`,
+      ).pipe(
+        HttpClientRequest.basicAuth(input.clientId, input.clientSecret),
+        HttpClientRequest.bodyJsonUnsafe({ access_token: input.accessToken }),
+      ),
     ).pipe(
-      HttpClientRequest.basicAuth(input.clientId, input.clientSecret),
-      HttpClientRequest.bodyJsonUnsafe({ access_token: input.accessToken }),
-    ),
-  ).pipe(
-    Effect.flatMap((response) =>
-      isOk(response.status) || response.status === 404 || response.status === 422
-        ? Effect.void
-        : Effect.fail(status(response)),
+      Effect.flatMap((response) =>
+        isOk(response.status) || response.status === 404 || response.status === 422
+          ? Effect.void
+          : Effect.fail(status(response)),
+      ),
     ),
   );
