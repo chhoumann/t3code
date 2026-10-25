@@ -1,4 +1,4 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- rmdir(2) has no Effect counterpart; `remove` takes a directory only recursively.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- rmdir(2) has no Effect counterpart. `remove` takes a directory only recursively.
 import * as NodeFSP from "node:fs/promises";
 
 import * as Context from "effect/Context";
@@ -465,7 +465,7 @@ export const make = Effect.gen(function* () {
    * Moves the staged clone to the destination. The destination may exist as
    * the empty directory the project was created with; rename(2) replaces an
    * empty directory on POSIX but not on Windows, so it goes first. Only
-   * rmdir(2) removes it: a file that landed there since the clone started
+   * rmdir(2) removes it. A file that landed there since the clone started
    * makes it refuse, and the publish fails instead of taking the file.
    */
   const publishClone = Effect.fn("SourceControlRepositoryService.publishClone")(function* (

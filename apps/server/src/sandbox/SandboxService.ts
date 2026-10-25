@@ -517,8 +517,8 @@ const make = Effect.gen(function* () {
 
   /**
    * The generation of the token the connection hands out now, or null when it
-   * has none to give. Read only: a look must not refresh, and so never breaks
-   * the chain; the refresh timer and a delivery do.
+   * has none to give. Read only, so a look never refreshes and never breaks
+   * the chain. The refresh timer and a delivery do.
    */
   const githubTokenGenerationNow = () =>
     githubConnection.generation.pipe(

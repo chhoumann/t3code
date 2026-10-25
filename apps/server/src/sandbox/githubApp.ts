@@ -92,7 +92,7 @@ export const authorizeUrl = (clientId: string, redirectUri: string, state: strin
 
 /**
  * How a GitHub call failed. `Transport` means no answer arrived, and
- * `InvalidBody` that a success answer could not be read: either way GitHub may
+ * `InvalidBody` that a success answer could not be read. Either way GitHub may
  * have acted on the request. `Status` and `OAuth` are answers that refused it.
  */
 export type GitHubApiFailure =
@@ -144,7 +144,7 @@ const status = (response: HttpClientResponse.HttpClientResponse): GitHubApiFailu
   _tag: "Status",
   status: response.status,
 });
-/** A body that could not be read or decoded: a refusal's body does not matter, a success's does. */
+/** A body that could not be read or decoded. A refusal's body does not matter, a success's does. */
 const unreadable =
   (response: HttpClientResponse.HttpClientResponse) =>
   (cause: unknown): GitHubApiFailure =>
@@ -161,7 +161,7 @@ const send = (http: HttpClient.HttpClient, request: HttpClientRequest.HttpClient
     )
     .pipe(Effect.mapError(transport));
 
-/** The answer's JSON: a `Status` failure when it is not OK, `InvalidBody` when OK but unreadable. */
+/** The answer's JSON, else `Status` when it is not OK and `InvalidBody` when OK but unreadable. */
 const okJson = <A>(decode: (input: unknown) => Effect.Effect<A, Schema.SchemaError>) =>
   Effect.fn("githubApp.okJson")(function* (response: HttpClientResponse.HttpClientResponse) {
     if (!isOk(response.status)) return yield* Effect.fail(status(response));

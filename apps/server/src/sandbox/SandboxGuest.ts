@@ -229,7 +229,7 @@ export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(functio
 
 type GuestRpc = Effect.Success<ReturnType<typeof connectGuestRpc>>;
 
-/** The guest's clone RPCs that preparing a project drives; `E` is what reading the clone list can fail with. */
+/** The guest's clone RPCs that preparing a project drives. `E` is what reading the clone list can fail with. */
 export interface ProjectCloneRpc<E> {
   readonly subscribeProjectClones: (
     input: ProjectCloneSubscribeInput,
@@ -536,7 +536,7 @@ const make = Effect.gen(function* () {
       renderGitHubLoginCommand({ login: token.login, name: token.name, email: token.email }),
       60,
     ).pipe(
-      // The login removes the file itself; a call that never ran it leaves the token behind.
+      // The login removes the file itself. A call that never ran it leaves the token behind.
       Effect.tapError(() =>
         provider
           .exec(account, machineId, {

@@ -48,7 +48,7 @@ export class ProjectCloneTracker extends Context.Service<
     /**
      * Clones a failed or cancelled project again. The destination was empty
      * when the clone started, so a clone of the repository found there now is
-     * the one git finished before finalization failed or a cancel landed; it
+     * the one git finished before finalization failed or a cancel landed. It
      * is adopted and finalized again.
      */
     readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
@@ -446,7 +446,7 @@ export const make = Effect.gen(function* () {
     const current = yield* Ref.get(clones);
     const fiber = current.get(projectId)?.fiber;
     if (fiber) yield* Fiber.interrupt(fiber);
-    // Only the staging clone goes; a published checkout is the user's.
+    // Only the staging clone goes. A published checkout is the user's.
     yield* repositories.discardClone(workspaceRoot).pipe(Effect.ignore);
     yield* clearRetention(projectId);
     yield* remove(projectId);

@@ -469,7 +469,7 @@ function planRunning(
  * the provider's own stop is kept `BACKSTOP_GRACE_MS` past this owner's, and
  * moved only once it trails by half of that, so a busy sandbox costs one
  * provider call every few minutes. A rotated token goes out on the looks in
- * between: a delivery that keeps failing must not hold up the stop, the
+ * between. A delivery that keeps failing must not hold up the stop, the
  * restart, or the deadline the provider's own stop follows.
  */
 function planReady(

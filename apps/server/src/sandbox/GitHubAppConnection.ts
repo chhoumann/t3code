@@ -104,7 +104,7 @@ export class GitHubAppConnectionSetup extends Context.Service<
 
 /**
  * The one secret the App user's tokens live in. `rotating` is written before
- * the single refresh request and stays while its answer is unknown: GitHub is
+ * the single refresh request and stays while its answer is unknown. GitHub is
  * then asked about the old token, at the next attempt or the next start.
  */
 const TokenEnvelope = Schema.Struct({
@@ -211,7 +211,7 @@ const make = Effect.gen(function* () {
   };
 
   const clearEnvelope = secrets.remove(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
-  /** An envelope that cannot be read is no connection at all, and goes, so the user can connect again. */
+  /** An envelope that cannot be read is no connection at all. It goes, so the user can connect again. */
   const readEnvelope = Effect.gen(function* () {
     const bytes = yield* secrets.get(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
     if (Option.isNone(bytes)) return null;
@@ -308,7 +308,7 @@ const make = Effect.gen(function* () {
           ),
         );
 
-  /** The chain is broken: nothing refreshes until the user signs in again. */
+  /** The chain is broken. Nothing refreshes until the user signs in again. */
   const markReauthorize = (envelope: TokenEnvelope) => {
     const broken = { ...envelope, state: "reauthorize" as const };
     return writeEnvelope(broken).pipe(Effect.andThen(mirror(broken)));
@@ -317,8 +317,8 @@ const make = Effect.gen(function* () {
 
   /**
    * Settles a refresh with no usable answer, after which GitHub may or may
-   * not have rotated. Its word on the old access token tells: still accepted
-   * means it did not, and the envelope is ready again; refused means it did
+   * not have rotated. Its word on the old access token tells. Still accepted
+   * means it did not, and the envelope is ready again. Refused means it did
    * and the new tokens are lost, so the user must sign in again. An expired
    * token is refused either way and an unreachable GitHub says nothing, so
    * the envelope stays `rotating` for the next attempt to send the same
@@ -344,8 +344,8 @@ const make = Effect.gen(function* () {
   /**
    * The one refresh. Runs under the mutex. `rotating` goes to disk first, so a
    * crash before the answer lands is told apart from a clean envelope at the
-   * next start. An answer that refuses breaks the chain; a refusal to act
-   * leaves the old tokens good; no usable answer is settled by asking GitHub
+   * next start. An answer that refuses breaks the chain. A refusal to act
+   * leaves the old tokens good. No usable answer is settled by asking GitHub
    * about the old token.
    */
   const rotate = Effect.fn("GitHubAppConnection.rotate")(function* (envelope: TokenEnvelope) {
@@ -545,7 +545,7 @@ const make = Effect.gen(function* () {
   /**
    * Finishes a browser step. Under the mutex with the refresh and the
    * disconnect, so two sign-ins racing each other cannot leave one App's
-   * registration beside another App's tokens: the second register step finds
+   * registration beside another App's tokens. The second register step finds
    * the first's App and is refused.
    */
   const complete: GitHubAppConnectionSetup["Service"]["complete"] = Effect.fn(
@@ -617,7 +617,7 @@ const make = Effect.gen(function* () {
 
   /**
    * Revokes the grant at GitHub when it can, then forgets the connection here
-   * whatever GitHub said: a disconnect must not be refused for an offline
+   * whatever GitHub said. A disconnect must not be refused for an offline
    * GitHub or a client secret that is gone.
    */
   const disconnect: GitHubAppConnectionSetup["Service"]["disconnect"] = Effect.fn(
@@ -650,7 +650,7 @@ const make = Effect.gen(function* () {
     if (envelope !== null) yield* publish(null);
   }, mutex.withPermit);
 
-  // A refresh this process never saw the end of: GitHub says what became of it.
+  // A refresh this process never saw the end of. GitHub says what became of it.
   const found = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));
   const envelope =
     found?.state === "rotating"
