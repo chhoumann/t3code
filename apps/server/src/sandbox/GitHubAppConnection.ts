@@ -210,16 +210,24 @@ const make = Effect.gen(function* () {
     return lastGeneration;
   };
 
+  const clearEnvelope = secrets.remove(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
+  /** An envelope that cannot be read is no connection at all, and goes, so the user can connect again. */
   const readEnvelope = Effect.gen(function* () {
     const bytes = yield* secrets.get(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
     if (Option.isNone(bytes)) return null;
-    return yield* decodeEnvelope(textDecoder.decode(bytes.value)).pipe(Effect.catch(storeFailure));
+    return yield* decodeEnvelope(textDecoder.decode(bytes.value)).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("GitHub App connection envelope unreadable; removed", { cause }).pipe(
+          Effect.andThen(clearEnvelope),
+          Effect.as(null),
+        ),
+      ),
+    );
   });
   const writeEnvelope = (envelope: TokenEnvelope) =>
     secrets
       .set(ENVELOPE_SECRET_NAME, textEncoder.encode(encodeEnvelope(envelope)))
       .pipe(Effect.catch(storeFailure));
-  const clearEnvelope = secrets.remove(ENVELOPE_SECRET_NAME).pipe(Effect.catch(storeFailure));
 
   const readRegistration = settings.getSettings.pipe(
     Effect.map((current): Registration | null => current.sandboxGitHubApp),
@@ -607,35 +615,40 @@ const make = Effect.gen(function* () {
     return { _tag: "connected" } satisfies SandboxGitHubFlowNext;
   }, mutex.withPermit);
 
+  /**
+   * Revokes the grant at GitHub when it can, then forgets the connection here
+   * whatever GitHub said: a disconnect must not be refused for an offline
+   * GitHub or a client secret that is gone.
+   */
   const disconnect: GitHubAppConnectionSetup["Service"]["disconnect"] = Effect.fn(
     "GitHubAppConnectionSetup.disconnect",
   )(function* (input) {
-    yield* mutex.withPermit(
-      Effect.gen(function* () {
-        const registration = yield* readRegistration;
-        const envelope = yield* readEnvelope;
-        if (envelope !== null && registration !== null) {
-          const clientSecret = yield* readClientSecret;
-          yield* githubApp
+    const registration = yield* readRegistration;
+    const envelope = yield* readEnvelope;
+    if (envelope !== null && registration !== null) {
+      yield* readClientSecret.pipe(
+        Effect.flatMap((clientSecret) =>
+          githubApp
             .revokeGrant(http, {
               clientId: registration.clientId,
               clientSecret,
               accessToken: envelope.accessToken,
             })
-            .pipe(Effect.mapError(apiFailure("revoke the authorization")));
-        }
-        yield* FiberHandle.clear(refreshTimer);
-        yield* clearEnvelope;
-        if (input.forgetApp) {
-          yield* secrets.remove(CLIENT_SECRET_NAME).pipe(Effect.catch(storeFailure));
-          yield* writeApp(null);
-        } else {
-          yield* mirror(null);
-        }
-        if (envelope !== null) yield* publish(null);
-      }),
-    );
-  });
+            .pipe(Effect.mapError(apiFailure("revoke the authorization"))),
+        ),
+        Effect.ignore({ log: true }),
+      );
+    }
+    yield* FiberHandle.clear(refreshTimer);
+    yield* clearEnvelope;
+    if (input.forgetApp) {
+      yield* secrets.remove(CLIENT_SECRET_NAME).pipe(Effect.catch(storeFailure));
+      yield* writeApp(null);
+    } else {
+      yield* mirror(null);
+    }
+    if (envelope !== null) yield* publish(null);
+  }, mutex.withPermit);
 
   // A refresh this process never saw the end of: GitHub says what became of it.
   const found = yield* readEnvelope.pipe(Effect.orElseSucceed(() => null));

@@ -63,6 +63,8 @@ const makeGitHub = () => {
     nextRefreshAnswer: null as "transport" | "lost" | "garbled" | "unavailable" | null,
     /** The next `GET /user` never arrives. */
     nextUserAnswer: null as "transport" | null,
+    /** The next grant revocation never arrives. */
+    nextRevokeAnswer: null as "transport" | null,
     revokedGrants: 0,
   };
   const transportFailure = (request: HttpClientRequest.HttpClientRequest) =>
@@ -161,6 +163,10 @@ const makeGitHub = () => {
         return json({ login: "octocat", name: "The Octocat", email: null });
       }
       if (request.method === "DELETE" && path === `/applications/${CLIENT_ID}/grant`) {
+        if (github.nextRevokeAnswer === "transport") {
+          github.nextRevokeAnswer = null;
+          return yield* transportFailure(request);
+        }
         const expected = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")}`;
         if (recorded.headers["authorization"] !== expected) return json({}, 401);
         github.revokedGrants += 1;
@@ -771,6 +777,61 @@ describe("GitHubAppConnection", () => {
           (yield* (yield* ServerSettings.ServerSettingsService).getSettings).sandboxGitHubApp,
         );
         assert.isNull(secretText("sandbox-github-app-client-secret"));
+      }).pipe(Effect.provide(context));
+    }),
+  );
+
+  it.effect(
+    "disconnects with GitHub unreachable and the client secret gone, so Connect works again",
+    () =>
+      Effect.gen(function* () {
+        const { github, envelope, secrets, secretText, start } = makeWorld();
+        const { context } = yield* start;
+        yield* Effect.gen(function* () {
+          const connection = yield* GitHubAppConnection.GitHubAppConnection;
+          const setup = yield* GitHubAppConnection.GitHubAppConnectionSetup;
+          yield* connect;
+          const generations = yield* observeGenerations;
+          secrets.delete("sandbox-github-app-client-secret");
+          github.nextRevokeAnswer = "transport";
+          yield* setup.disconnect({ forgetApp: false });
+          assert.isNull(yield* generations.next);
+          assert.isNull(envelope());
+          assert.strictEqual(github.revokedGrants, 0);
+          const settings = yield* ServerSettings.ServerSettingsService;
+          assert.deepStrictEqual((yield* settings.getSettings).sandboxGitHubApp?.connection, {
+            _tag: "disconnected",
+          });
+
+          // The App stayed registered without its secret; forgetting it must not need GitHub either.
+          github.nextRevokeAnswer = "transport";
+          yield* setup.disconnect({ forgetApp: true });
+          assert.isNull((yield* settings.getSettings).sandboxGitHubApp);
+          assert.isNull(secretText("sandbox-github-app-client-secret"));
+          yield* connect;
+          assert.isNotNull(yield* connection.current(Duration.hours(1)));
+        }).pipe(Effect.provide(context));
+      }),
+  );
+
+  it.effect("an envelope that cannot be read counts as disconnected and is removed", () =>
+    Effect.gen(function* () {
+      const { secrets, secretText, seedRegistration, start } = makeWorld();
+      seedRegistration();
+      secrets.set("sandbox-github-app-user", new TextEncoder().encode("{not an envelope"));
+      const { context } = yield* start;
+      yield* Effect.gen(function* () {
+        const connection = yield* GitHubAppConnection.GitHubAppConnection;
+        const setup = yield* GitHubAppConnection.GitHubAppConnectionSetup;
+        assert.isNull(yield* connection.current(Duration.hours(1)));
+        assert.isNull(secretText("sandbox-github-app-user"));
+        const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
+        assert.deepStrictEqual(settings.sandboxGitHubApp?.connection, { _tag: "disconnected" });
+        // Signing in again through the registered App works.
+        const again = yield* setup.begin({ step: "authorize", callbackUrl: CALLBACK_URL });
+        const done = yield* setup.complete({ state: again.state, code: "install-code" });
+        assert.strictEqual(done._tag, "connected");
+        assert.isNotNull(yield* connection.current(Duration.hours(1)));
       }).pipe(Effect.provide(context));
     }),
   );
