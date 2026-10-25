@@ -63,7 +63,7 @@ const sandboxView = (
   title: "Fix the bug",
   message: "Fix the bug in hello.txt",
   source: {
-    remoteUrl: SandboxRemoteUrl.make("https://example.test/repo.git"),
+    remoteUrl: SandboxRemoteUrl.make("https://example.test/acme/repo.git"),
     base: { _tag: "default" },
   },
   resolvedBase: null,
