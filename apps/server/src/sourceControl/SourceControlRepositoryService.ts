@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- rmdir(2) has no Effect counterpart; `remove` takes a directory only recursively.
+import * as NodeFSP from "node:fs/promises";
+
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -458,28 +461,33 @@ export const make = Effect.gen(function* () {
   /**
    * Moves the staged clone to the destination. The destination may exist as
    * the empty directory the project was created with; rename(2) replaces an
-   * empty directory on POSIX but not on Windows, so it goes first.
+   * empty directory on POSIX but not on Windows, so it goes first. Only
+   * rmdir(2) removes it: a file that landed there since the clone started
+   * makes it refuse, and the publish fails instead of taking the file.
    */
   const publishClone = Effect.fn("SourceControlRepositoryService.publishClone")(function* (
     stagingPath: string,
     destinationPath: string,
   ) {
-    const entries = yield* fileSystem.readDirectory(destinationPath).pipe(
-      Effect.catchIf(
-        (cause) => cause.reason._tag === "NotFound",
-        () => Effect.succeed<ReadonlyArray<string> | null>(null),
+    yield* Effect.tryPromise({
+      try: () => NodeFSP.rmdir(destinationPath),
+      catch: (cause) => ({ code: (cause as NodeJS.ErrnoException | null)?.code, cause }),
+    }).pipe(
+      Effect.catch(({ code, cause }) =>
+        code === "ENOENT"
+          ? Effect.void
+          : Effect.fail(
+              code === "ENOTEMPTY" || code === "EEXIST"
+                ? cloneError("Destination path already exists and is not empty.")
+                : cloneError("The clone could not be moved into place.", cause),
+            ),
       ),
-      Effect.mapError((cause) => cloneError("The clone could not be moved into place.", cause)),
     );
-    if (entries !== null && entries.length > 0) {
-      return yield* cloneError("Destination path already exists and is not empty.");
-    }
-    yield* (
-      entries === null ? Effect.void : fileSystem.remove(destinationPath, { recursive: true })
-    ).pipe(
-      Effect.andThen(fileSystem.rename(stagingPath, destinationPath)),
-      Effect.mapError((cause) => cloneError("The clone could not be moved into place.", cause)),
-    );
+    yield* fileSystem
+      .rename(stagingPath, destinationPath)
+      .pipe(
+        Effect.mapError((cause) => cloneError("The clone could not be moved into place.", cause)),
+      );
   });
 
   const gitStep = (

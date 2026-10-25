@@ -67,13 +67,75 @@ const fixture = Effect.gen(function* () {
   const clone = (input?: {
     readonly checkout?: ProjectCloneCheckout;
     readonly remoteUrl?: string;
+    readonly onProgress?: () => Effect.Effect<void>;
   }) =>
     service.cloneRepository(
       { remoteUrl: input?.remoteUrl ?? remote, destinationPath: destination },
-      input?.checkout === undefined ? {} : { checkout: input.checkout },
+      {
+        ...(input?.checkout === undefined ? {} : { checkout: input.checkout }),
+        ...(input?.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+      },
     );
   return { fs, path, git: run, root, remote, work, first, destination, service, clone, commit };
 });
+
+/**
+ * The real file system, except that a file lands in a project folder right
+ * after its entries are listed while a staged clone waits beside it: the user
+ * saving into the folder at the moment the clone is published.
+ */
+const fileAppearsAfterListing = (dropped: { count: number }) =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const stagingOf = (directory: string) =>
+        path.join(path.dirname(directory), `.${path.basename(directory)}.t3-clone`);
+      return FileSystem.FileSystem.of({
+        ...fs,
+        readDirectory: (directory, options) =>
+          fs
+            .readDirectory(directory, options)
+            .pipe(
+              Effect.tap(() =>
+                path.basename(directory) !== "project"
+                  ? Effect.void
+                  : fs
+                      .exists(stagingOf(directory))
+                      .pipe(
+                        Effect.flatMap((publishing) =>
+                          publishing
+                            ? fs
+                                .writeFileString(path.join(directory, "notes.txt"), "mine")
+                                .pipe(
+                                  Effect.tap(() => Effect.sync(() => void (dropped.count += 1))),
+                                )
+                            : Effect.void,
+                        ),
+                      ),
+              ),
+            ),
+      });
+    }),
+  );
+
+/** The service over `fileSystem`; the test itself keeps the real one. */
+const layerOver = (
+  fileSystem: Layer.Layer<FileSystem.FileSystem, never, FileSystem.FileSystem | Path.Path>,
+) =>
+  SourceControlRepositoryService.layer.pipe(
+    Layer.provide(
+      Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+        resolveLink: () => undefined,
+      }),
+    ),
+    Layer.provide(layerGit),
+    Layer.provide(layerConfig),
+    Layer.provide(fileSystem),
+    Layer.provideMerge(layerGit),
+    Layer.provideMerge(NodeServices.layer),
+  );
 
 describe("cloneRepository with a checkout", () => {
   it.effect("publishes a complete clone at the destination and pins the default branch", () =>
@@ -102,6 +164,35 @@ describe("cloneRepository with a checkout", () => {
         assert.isTrue(yield* fs.exists(destination));
       }).pipe(Effect.provide(layer)),
   );
+
+  it.effect(
+    "refuses to publish over a file that appeared while git transferred, and keeps it",
+    () =>
+      Effect.gen(function* () {
+        const { fs, path, remote, destination, clone } = yield* fixture;
+        const error = yield* Effect.flip(
+          clone({
+            // A file:// remote goes through the transfer protocol, which reports progress.
+            remoteUrl: `file://${remote}`,
+            onProgress: () =>
+              fs.writeFileString(path.join(destination, "notes.txt"), "mine").pipe(Effect.orDie),
+          }),
+        );
+        assert.include(error.detail, "not empty");
+        assert.deepStrictEqual(yield* fs.readDirectory(destination), ["notes.txt"]);
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("never deletes a file that lands in the destination as the clone is published", () => {
+    const dropped = { count: 0 };
+    return Effect.gen(function* () {
+      const { fs, path, destination, clone } = yield* fixture;
+      yield* clone().pipe(Effect.result);
+      if (dropped.count > 0) {
+        assert.isTrue(yield* fs.exists(path.join(destination, "notes.txt")));
+      }
+    }).pipe(Effect.provide(layerOver(fileAppearsAfterListing(dropped))));
+  });
 
   it.effect("never adopts a partial clone a crash left behind", () =>
     Effect.gen(function* () {
