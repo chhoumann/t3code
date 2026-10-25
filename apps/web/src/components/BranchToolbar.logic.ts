@@ -4,6 +4,7 @@ import type {
   RepositoryIdentity,
   SandboxAccountId,
   SandboxBranchName,
+  SandboxRemoteUrl,
   SandboxSource,
   VcsRef,
   ProjectId,
@@ -13,6 +14,7 @@ import {
   parseSandboxBase,
   sandboxAccountChoices,
   sandboxLaunchLabel,
+  sandboxRemoteUrlFromInput,
 } from "@t3tools/client-runtime/state/sandboxes";
 import * as Schema from "effect/Schema";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
@@ -105,6 +107,27 @@ export function resolveSandboxDraftSource(
 ): SandboxSource | null {
   const remoteUrl = target.remoteUrl ?? sandboxSourceForProject(projectIdentity)?.remoteUrl;
   return remoteUrl === undefined ? null : { remoteUrl, base: target.base ?? { _tag: "default" } };
+}
+
+/** The one repository a draft's picker offers: the project's own, or the one typed into it. */
+export type SandboxRepositoryChoice =
+  | { readonly _tag: "project"; readonly remoteUrl: SandboxRemoteUrl }
+  | { readonly _tag: "typed"; readonly remoteUrl: SandboxRemoteUrl };
+
+/**
+ * What the repository picker offers for `query`: the project's repository
+ * while nothing is typed, else what was typed once it names a repository.
+ * Null offers nothing.
+ */
+export function sandboxRepositoryChoice(
+  query: string,
+  projectRemoteUrl: SandboxRemoteUrl | null,
+): SandboxRepositoryChoice | null {
+  if (query.trim().length === 0) {
+    return projectRemoteUrl === null ? null : { _tag: "project", remoteUrl: projectRemoteUrl };
+  }
+  const typed = sandboxRemoteUrlFromInput(query);
+  return typed === null ? null : { _tag: "typed", remoteUrl: typed };
 }
 
 /**

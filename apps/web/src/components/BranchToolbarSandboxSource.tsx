@@ -1,8 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import {
-  parseSandboxBase,
-  sandboxRemoteUrlFromInput,
-} from "@t3tools/client-runtime/state/sandboxes";
+import { parseSandboxBase } from "@t3tools/client-runtime/state/sandboxes";
 import type {
   EnvironmentId,
   RepositoryIdentity,
@@ -25,6 +22,7 @@ import { BranchPicker } from "./BranchPicker";
 import {
   resolveSandboxDraftSource,
   sandboxBaseSuggestions,
+  sandboxRepositoryChoice,
   sanitizeNewRefName,
 } from "./BranchToolbar.logic";
 import { ComposerContextLabel } from "./ComposerContextLabel";
@@ -189,9 +187,6 @@ function repositoryLabel(remoteUrl: SandboxRemoteUrl): string {
   );
 }
 
-const USE_REPOSITORY_ITEM = "use-repository";
-const FOLLOW_PROJECT_ITEM = "follow-project";
-
 /** Picks the repository a draft clones; `null` follows the draft's project again. */
 function SandboxRepositoryPicker({
   remoteUrl,
@@ -213,12 +208,8 @@ function SandboxRepositoryPicker({
 }) {
   const [query, setQuery] = useState("");
   const popupProps = usePickerPopupProps(displayMode);
-  const typed = query.trim().length === 0 ? null : sandboxRemoteUrlFromInput(query);
-  const offersProject = projectRemoteUrl !== null && query.trim().length === 0;
-  const items = [
-    ...(offersProject ? [FOLLOW_PROJECT_ITEM] : []),
-    ...(typed === null ? [] : [USE_REPOSITORY_ITEM]),
-  ];
+  const choice = sandboxRepositoryChoice(query, projectRemoteUrl);
+  const items = choice === null ? [] : [choice._tag];
   const handleOpenChange = (next: boolean) => {
     onOpenChange(next);
     if (!next) setQuery("");
@@ -234,9 +225,9 @@ function SandboxRepositoryPicker({
       open={open}
       onOpenChange={handleOpenChange}
       onValueChange={(item) => {
-        if (item === FOLLOW_PROJECT_ITEM) onChange(null);
-        else if (item === USE_REPOSITORY_ITEM && typed !== null) onChange(typed);
-        else return;
+        // The list holds `choice` alone, so a picked item is it.
+        if (choice === null || item === null) return;
+        onChange(choice._tag === "project" ? null : choice.remoteUrl);
         handleOpenChange(false);
       }}
     >
@@ -254,14 +245,12 @@ function SandboxRepositoryPicker({
           onChange={(event) => setQuery(event.target.value)}
         />
         <ComboboxList>
-          {offersProject && projectRemoteUrl !== null ? (
-            <ComboboxItem hideIndicator index={0} value={FOLLOW_PROJECT_ITEM}>
-              <span className="truncate">Use {repositoryLabel(projectRemoteUrl)} (project)</span>
-            </ComboboxItem>
-          ) : null}
-          {typed !== null ? (
-            <ComboboxItem hideIndicator index={items.length - 1} value={USE_REPOSITORY_ITEM}>
-              <span className="truncate">Use {repositoryLabel(typed)}</span>
+          {choice !== null ? (
+            <ComboboxItem hideIndicator index={0} value={choice._tag}>
+              <span className="truncate">
+                Use {repositoryLabel(choice.remoteUrl)}
+                {choice._tag === "project" ? " (project)" : null}
+              </span>
             </ComboboxItem>
           ) : query.trim().length > 0 ? (
             <p className="p-2 text-xs text-muted-foreground">

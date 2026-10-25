@@ -16,6 +16,7 @@ import {
   resolveSandboxDraftSend,
   resolveSandboxDraftSource,
   sandboxBaseSuggestions,
+  sandboxRepositoryChoice,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
@@ -387,6 +388,28 @@ describe("resolveSandboxDraftSource", () => {
       remoteUrl: other,
       base: { _tag: "default" },
     });
+  });
+});
+
+describe("sandboxRepositoryChoice", () => {
+  const project = SandboxRemoteUrl.make("https://github.com/Example/App.git");
+
+  it("offers the project's repository while nothing is typed, and nothing without one", () => {
+    expect(sandboxRepositoryChoice("", project)).toEqual({ _tag: "project", remoteUrl: project });
+    expect(sandboxRepositoryChoice("  ", project)).toEqual({ _tag: "project", remoteUrl: project });
+    expect(sandboxRepositoryChoice("", null)).toBeNull();
+  });
+
+  it("offers only the typed repository once something is typed, as its HTTPS clone URL", () => {
+    expect(sandboxRepositoryChoice("Example/Other", project)).toEqual({
+      _tag: "typed",
+      remoteUrl: "https://github.com/Example/Other.git",
+    });
+    expect(sandboxRepositoryChoice("git@github.com:Example/Other.git", null)).toEqual({
+      _tag: "typed",
+      remoteUrl: "https://github.com/Example/Other.git",
+    });
+    expect(sandboxRepositoryChoice("~/code/other", project)).toBeNull();
   });
 });
 
