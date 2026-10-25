@@ -33,7 +33,7 @@ export const githubAppCallbackUrls = (
 
 /**
  * The manifest GitHub creates the App from. Public, so the user can install it
- * on organizations too. No webhook: the owner polls nothing. User tokens expire
+ * on organizations too. No webhook (GitHub requires a URL for any `hook_attributes`): the owner polls nothing. User tokens expire
  * by default for an App created this way, which the connection relies on.
  */
 export const GitHubAppManifest = Schema.Struct({
@@ -43,7 +43,6 @@ export const GitHubAppManifest = Schema.Struct({
   public: Schema.Boolean,
   default_permissions: Schema.Record(Schema.String, Schema.String),
   default_events: Schema.Array(Schema.String),
-  hook_attributes: Schema.Struct({ active: Schema.Boolean }),
   redirect_url: Schema.String,
   callback_urls: Schema.Array(Schema.String),
   request_oauth_on_install: Schema.Boolean,
@@ -62,7 +61,6 @@ export const githubAppManifest = (input: {
   public: true,
   default_permissions: { contents: "write", pull_requests: "write", metadata: "read" },
   default_events: [],
-  hook_attributes: { active: false },
   redirect_url: input.redirectUrl,
   callback_urls: input.callbackUrls,
   request_oauth_on_install: true,

@@ -286,7 +286,8 @@ describe("GitHubAppConnection", () => {
           pull_requests: "write",
           metadata: "read",
         });
-        assert.deepStrictEqual(manifest.hook_attributes, { active: false });
+        // GitHub refuses a manifest whose hook_attributes has no url.
+        assert.notProperty(manifest, "hook_attributes");
         assert.strictEqual(manifest.redirect_url, CALLBACK_URL);
         assert.deepStrictEqual(manifest.callback_urls, [
           CALLBACK_URL,
