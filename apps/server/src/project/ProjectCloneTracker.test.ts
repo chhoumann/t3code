@@ -50,7 +50,7 @@ function makeHarness(options?: {
             remoteUrl: input.remoteUrl ?? "",
             cloneUrl: input.remoteUrl ?? "",
             repository: null,
-            adopt: false,
+            adoptedOrigin: null,
           }),
         cloneRepository:
           options?.clone ??
@@ -250,7 +250,7 @@ describe("ProjectCloneTracker", () => {
     const harness = makeHarness({
       clone: (input, options) =>
         Effect.suspend(() => {
-          if (published && options?.reuseMatching !== true) {
+          if (published && options?.adopt === undefined) {
             return Effect.fail(
               new SourceControlRepositoryError({
                 operation: "cloneRepository",
@@ -295,11 +295,11 @@ describe("ProjectCloneTracker", () => {
   });
 
   it.effect("a first clone into a destination holding another clone is still refused", () => {
-    const refusals: Array<boolean | undefined> = [];
+    const refusals: Array<string | undefined> = [];
     const harness = makeHarness({
       clone: (_input, options) =>
         Effect.suspend(() => {
-          refusals.push(options?.reuseMatching);
+          refusals.push(options?.adopt);
           return Effect.fail(
             new SourceControlRepositoryError({
               operation: "cloneRepository",
@@ -315,7 +315,7 @@ describe("ProjectCloneTracker", () => {
       yield* Effect.yieldNow;
       expect(yield* tracker.get(projectId)).toMatchObject({ phase: "failed" });
       expect(refusals).toHaveLength(1);
-      expect(refusals[0]).not.toBe(true);
+      expect(refusals[0]).toBeUndefined();
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -362,7 +362,7 @@ describe("ProjectCloneTracker", () => {
               remoteUrl: "https://github.com/octocat/t3code.git",
               cloneUrl: "https://user:s3cret@github.com/octocat/t3code.git",
               repository: null,
-              adopt: false,
+              adoptedOrigin: null,
             }),
           cloneRepository: (input) =>
             Effect.sync(() => {

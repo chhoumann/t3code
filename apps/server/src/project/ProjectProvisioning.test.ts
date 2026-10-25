@@ -39,7 +39,7 @@ function makeHarness() {
                 remoteUrl: input.remoteUrl ?? "",
                 cloneUrl: input.remoteUrl ?? "",
                 repository: null,
-                adopt: false,
+                adoptedOrigin: null,
               }),
             cloneRepository: (input, options) =>
               Effect.succeed({

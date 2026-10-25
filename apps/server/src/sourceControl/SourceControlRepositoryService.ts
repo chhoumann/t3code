@@ -58,9 +58,9 @@ export class SourceControlRepositoryService extends Context.Service<
     /**
      * Clones into a staging directory beside the destination and moves it
      * into place once git is done, so the destination only ever holds a
-     * complete clone. Asked to `reuseMatching`, adopts a clone of the same
-     * repository already at the destination instead, with the origin it has.
-     * With a `checkout`, points origin at the requested URL and pins the base.
+     * complete clone. Asked to `adopt`, takes a clone of the same repository
+     * already at the destination instead, keeping its origin or pointing it
+     * at the requested URL. With a `checkout`, also pins the base.
      */
     readonly cloneRepository: (
       input: SourceControlCloneRepositoryInput,
@@ -81,15 +81,21 @@ export interface SourceControlPreparedClone {
   readonly remoteUrl: string;
   readonly cloneUrl: string;
   readonly repository: SourceControlRepositoryInfo | null;
-  /** The destination already holds a clone of this repository, which `reuseMatching` adopts. */
-  readonly adopt: boolean;
+  /** The origin of the clone of this repository already at the destination, which `adopt` takes; null to clone. */
+  readonly adoptedOrigin: string | null;
 }
 
 export interface SourceControlCloneCheckoutOptions {
   readonly checkout?: ProjectCloneCheckout;
-  /** Adopt a published clone of the same repository at the destination rather than refuse a non-empty one. */
-  readonly reuseMatching?: boolean;
+  /**
+   * Takes a clone of the same repository at the destination rather than refuse
+   * a non-empty one. A retry keeps the origin of the clone it published, which
+   * is the URL git could reach; a template's clone is retargeted to the request.
+   */
+  readonly adopt?: "keep-origin" | "retarget-origin";
 }
+
+export type SourceControlCloneAdoption = NonNullable<SourceControlCloneCheckoutOptions["adopt"]>;
 
 export interface SourceControlCloneOptions extends SourceControlCloneCheckoutOptions {
   readonly onProgress?: (line: GitCloneProgressLine) => Effect.Effect<void>;
@@ -339,10 +345,10 @@ export const make = Effect.gen(function* () {
     function* (
       destination: { readonly destinationPath: string; readonly entries: ReadonlyArray<string> },
       remoteUrl: string,
-      reuseMatching: boolean,
+      adopt: boolean,
     ) {
-      if (destination.entries.length === 0) return false;
-      if (!reuseMatching || !destination.entries.includes(".git")) {
+      if (destination.entries.length === 0) return null;
+      if (!adopt || !destination.entries.includes(".git")) {
         return yield* cloneError("Destination path already exists and is not empty.");
       }
       const origin = yield* git
@@ -359,7 +365,7 @@ export const make = Effect.gen(function* () {
       if (origin.exitCode !== 0 || key(origin.stdout.trim()) !== key(remoteUrl)) {
         return yield* cloneError("Destination path holds a clone of another repository.");
       }
-      return true;
+      return redactRemoteUrl(origin.stdout.trim());
     },
   );
 
@@ -397,7 +403,11 @@ export const make = Effect.gen(function* () {
       remoteUrl: redactedUrl,
       cloneUrl: remoteUrl,
       repository,
-      adopt: yield* adoptsDestination(destination, redactedUrl, options?.reuseMatching === true),
+      adoptedOrigin: yield* adoptsDestination(
+        destination,
+        redactedUrl,
+        options?.adopt !== undefined,
+      ),
     } satisfies SourceControlPreparedClone;
   });
 
@@ -577,17 +587,9 @@ export const make = Effect.gen(function* () {
   ) {
     const prepared = yield* prepareClone(input, options);
     let remoteUrl = prepared.remoteUrl;
-    if (prepared.adopt) {
-      // A checkout adopts a template's clone and wants its own URL on it. A
-      // retry adopts the clone this service published, whose origin is the
-      // URL git could reach, which may not be the one asked for again.
-      if (options?.checkout === undefined) {
-        return {
-          cwd: prepared.destinationPath,
-          remoteUrl,
-          repository: prepared.repository,
-        } satisfies SourceControlCloneResult;
-      }
+    if (prepared.adoptedOrigin !== null && options?.adopt === "keep-origin") {
+      remoteUrl = prepared.adoptedOrigin;
+    } else if (prepared.adoptedOrigin !== null) {
       const set = yield* gitStep("adoptClone", prepared.destinationPath, [
         "remote",
         "set-url",

@@ -243,7 +243,7 @@ export const make = Effect.gen(function* () {
   const cloneWatchingForStall = Effect.fn("ProjectCloneTracker.cloneWatchingForStall")(function* (
     projectId: ProjectId,
     tracked: TrackedClone,
-    reuseMatching: boolean,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
   ) {
     const pulses = yield* Queue.sliding<void>(1);
     yield* watchForStall(projectId, pulses).pipe(Effect.forkScoped);
@@ -253,7 +253,7 @@ export const make = Effect.gen(function* () {
         onProgress: (update) =>
           Queue.offer(pulses, undefined).pipe(Effect.andThen(progress(projectId, update))),
         timeoutMs: null,
-        reuseMatching,
+        ...(adopt === undefined ? {} : { adopt }),
         ...(tracked.input.checkout === undefined ? {} : { checkout: tracked.input.checkout }),
       },
     );
@@ -267,8 +267,12 @@ export const make = Effect.gen(function* () {
    * uninterruptible step, so a late Cancel neither tears the checkout down
    * nor records a finished clone as cancelled.
    */
-  const runClone = (projectId: ProjectId, tracked: TrackedClone, reuseMatching: boolean) =>
-    cloneWatchingForStall(projectId, tracked, reuseMatching).pipe(
+  const runClone = (
+    projectId: ProjectId,
+    tracked: TrackedClone,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
+  ) =>
+    cloneWatchingForStall(projectId, tracked, adopt).pipe(
       Effect.flatMap((cloned) =>
         Effect.uninterruptible(
           tracked.hooks
@@ -290,17 +294,15 @@ export const make = Effect.gen(function* () {
       Effect.ignoreCause(),
     );
 
-  /** Starts the clone fiber; `reuseMatching` adopts a clone of the repository already at the destination. */
+  /** Starts the clone fiber; `adopt` takes a clone of the repository already at the destination. */
   const launch = Effect.fn("ProjectCloneTracker.launch")(function* (
     projectId: ProjectId,
-    reuseMatching: boolean,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
   ) {
     const current = yield* Ref.get(clones);
     const tracked = current.get(projectId);
     if (!tracked) return;
-    const fiber = yield* runClone(projectId, tracked, reuseMatching).pipe(
-      Effect.forkIn(cloneScope),
-    );
+    const fiber = yield* runClone(projectId, tracked, adopt).pipe(Effect.forkIn(cloneScope));
     yield* Ref.update(clones, (map) => {
       const existing = map.get(projectId);
       if (!existing) return map;
@@ -312,8 +314,11 @@ export const make = Effect.gen(function* () {
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (input, hooks) {
-      const reuseMatching = input.checkout?.reuseMatching === true;
-      const prepared = yield* repositories.prepareClone(input, { reuseMatching });
+      const adopt = input.checkout?.reuseMatching === true ? "retarget-origin" : undefined;
+      const prepared = yield* repositories.prepareClone(
+        input,
+        adopt === undefined ? {} : { adopt },
+      );
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
@@ -373,7 +378,7 @@ export const make = Effect.gen(function* () {
             createdAt: input.createdAt,
           });
           yield* publish;
-          yield* launch(input.projectId, reuseMatching);
+          yield* launch(input.projectId, adopt);
         }).pipe(Effect.tapError(() => remove(input.projectId))),
       );
       return {
@@ -435,7 +440,12 @@ export const make = Effect.gen(function* () {
           endedAt: null,
         },
       }));
-      yield* launch(projectId, true);
+      // A retry takes the clone this tracker may already have published; only a
+      // sandbox's checkout points its origin at the requested URL.
+      yield* launch(
+        projectId,
+        tracked.input.checkout?.reuseMatching === true ? "retarget-origin" : "keep-origin",
+      );
       return true;
     },
   );

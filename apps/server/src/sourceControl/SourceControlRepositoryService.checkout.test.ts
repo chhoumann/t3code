@@ -72,10 +72,13 @@ const fixture = Effect.gen(function* () {
     service.cloneRepository(
       { remoteUrl: input?.remoteUrl ?? remote, destinationPath: destination },
       {
-        // As the tracker asks: the checkout's wish to reuse a template's clone becomes the service option.
+        // As the tracker asks: a checkout reusing a template's clone points its origin at the request.
         ...(input?.checkout === undefined
           ? {}
-          : { checkout: input.checkout, reuseMatching: input.checkout.reuseMatching }),
+          : {
+              checkout: input.checkout,
+              ...(input.checkout.reuseMatching ? { adopt: "retarget-origin" as const } : {}),
+            }),
         ...(input?.onProgress === undefined ? {} : { onProgress: input.onProgress }),
       },
     );
@@ -162,7 +165,7 @@ describe("cloneRepository with a checkout", () => {
 
       const refused = yield* Effect.flip(service.cloneRepository(input));
       assert.include(refused.detail, "not empty");
-      const adopted = yield* service.cloneRepository(input, { reuseMatching: true });
+      const adopted = yield* service.cloneRepository(input, { adopt: "keep-origin" });
       assert.strictEqual(adopted.cwd, destination);
       assert.strictEqual(yield* git(destination, "rev-parse", "HEAD"), first);
       assert.isTrue(yield* fs.exists(path.join(destination, "local.txt")));
@@ -177,11 +180,12 @@ describe("cloneRepository with a checkout", () => {
       yield* service.cloneRepository({ remoteUrl: published, destinationPath: destination });
       assert.strictEqual(yield* git(destination, "remote", "get-url", "origin"), published);
 
-      yield* service.cloneRepository(
+      const adopted = yield* service.cloneRepository(
         { remoteUrl: remote, destinationPath: destination },
-        { reuseMatching: true },
+        { adopt: "keep-origin" },
       );
       assert.strictEqual(yield* git(destination, "remote", "get-url", "origin"), published);
+      assert.strictEqual(adopted.remoteUrl, published);
     }).pipe(Effect.provide(layer)),
   );
 
