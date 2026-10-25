@@ -1231,15 +1231,36 @@ function OpenCommandPaletteDialog(props: {
       ],
     });
   };
-  // Hosted without a project, since no local checkout is needed. The draft
-  // pins the sandbox and its source, and the first message launches it.
+  // The sandbox clones the pinned source, not the draft's project, so the
+  // draft goes without a project where the owner offers that, and otherwise
+  // in one of the owner's projects. The first message launches it.
   const openSandboxDraft = async (
     choice: SandboxRunChoice,
     remoteUrl: SandboxRemoteUrl,
     base: SandboxBase,
   ): Promise<void> => {
     setOpen(false);
-    const opened = await startScratchThread(choice.ownerEnvironmentId);
+    const owner = choice.ownerEnvironmentId;
+    const ownerProject =
+      currentProjectEnvironmentId === owner && currentProjectId !== null
+        ? scopeProjectRef(owner, currentProjectId)
+        : defaultProjectRef?.environmentId === owner
+          ? defaultProjectRef
+          : null;
+    if (scratchWorkspaceRootFor(owner) === null && ownerProject === null) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not open a sandbox draft",
+          description: "Open a project on its environment first.",
+        }),
+      );
+      return;
+    }
+    const opened =
+      ownerProject === null || scratchWorkspaceRootFor(owner) !== null
+        ? await startScratchThread(owner)
+        : await handleNewThread(ownerProject);
     if (opened === null) return;
     const store = useSandboxDraftStore.getState();
     store.choose(opened.draftId, choice.ownerEnvironmentId, choice.accountId);
