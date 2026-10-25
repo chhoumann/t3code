@@ -58,8 +58,9 @@ export class SourceControlRepositoryService extends Context.Service<
     /**
      * Clones into a staging directory beside the destination and moves it
      * into place once git is done, so the destination only ever holds a
-     * complete clone. With a `checkout`, adopts a matching clone already at
-     * the destination instead, and pins the base.
+     * complete clone. Asked to `reuseMatching`, adopts a clone of the same
+     * repository already at the destination instead. With a `checkout`, pins
+     * the base.
      */
     readonly cloneRepository: (
       input: SourceControlCloneRepositoryInput,
@@ -80,12 +81,14 @@ export interface SourceControlPreparedClone {
   readonly remoteUrl: string;
   readonly cloneUrl: string;
   readonly repository: SourceControlRepositoryInfo | null;
-  /** The destination already holds a clone of this repository, which `checkout.reuseMatching` adopts. */
+  /** The destination already holds a clone of this repository, which `reuseMatching` adopts. */
   readonly adopt: boolean;
 }
 
 export interface SourceControlCloneCheckoutOptions {
   readonly checkout?: ProjectCloneCheckout;
+  /** Adopt a published clone of the same repository at the destination rather than refuse a non-empty one. */
+  readonly reuseMatching?: boolean;
 }
 
 export interface SourceControlCloneOptions extends SourceControlCloneCheckoutOptions {
@@ -329,17 +332,17 @@ export const make = Effect.gen(function* () {
 
   /**
    * Whether a non-empty destination is a clone of `remoteUrl` to adopt. Only a
-   * checkout that asked to reuse one may; a clone of another repository is
+   * caller that asked to reuse one may; a clone of another repository is
    * refused and left as it is.
    */
   const adoptsDestination = Effect.fn("SourceControlRepositoryService.adoptsDestination")(
     function* (
       destination: { readonly destinationPath: string; readonly entries: ReadonlyArray<string> },
       remoteUrl: string,
-      checkout: ProjectCloneCheckout | undefined,
+      reuseMatching: boolean,
     ) {
       if (destination.entries.length === 0) return false;
-      if (checkout?.reuseMatching !== true || !destination.entries.includes(".git")) {
+      if (!reuseMatching || !destination.entries.includes(".git")) {
         return yield* cloneError("Destination path already exists and is not empty.");
       }
       const origin = yield* git
@@ -394,7 +397,7 @@ export const make = Effect.gen(function* () {
       remoteUrl: redactedUrl,
       cloneUrl: remoteUrl,
       repository,
-      adopt: yield* adoptsDestination(destination, redactedUrl, options?.checkout),
+      adopt: yield* adoptsDestination(destination, redactedUrl, options?.reuseMatching === true),
     } satisfies SourceControlPreparedClone;
   });
 

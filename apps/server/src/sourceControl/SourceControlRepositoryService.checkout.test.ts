@@ -72,7 +72,10 @@ const fixture = Effect.gen(function* () {
     service.cloneRepository(
       { remoteUrl: input?.remoteUrl ?? remote, destinationPath: destination },
       {
-        ...(input?.checkout === undefined ? {} : { checkout: input.checkout }),
+        // As the tracker asks: the checkout's wish to reuse a template's clone becomes the service option.
+        ...(input?.checkout === undefined
+          ? {}
+          : { checkout: input.checkout, reuseMatching: input.checkout.reuseMatching }),
         ...(input?.onProgress === undefined ? {} : { onProgress: input.onProgress }),
       },
     );
@@ -217,6 +220,22 @@ describe("cloneRepository with a checkout", () => {
         assert.include(error.detail, "not empty");
         assert.deepStrictEqual(yield* fs.readDirectory(destination), ["notes.txt"]);
       }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("a retry asked to reuse adopts the clone it published, without a checkout", () =>
+    Effect.gen(function* () {
+      const { fs, path, git, remote, first, destination, service } = yield* fixture;
+      const input = { remoteUrl: remote, destinationPath: destination };
+      yield* service.cloneRepository(input);
+      yield* fs.writeFileString(path.join(destination, "local.txt"), "kept");
+
+      const refused = yield* Effect.flip(service.cloneRepository(input));
+      assert.include(refused.detail, "not empty");
+      const adopted = yield* service.cloneRepository(input, { reuseMatching: true });
+      assert.strictEqual(adopted.cwd, destination);
+      assert.strictEqual(yield* git(destination, "rev-parse", "HEAD"), first);
+      assert.isTrue(yield* fs.exists(path.join(destination, "local.txt")));
+    }).pipe(Effect.provide(layer)),
   );
 
   it.effect("adopts a template's clone of the repository and fetches instead of recloning", () =>

@@ -244,6 +244,81 @@ describe("ProjectCloneTracker", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.effect("retry adopts the clone it published when finalization failed, then finalizes", () => {
+    // A destination that holds a published clone refuses another clone unless asked to reuse it.
+    let published = false;
+    const harness = makeHarness({
+      clone: (input, options) =>
+        Effect.suspend(() => {
+          if (published && options?.reuseMatching !== true) {
+            return Effect.fail(
+              new SourceControlRepositoryError({
+                operation: "cloneRepository",
+                provider: SourceControlProviderKind.make("unknown"),
+                detail: "Destination path already exists and is not empty.",
+              }),
+            );
+          }
+          published = true;
+          return Effect.succeed({
+            cwd: input.destinationPath,
+            remoteUrl: input.remoteUrl ?? "",
+            repository: null,
+          });
+        }),
+    });
+    let finalizations = 0;
+    const hooks: ProjectCloneTracker.ProjectCloneHooks = {
+      ...harness.hooks,
+      finalize: () =>
+        Effect.suspend(() => {
+          finalizations += 1;
+          return finalizations === 1
+            ? Effect.fail(new OrchestrationDispatchCommandError({ message: "scripts unavailable" }))
+            : Effect.void;
+        }),
+    };
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start(startInput, hooks);
+      yield* Effect.yieldNow;
+      expect(yield* tracker.get(projectId)).toMatchObject({
+        phase: "failed",
+        error: "scripts unavailable",
+      });
+
+      expect(yield* tracker.retry(projectId)).toBe(true);
+      yield* Effect.yieldNow;
+      expect(yield* tracker.get(projectId)).toMatchObject({ phase: "done", error: null });
+      expect(finalizations).toBe(2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("a first clone into a destination holding another clone is still refused", () => {
+    const refusals: Array<boolean | undefined> = [];
+    const harness = makeHarness({
+      clone: (_input, options) =>
+        Effect.suspend(() => {
+          refusals.push(options?.reuseMatching);
+          return Effect.fail(
+            new SourceControlRepositoryError({
+              operation: "cloneRepository",
+              provider: SourceControlProviderKind.make("unknown"),
+              detail: "Destination path already exists and is not empty.",
+            }),
+          );
+        }),
+    });
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start(startInput, harness.hooks);
+      yield* Effect.yieldNow;
+      expect(yield* tracker.get(projectId)).toMatchObject({ phase: "failed" });
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).not.toBe(true);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("a done clone with a checkout reports the base it pinned", () => {
     const base = { branch: "develop", commit: "abc123" };
     const harness = makeHarness({

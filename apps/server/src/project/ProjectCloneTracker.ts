@@ -45,6 +45,12 @@ export class ProjectCloneTracker extends Context.Service<
     >;
     /** Interrupts a running clone and deletes the partial checkout. */
     readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
+    /**
+     * Clones a failed or cancelled project again. The destination was empty
+     * when the clone started, so a clone of the repository found there now is
+     * the one git finished before finalization failed or a cancel landed; it
+     * is adopted and finalized again.
+     */
     readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
     /**
      * Stops tracking a project's clone, interrupting it if it still runs and
@@ -236,6 +242,7 @@ export const make = Effect.gen(function* () {
   const cloneWatchingForStall = Effect.fn("ProjectCloneTracker.cloneWatchingForStall")(function* (
     projectId: ProjectId,
     tracked: TrackedClone,
+    reuseMatching: boolean,
   ) {
     const pulses = yield* Queue.sliding<void>(1);
     yield* watchForStall(projectId, pulses).pipe(Effect.forkScoped);
@@ -245,6 +252,7 @@ export const make = Effect.gen(function* () {
         onProgress: (update) =>
           Queue.offer(pulses, undefined).pipe(Effect.andThen(progress(projectId, update))),
         timeoutMs: null,
+        reuseMatching,
         ...(tracked.input.checkout === undefined ? {} : { checkout: tracked.input.checkout }),
       },
     );
@@ -258,8 +266,8 @@ export const make = Effect.gen(function* () {
    * uninterruptible step, so a late Cancel neither tears the checkout down
    * nor records a finished clone as cancelled.
    */
-  const runClone = (projectId: ProjectId, tracked: TrackedClone) =>
-    cloneWatchingForStall(projectId, tracked).pipe(
+  const runClone = (projectId: ProjectId, tracked: TrackedClone, reuseMatching: boolean) =>
+    cloneWatchingForStall(projectId, tracked, reuseMatching).pipe(
       Effect.flatMap((cloned) =>
         Effect.uninterruptible(
           tracked.hooks
@@ -281,11 +289,17 @@ export const make = Effect.gen(function* () {
       Effect.ignoreCause(),
     );
 
-  const launch = Effect.fn("ProjectCloneTracker.launch")(function* (projectId: ProjectId) {
+  /** Starts the clone fiber; `reuseMatching` adopts a clone of the repository already at the destination. */
+  const launch = Effect.fn("ProjectCloneTracker.launch")(function* (
+    projectId: ProjectId,
+    reuseMatching: boolean,
+  ) {
     const current = yield* Ref.get(clones);
     const tracked = current.get(projectId);
     if (!tracked) return;
-    const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
+    const fiber = yield* runClone(projectId, tracked, reuseMatching).pipe(
+      Effect.forkIn(cloneScope),
+    );
     yield* Ref.update(clones, (map) => {
       const existing = map.get(projectId);
       if (!existing) return map;
@@ -297,10 +311,8 @@ export const make = Effect.gen(function* () {
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (input, hooks) {
-      const prepared = yield* repositories.prepareClone(
-        input,
-        input.checkout === undefined ? undefined : { checkout: input.checkout },
-      );
+      const reuseMatching = input.checkout?.reuseMatching === true;
+      const prepared = yield* repositories.prepareClone(input, { reuseMatching });
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
@@ -360,7 +372,7 @@ export const make = Effect.gen(function* () {
             createdAt: input.createdAt,
           });
           yield* publish;
-          yield* launch(input.projectId);
+          yield* launch(input.projectId, reuseMatching);
         }).pipe(Effect.tapError(() => remove(input.projectId))),
       );
       return {
@@ -422,7 +434,7 @@ export const make = Effect.gen(function* () {
           endedAt: null,
         },
       }));
-      yield* launch(projectId);
+      yield* launch(projectId, true);
       return true;
     },
   );
