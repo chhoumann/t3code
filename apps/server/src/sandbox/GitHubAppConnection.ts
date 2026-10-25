@@ -75,6 +75,12 @@ export class GitHubAppConnection extends Context.Service<
     readonly current: (
       minLifetime: Duration.Duration,
     ) => Effect.Effect<GitHubUserToken | null, GitHubAppConnectionError>;
+    /**
+     * The generation `current` hands out now, read without refreshing. Null
+     * when there is none to give: no App user, a rotation under way, or a
+     * chain that needs the user to sign in again.
+     */
+    readonly generation: Effect.Effect<number | null, GitHubAppConnectionError>;
     /** The current generation, then each new one: a rotation, a connect, or a disconnect (null). */
     readonly generations: Stream.Stream<number | null>;
   }
@@ -392,6 +398,12 @@ const make = Effect.gen(function* () {
     return tokenOf(refreshed);
   });
 
+  const generation: GitHubAppConnection["Service"]["generation"] = readEnvelope.pipe(
+    Effect.map((envelope) =>
+      envelope !== null && envelope.state === "ready" ? envelope.generation : null,
+    ),
+  );
+
   const generations: GitHubAppConnection["Service"]["generations"] = Stream.unwrap(
     Effect.gen(function* () {
       // Subscribed before the read, so a change between the two is buffered, not dropped.
@@ -582,7 +594,10 @@ const make = Effect.gen(function* () {
   }
   yield* scheduleRefresh;
 
-  return Context.make(GitHubAppConnection, GitHubAppConnection.of({ current, generations })).pipe(
+  return Context.make(
+    GitHubAppConnection,
+    GitHubAppConnection.of({ current, generation, generations }),
+  ).pipe(
     Context.add(
       GitHubAppConnectionSetup,
       GitHubAppConnectionSetup.of({ begin, complete, disconnect }),

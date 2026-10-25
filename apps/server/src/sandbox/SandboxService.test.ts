@@ -87,6 +87,8 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     restarted: null as Deferred.Deferred<void> | null,
     /** The token the owner's GitHub App connection hands out; null when no user is connected. */
     githubToken: null as GitHubUserToken | null,
+    /** How often the connection was asked for the token itself, which may refresh it. */
+    tokenRequests: 0,
     /** Fed into the connection's generations stream, as a rotation would. */
     rotations: null as Queue.Queue<number | null> | null,
     /** Every token a guest was signed in with, in order with the project preparations. */
@@ -318,7 +320,12 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
       const rotations = yield* Queue.unbounded<number | null>();
       world.rotations = rotations;
       return GitHubAppConnection.of({
-        current: () => Effect.sync(() => world.githubToken),
+        current: () =>
+          Effect.sync(() => {
+            world.tokenRequests += 1;
+            return world.githubToken;
+          }),
+        generation: Effect.sync(() => world.githubToken?.generation ?? null),
         generations: Stream.fromQueue(rotations),
       });
     }),
@@ -1098,6 +1105,8 @@ describe("SandboxService", () => {
           "prepare",
           "github-login:2:octocat",
         ]);
+        // Only the deliveries asked for the token itself; every look read the generation.
+        assert.strictEqual(world.tokenRequests, 2);
 
         // The user disconnected: the guest keeps the login it has.
         world.githubToken = null;

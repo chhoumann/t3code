@@ -425,6 +425,25 @@ describe("GitHubAppConnection", () => {
     }),
   );
 
+  it.effect("reads the current generation without refreshing a token that is running short", () =>
+    Effect.gen(function* () {
+      const { github, envelope, start } = makeWorld();
+      const { context } = yield* start;
+      yield* Effect.gen(function* () {
+        const connection = yield* GitHubAppConnection.GitHubAppConnection;
+        assert.isNull(yield* connection.generation);
+        yield* connect;
+        // Two hours left: a caller wanting three would refresh, a look must not.
+        yield* TestClock.adjust(Duration.hours(6));
+        assert.strictEqual(yield* connection.generation, envelope()?.generation);
+        assert.isFalse(
+          github.requests.some((request) => request.params.get("grant_type") === "refresh_token"),
+        );
+        assert.strictEqual(envelope()?.accessToken, "access-1");
+      }).pipe(Effect.provide(context));
+    }),
+  );
+
   it.effect("refreshes on its own an hour before the token expires", () =>
     Effect.gen(function* () {
       const { github, envelope, start } = makeWorld();

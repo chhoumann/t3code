@@ -515,10 +515,13 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
 
-  /** The generation of the token the connection hands out now, or null when it has none to give. */
+  /**
+   * The generation of the token the connection hands out now, or null when it
+   * has none to give. Read only: a look must not refresh, and so never breaks
+   * the chain; the refresh timer and a delivery do.
+   */
   const githubTokenGenerationNow = () =>
-    githubConnection.current(GITHUB_TOKEN_MIN_LIFETIME).pipe(
-      Effect.map((token) => token?.generation ?? null),
+    githubConnection.generation.pipe(
       Effect.tapError((error) =>
         Effect.logDebug("GitHub token unavailable for sandboxes").pipe(
           Effect.annotateLogs({ error: error.message }),

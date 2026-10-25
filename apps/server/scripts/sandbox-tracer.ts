@@ -794,6 +794,7 @@ const program = Effect.gen(function* () {
             GitHubAppConnection,
             GitHubAppConnection.of({
               current: () => Effect.succeed(null),
+              generation: Effect.succeed(null),
               generations: Stream.empty,
             }),
           ),
