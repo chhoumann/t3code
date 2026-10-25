@@ -398,7 +398,11 @@ describe("renderGitHubLoginCommand", () => {
           command,
         ].join("\n"),
       );
-    return { ...fixture, run, commands: () => NodeFS.readFileSync(log, "utf8") };
+    return {
+      ...fixture,
+      run,
+      commands: () => (NodeFS.existsSync(log) ? NodeFS.readFileSync(log, "utf8") : ""),
+    };
   };
 
   it("hands gh the token on stdin, never as an argument, and removes the file", () => {
@@ -423,6 +427,20 @@ describe("renderGitHubLoginCommand", () => {
       "git config --global user.email octocat@github.com",
       "",
     ]);
+  });
+
+  it("removes the token file when the exec lock cannot be taken", () => {
+    const { home, at, run, commands } = loginFixture();
+    const tokenFile = at(SANDBOX_GITHUB_TOKEN_FILE);
+    NodeFS.writeFileSync(tokenFile, "ghu_secret");
+    const result = run(`flock() { return 1; }\n${renderGitHubLoginCommand(user)}`);
+    const tokenFileLeft = NodeFS.existsSync(tokenFile);
+    const log = commands();
+    NodeFS.rmSync(home, { recursive: true });
+
+    expect(result.status).not.toBe(0);
+    expect(tokenFileLeft).toBe(false);
+    expect(log).toBe("");
   });
 
   it("removes the token file when the login fails, and names the user after their login without a name", () => {

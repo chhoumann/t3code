@@ -333,11 +333,12 @@ export function renderGitHubLoginCommand(user: {
   const token = shellQuote(SANDBOX_GITHUB_TOKEN_FILE);
   return [
     "set -euo pipefail",
+    // Before the lock, so a lock that cannot be taken still removes the token.
+    `trap 'rm -f ${token}' EXIT`,
     ...SANDBOX_EXEC_LOCK_LINES,
     `export HOME=${shellQuote(SANDBOX_HOME)}`,
     // Either variable would make gh ignore the login it is about to store.
     "unset GH_TOKEN GITHUB_TOKEN",
-    `trap 'rm -f ${token}' EXIT`,
     `chmod 600 ${token}`,
     `gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage < ${token}`,
     "gh auth setup-git --hostname github.com",

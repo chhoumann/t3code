@@ -535,6 +535,16 @@ const make = Effect.gen(function* () {
       machineId,
       renderGitHubLoginCommand({ login: token.login, name: token.name, email: token.email }),
       60,
+    ).pipe(
+      // The login removes the file itself; a call that never ran it leaves the token behind.
+      Effect.tapError(() =>
+        provider
+          .exec(account, machineId, {
+            command: `rm -f ${shellQuote(SANDBOX_GITHUB_TOKEN_FILE)}`,
+            timeoutSeconds: 10,
+          })
+          .pipe(Effect.ignore({ log: true })),
+      ),
     );
     yield* Effect.logInfo("sandbox signed in to GitHub").pipe(
       Effect.annotateLogs({ machineId, login: token.login, generation: token.generation }),

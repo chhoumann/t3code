@@ -30,7 +30,7 @@ import {
   SANDBOX_SETUP_ENV_FILE,
 } from "./sandboxBootScript.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
-import { ProviderMachineId, SandboxProvider } from "./SandboxProvider.ts";
+import { ProviderMachineId, SandboxProvider, SandboxProviderError } from "./SandboxProvider.ts";
 
 const unused = () => Effect.die("unused");
 
@@ -126,6 +126,42 @@ describe("SandboxGuest", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect("removes the token file from the owner's side when the login cannot be run", () => {
+    const steps: Array<string> = [];
+    const layer = guestLayer({
+      exec: (_account, _machineId, { command }) =>
+        Effect.suspend(() => {
+          steps.push(`exec:${command}`);
+          return command.startsWith("rm -f ")
+            ? Effect.succeed({ exitCode: 0, stdout: "", stderr: "", timedOut: false })
+            : Effect.fail(
+                new SandboxProviderError({ operation: "exec", kind: "transient", status: 502 }),
+              );
+        }),
+      writeFile: (_account, _machineId, { path }) =>
+        Effect.sync(() => void steps.push(`write:${path}`)),
+    });
+    return Effect.gen(function* () {
+      const guest = yield* SandboxGuest.SandboxGuest;
+      const failure = yield* guest
+        .deliverGitHubToken({ apiKey: Redacted.make("key") }, ProviderMachineId.make("bx_1"), {
+          generation: 3,
+          token: Redacted.make("ghu_secret"),
+          expiresAt: 0,
+          login: "octocat",
+          name: null,
+          email: null,
+        })
+        .pipe(Effect.flip);
+      expect(failure._tag).toBe("SandboxProviderError");
+      expect(steps).toEqual([
+        `write:${SANDBOX_GITHUB_TOKEN_FILE}`,
+        expect.stringContaining("gh auth login"),
+        `exec:rm -f '${SANDBOX_GITHUB_TOKEN_FILE}'`,
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("reports whether a credential refresh left T3's restart pending", () => {
     let pending = "1";
