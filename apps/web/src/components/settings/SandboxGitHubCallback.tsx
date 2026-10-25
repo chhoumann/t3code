@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { isElectron } from "../../env";
 import { ensureLocalApi } from "../../localApi";
-import { useEnvironment } from "../../state/environments";
+import { useEnvironment, useEnvironments } from "../../state/environments";
 import { sandboxes } from "../../state/sandboxes";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -39,13 +39,19 @@ export function SandboxGitHubCallback(props: {
   const { environmentId, code, state } = props;
   const navigate = useNavigate();
   const owner = useEnvironment(environmentId);
+  // A fresh page load lists its saved environments a moment after the first render.
+  const catalogReady = useEnvironments().isReady;
   const phase = owner?.connection.phase ?? null;
   const complete = useAtomCommand(sandboxes.githubComplete, { reportFailure: false });
   const [outcome, setOutcome] = useState<Outcome>({ _tag: "waiting" });
   const relayed = useRef(false);
-  const ownerMissing = owner === null;
+  const ownerMissing = catalogReady && owner === null;
   const ownerUnreachable =
-    phase !== null && phase !== "connecting" && phase !== "reconnecting" && phase !== "connected";
+    owner !== null &&
+    phase !== null &&
+    phase !== "connecting" &&
+    phase !== "reconnecting" &&
+    phase !== "connected";
 
   useEffect(() => {
     if (relayed.current || phase !== "connected" || code === null || state === null) return;
