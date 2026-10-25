@@ -4,7 +4,6 @@ import {
   SandboxBase,
   SandboxId,
   SandboxRemoteUrl,
-  type SandboxSource,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -41,9 +40,15 @@ interface SandboxDraftStoreState {
     ownerEnvironmentId: EnvironmentId,
     accountId: SandboxAccountId,
   ) => void;
-  readonly setSource: (draftId: DraftId, source: Partial<SandboxSource>) => void;
+  /** A `remoteUrl` of null lets the draft follow its project's repository again. */
+  readonly setSource: (
+    draftId: DraftId,
+    source: { readonly remoteUrl?: SandboxRemoteUrl | null; readonly base?: SandboxBase },
+  ) => void;
   readonly clear: (draftId: DraftId) => void;
 }
+
+export type SandboxDraftStoreSetSource = SandboxDraftStoreState["setSource"];
 
 export const useSandboxDraftStore = create<SandboxDraftStoreState>()(
   persist(
@@ -66,11 +71,23 @@ export const useSandboxDraftStore = create<SandboxDraftStoreState>()(
             },
           };
         }),
-      setSource: (draftId, source) =>
+      setSource: (draftId, { remoteUrl, base }) =>
         set((state) => {
           const current = state.targets[draftId];
           if (current === undefined) return state;
-          return { targets: { ...state.targets, [draftId]: { ...current, ...source } } };
+          const { remoteUrl: kept, ...rest } = current;
+          const nextRemoteUrl =
+            remoteUrl === undefined ? kept : remoteUrl === null ? undefined : remoteUrl;
+          return {
+            targets: {
+              ...state.targets,
+              [draftId]: {
+                ...rest,
+                ...(nextRemoteUrl === undefined ? {} : { remoteUrl: nextRemoteUrl }),
+                ...(base === undefined ? {} : { base }),
+              },
+            },
+          };
         }),
       clear: (draftId) =>
         set((state) => {

@@ -8,7 +8,6 @@ import type {
   RepositoryIdentity,
   SandboxBase,
   SandboxRemoteUrl,
-  SandboxSource,
 } from "@t3tools/contracts";
 import { sandboxRepositoryIdentity, sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { ChevronDownIcon, FolderGit2Icon, GitBranchIcon, type LucideIcon } from "lucide-react";
@@ -16,7 +15,11 @@ import { type Ref, useDeferredValue, useImperativeHandle, useState } from "react
 
 import type { DraftId } from "../composerDraftStore";
 import { cn } from "../lib/utils";
-import { useSandboxDraftStore, useSandboxDraftTarget } from "../sandboxDraftStore";
+import {
+  useSandboxDraftStore,
+  useSandboxDraftTarget,
+  type SandboxDraftStoreSetSource,
+} from "../sandboxDraftStore";
 import { usePaginatedBranches } from "../state/queries";
 import { BranchPicker } from "./BranchPicker";
 import {
@@ -83,10 +86,10 @@ export function BranchToolbarSandboxSource({
   );
   if (target === null) return null;
   const identity = project.repositoryIdentity ?? null;
-  const followsProject =
-    target.remoteUrl === undefined && sandboxSourceForProject(identity) !== null;
+  const projectRemoteUrl = sandboxSourceForProject(identity)?.remoteUrl ?? null;
+  const followsProject = target.remoteUrl === undefined && projectRemoteUrl !== null;
   const source = resolveSandboxDraftSource(target, identity);
-  const setSource = (patch: Partial<SandboxSource>) =>
+  const setSource = (patch: Parameters<SandboxDraftStoreSetSource>[1]) =>
     useSandboxDraftStore.getState().setSource(draftId, patch);
   const pickerOpenChange = (picker: "repository" | "base") => (open: boolean) =>
     setOpenPicker(open ? picker : null);
@@ -101,6 +104,7 @@ export function BranchToolbarSandboxSource({
       {followsProject ? null : (
         <SandboxRepositoryPicker
           remoteUrl={source?.remoteUrl ?? null}
+          projectRemoteUrl={projectRemoteUrl}
           open={openPicker === "repository" && !disabled}
           onOpenChange={pickerOpenChange("repository")}
           onChange={(remoteUrl) => setSource({ remoteUrl })}
@@ -186,9 +190,12 @@ function repositoryLabel(remoteUrl: SandboxRemoteUrl): string {
 }
 
 const USE_REPOSITORY_ITEM = "use-repository";
+const FOLLOW_PROJECT_ITEM = "follow-project";
 
+/** Picks the repository a draft clones; `null` follows the draft's project again. */
 function SandboxRepositoryPicker({
   remoteUrl,
+  projectRemoteUrl,
   open,
   onOpenChange,
   onChange,
@@ -196,16 +203,22 @@ function SandboxRepositoryPicker({
   displayMode,
 }: {
   remoteUrl: SandboxRemoteUrl | null;
+  /** The draft's project's repository, offered as a way back to following it. */
+  projectRemoteUrl: SandboxRemoteUrl | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onChange: (remoteUrl: SandboxRemoteUrl) => void;
+  onChange: (remoteUrl: SandboxRemoteUrl | null) => void;
   disabled: boolean;
   displayMode: DisplayMode;
 }) {
   const [query, setQuery] = useState("");
   const popupProps = usePickerPopupProps(displayMode);
   const typed = query.trim().length === 0 ? null : sandboxRemoteUrlFromInput(query);
-  const items = typed === null ? [] : [USE_REPOSITORY_ITEM];
+  const offersProject = projectRemoteUrl !== null && query.trim().length === 0;
+  const items = [
+    ...(offersProject ? [FOLLOW_PROJECT_ITEM] : []),
+    ...(typed === null ? [] : [USE_REPOSITORY_ITEM]),
+  ];
   const handleOpenChange = (next: boolean) => {
     onOpenChange(next);
     if (!next) setQuery("");
@@ -221,8 +234,9 @@ function SandboxRepositoryPicker({
       open={open}
       onOpenChange={handleOpenChange}
       onValueChange={(item) => {
-        if (item !== USE_REPOSITORY_ITEM || typed === null) return;
-        onChange(typed);
+        if (item === FOLLOW_PROJECT_ITEM) onChange(null);
+        else if (item === USE_REPOSITORY_ITEM && typed !== null) onChange(typed);
+        else return;
         handleOpenChange(false);
       }}
     >
@@ -240,8 +254,13 @@ function SandboxRepositoryPicker({
           onChange={(event) => setQuery(event.target.value)}
         />
         <ComboboxList>
+          {offersProject && projectRemoteUrl !== null ? (
+            <ComboboxItem hideIndicator index={0} value={FOLLOW_PROJECT_ITEM}>
+              <span className="truncate">Use {repositoryLabel(projectRemoteUrl)} (project)</span>
+            </ComboboxItem>
+          ) : null}
           {typed !== null ? (
-            <ComboboxItem hideIndicator index={0} value={USE_REPOSITORY_ITEM}>
+            <ComboboxItem hideIndicator index={items.length - 1} value={USE_REPOSITORY_ITEM}>
               <span className="truncate">Use {repositoryLabel(typed)}</span>
             </ComboboxItem>
           ) : query.trim().length > 0 ? (
