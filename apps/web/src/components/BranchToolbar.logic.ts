@@ -1,3 +1,4 @@
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import type {
   EnvironmentId,
   EnvironmentMachineKind,
@@ -127,7 +128,12 @@ export function sandboxRepositoryChoice(
     return projectRemoteUrl === null ? null : { _tag: "project", remoteUrl: projectRemoteUrl };
   }
   const typed = sandboxRemoteUrlFromInput(query);
-  return typed === null ? null : { _tag: "typed", remoteUrl: typed };
+  if (typed === null) return null;
+  // Typing the project's own repository follows the project rather than pinning its URL.
+  return projectRemoteUrl !== null &&
+    normalizeGitRemoteUrl(typed) === normalizeGitRemoteUrl(projectRemoteUrl)
+    ? { _tag: "project", remoteUrl: projectRemoteUrl }
+    : { _tag: "typed", remoteUrl: typed };
 }
 
 /**

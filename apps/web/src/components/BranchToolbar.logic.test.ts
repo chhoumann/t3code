@@ -411,6 +411,17 @@ describe("sandboxRepositoryChoice", () => {
     });
     expect(sandboxRepositoryChoice("~/code/other", project)).toBeNull();
   });
+
+  it("follows the project when its own repository is typed, in any spelling", () => {
+    expect(sandboxRepositoryChoice("Example/App", project)).toEqual({
+      _tag: "project",
+      remoteUrl: project,
+    });
+    expect(sandboxRepositoryChoice("git@github.com:example/app.git", project)).toEqual({
+      _tag: "project",
+      remoteUrl: project,
+    });
+  });
 });
 
 describe("sandboxBaseSuggestions", () => {

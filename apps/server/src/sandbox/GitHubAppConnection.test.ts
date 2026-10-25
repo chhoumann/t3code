@@ -541,7 +541,6 @@ describe("GitHubAppConnection", () => {
       const kept = makeWorld();
       kept.seedRegistration();
       kept.seedEnvelope("rotating", 8 * HOUR);
-      kept.github.liveAccessTokens.add("access-seeded");
       kept.github.liveRefreshTokens.add("refresh-seeded");
       const keptStarted = yield* kept.start;
       yield* Effect.gen(function* () {

@@ -660,17 +660,14 @@ const make = Effect.gen(function* () {
   // which sends it again at once. Starting never waits on GitHub.
   const stored = yield* readStoredEnvelope.pipe(Effect.orElseSucceed(() => null));
   const envelope = stored === "unreadable" ? null : stored;
-  yield* mutex
-    .withPermit(
-      Effect.gen(function* () {
-        // An envelope that cannot be read goes once, here, so the user can connect again.
-        if (stored === "unreadable") yield* clearEnvelope;
-        if ((yield* readRegistration) === null) return;
-        const recorded = (yield* settings.getSettings).sandboxGitHubApp?.connection;
-        if (!Equal.equals(recorded, connectionOf(envelope))) yield* mirror(envelope);
-      }),
-    )
-    .pipe(Effect.ignore({ log: true }));
+  // Nothing else runs yet: the refresh loop and the services start below.
+  yield* Effect.gen(function* () {
+    // An envelope that cannot be read goes once, here, so the user can connect again.
+    if (stored === "unreadable") yield* clearEnvelope;
+    if ((yield* readRegistration) === null) return;
+    const recorded = (yield* settings.getSettings).sandboxGitHubApp?.connection;
+    if (!Equal.equals(recorded, connectionOf(envelope))) yield* mirror(envelope);
+  }).pipe(Effect.ignore({ log: true }));
   yield* scheduleRefresh;
 
   return Context.make(
