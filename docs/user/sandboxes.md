@@ -19,8 +19,8 @@ account.
 In the project's settings, use **Sandboxes** to choose a template for each
 account. The template menu lists the selected account's ready Boat snapshots.
 A snapshot of another sandbox keeps its files and installed tools, but the new
-sandbox starts T3 Code without that sandbox's threads and moves the project's
-clone to your commit.
+sandbox starts T3 Code without that sandbox's threads and fetches the branch it
+starts from into the snapshot's clone of the repository.
 You can also override the account's machine size and stop time there.
 These defaults apply to new sandboxes for every checkout of that repository.
 Reset them to use the account defaults and start without a template.
@@ -31,22 +31,34 @@ machine setup script alone and keep it out of the agents' environment. This is
 not a hard boundary: the sandbox's user has passwordless `sudo` and can read the
 file that holds it.
 
-The sandbox clones your project itself, so it needs its own access to private
-repositories. For GitHub, connect your GitHub account in Settings: every sandbox
-is signed in to `gh` and git as you, so its agents can clone, push, and open
-pull requests in your name. `GH_TOKEN` and `GITHUB_TOKEN` are not accepted as
-environment variables, since either would override that sign-in. For another
-host's HTTPS remote, add a token as an environment variable and configure a Git
-credential helper that reads it in the account's machine setup script. An SSH
-remote needs a key set up the same way.
+The sandbox clones the repository itself, so it needs its own access to private
+repositories. For GitHub, choose **Connect GitHub** in **Settings → Sandboxes**.
+T3 Code creates a GitHub App on your account, and you pick the repositories it
+can reach; **Manage repositories** changes that later. Every sandbox is then
+signed in to `gh` and git as you with a token that lasts eight hours and that
+the environment owning the sandbox renews while it runs, so agents can clone,
+push, and open pull requests in your name. `GH_TOKEN` and `GITHUB_TOKEN` are not
+accepted as environment variables, since either would override that sign-in.
+For a repository on another host, add a token as an environment variable and
+configure a Git credential helper that reads it in the account's machine setup
+script.
 
 ## Start a sandbox
 
 In a new thread in a project, open the environment picker and choose
 **New sandbox · _account_**, then send your message. The sandbox clones the
-remote your branch tracks, such as your fork, and starts from the commit your
-branch has pushed there, so commit and push first: uncommitted or unpushed
-work is not included. The first message cannot carry attachments or context.
+repository the project's `origin` remote points to, such as your fork, and
+starts a new branch from that repository's default branch. Choose another remote
+branch in the branch control next to the picker. Your local checkout is never
+copied, so its uncommitted or unpushed work is not included. The first message
+cannot carry attachments or context.
+
+To work on a repository you have not opened, run **New sandbox from repository**
+from the command palette and enter `owner/repo` or a Git URL.
+
+The project's setup scripts in `t3.json` run in the sandbox. Install the tools
+they need in the account's machine setup script, or start from a template that
+has them.
 
 Every device connected to the environment that owns the sandbox pairs with it
 automatically.
