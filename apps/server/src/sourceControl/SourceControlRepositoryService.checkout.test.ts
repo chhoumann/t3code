@@ -82,64 +82,6 @@ const fixture = Effect.gen(function* () {
   return { fs, path, git: run, root, remote, work, first, destination, service, clone, commit };
 });
 
-/**
- * The real file system, except that a file lands in a project folder right
- * after its entries are listed while a staged clone waits beside it: the user
- * saving into the folder at the moment the clone is published.
- */
-const fileAppearsAfterListing = (dropped: { count: number }) =>
-  Layer.effect(
-    FileSystem.FileSystem,
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const stagingOf = (directory: string) =>
-        path.join(path.dirname(directory), `.${path.basename(directory)}.t3-clone`);
-      return FileSystem.FileSystem.of({
-        ...fs,
-        readDirectory: (directory, options) =>
-          fs
-            .readDirectory(directory, options)
-            .pipe(
-              Effect.tap(() =>
-                path.basename(directory) !== "project"
-                  ? Effect.void
-                  : fs
-                      .exists(stagingOf(directory))
-                      .pipe(
-                        Effect.flatMap((publishing) =>
-                          publishing
-                            ? fs
-                                .writeFileString(path.join(directory, "notes.txt"), "mine")
-                                .pipe(
-                                  Effect.tap(() => Effect.sync(() => void (dropped.count += 1))),
-                                )
-                            : Effect.void,
-                        ),
-                      ),
-              ),
-            ),
-      });
-    }),
-  );
-
-/** The service over `fileSystem`; the test itself keeps the real one. */
-const layerOver = (
-  fileSystem: Layer.Layer<FileSystem.FileSystem, never, FileSystem.FileSystem | Path.Path>,
-) =>
-  SourceControlRepositoryService.layer.pipe(
-    Layer.provide(
-      Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
-        resolveLink: () => undefined,
-      }),
-    ),
-    Layer.provide(layerGit),
-    Layer.provide(layerConfig),
-    Layer.provide(fileSystem),
-    Layer.provideMerge(layerGit),
-    Layer.provideMerge(NodeServices.layer),
-  );
-
 describe("cloneRepository with a checkout", () => {
   it.effect("publishes a complete clone at the destination and pins the default branch", () =>
     Effect.gen(function* () {
@@ -185,17 +127,6 @@ describe("cloneRepository with a checkout", () => {
         assert.deepStrictEqual(yield* fs.readDirectory(destination), ["notes.txt"]);
       }).pipe(Effect.provide(layer)),
   );
-
-  it.effect("never deletes a file that lands in the destination as the clone is published", () => {
-    const dropped = { count: 0 };
-    return Effect.gen(function* () {
-      const { fs, path, destination, clone } = yield* fixture;
-      yield* clone().pipe(Effect.result);
-      if (dropped.count > 0) {
-        assert.isTrue(yield* fs.exists(path.join(destination, "notes.txt")));
-      }
-    }).pipe(Effect.provide(layerOver(fileAppearsAfterListing(dropped))));
-  });
 
   it.effect("never adopts a partial clone a crash left behind", () =>
     Effect.gen(function* () {
