@@ -534,6 +534,12 @@ const make = Effect.gen(function* () {
     };
   });
 
+  /**
+   * Finishes a browser step. Under the mutex with the refresh and the
+   * disconnect, so two sign-ins racing each other cannot leave one App's
+   * registration beside another App's tokens: the second register step finds
+   * the first's App and is refused.
+   */
   const complete: GitHubAppConnectionSetup["Service"]["complete"] = Effect.fn(
     "GitHubAppConnectionSetup.complete",
   )(function* (input) {
@@ -546,6 +552,11 @@ const make = Effect.gen(function* () {
       );
     }
     if (flow.step === "register") {
+      if ((yield* readRegistration) !== null) {
+        return yield* failure(
+          "Another sign-in registered a GitHub App first, so the App this one created is not used. Delete it from your GitHub developer settings, and connect with the registered App.",
+        );
+      }
       const app = yield* githubApp
         .convertManifest(http, input.code)
         .pipe(Effect.mapError(apiFailure("create the App")));
@@ -566,7 +577,10 @@ const make = Effect.gen(function* () {
         callbackUrls: flow.callbackUrls,
         expiresAt: now + Duration.toMillis(STATE_TTL),
       });
-      return { _tag: "install", url: githubApp.installUrl(app.slug, installState) };
+      return {
+        _tag: "install",
+        url: githubApp.installUrl(app.slug, installState),
+      } satisfies SandboxGitHubFlowNext;
     }
     const registration = yield* readRegistration;
     if (registration === null) {
@@ -579,24 +593,19 @@ const make = Effect.gen(function* () {
     const user = yield* githubApp
       .fetchUser(http, grant.access_token)
       .pipe(Effect.mapError(apiFailure("read your GitHub profile")));
-    yield* mutex.withPermit(
-      Effect.gen(function* () {
-        const previous = yield* readEnvelope;
-        const now = yield* Clock.currentTimeMillis;
-        const envelope = grantedEnvelope(
-          grant,
-          nextGeneration(previous?.generation ?? null, now),
-          { login: user.login, name: user.name ?? null, email: user.email ?? null },
-          now,
-        );
-        yield* writeEnvelope(envelope);
-        yield* mirror(envelope);
-        yield* publish(envelope.generation);
-      }),
+    const previous = yield* readEnvelope;
+    const envelope = grantedEnvelope(
+      grant,
+      nextGeneration(previous?.generation ?? null, now),
+      { login: user.login, name: user.name ?? null, email: user.email ?? null },
+      now,
     );
+    yield* writeEnvelope(envelope);
+    yield* mirror(envelope);
+    yield* publish(envelope.generation);
     yield* scheduleRefresh;
-    return { _tag: "connected" };
-  });
+    return { _tag: "connected" } satisfies SandboxGitHubFlowNext;
+  }, mutex.withPermit);
 
   const disconnect: GitHubAppConnectionSetup["Service"]["disconnect"] = Effect.fn(
     "GitHubAppConnectionSetup.disconnect",

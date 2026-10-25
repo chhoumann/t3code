@@ -776,6 +776,42 @@ describe("GitHubAppConnection", () => {
   );
 
   it.effect(
+    "a second sign-in that registers an App after the first is refused and changes nothing",
+    () =>
+      Effect.gen(function* () {
+        const { github, envelope, secretText, start } = makeWorld();
+        const { context } = yield* start;
+        yield* Effect.gen(function* () {
+          const setup = yield* GitHubAppConnection.GitHubAppConnectionSetup;
+          const connection = yield* GitHubAppConnection.GitHubAppConnection;
+          // Two Settings pages start registering before either comes back from GitHub.
+          const first = yield* setup.begin({ step: "register", callbackUrl: CALLBACK_URL });
+          const second = yield* setup.begin({ step: "register", callbackUrl: CALLBACK_URL });
+          const install = yield* setup.complete({ state: first.state, code: "manifest-code" });
+          if (install._tag !== "install") return assert.fail("expected the install step");
+          const installState = new URL(install.url).searchParams.get("state")!;
+          yield* setup.complete({ state: installState, code: "install-code" });
+          const connected = yield* connection.current(Duration.hours(1));
+
+          const refused = yield* setup
+            .complete({ state: second.state, code: "manifest-code-b" })
+            .pipe(Effect.flip);
+          assert.include(refused.message, "registered a GitHub App first");
+          // The second App's credentials were never fetched, so nothing of it is kept.
+          assert.isFalse(
+            github.requests.some((request) => request.url.includes("manifest-code-b")),
+          );
+          const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
+          assert.strictEqual(settings.sandboxGitHubApp?.clientId, CLIENT_ID);
+          assert.strictEqual(settings.sandboxGitHubApp?.connection._tag, "connected");
+          assert.strictEqual(secretText("sandbox-github-app-client-secret"), CLIENT_SECRET);
+          assert.strictEqual(envelope()?.generation, connected!.generation);
+          assert.strictEqual(envelope()?.state, "ready");
+        }).pipe(Effect.provide(context));
+      }),
+  );
+
+  it.effect(
     "accepts a callback state once, within ten minutes, for the client route it was issued to",
     () =>
       Effect.gen(function* () {
