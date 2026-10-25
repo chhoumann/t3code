@@ -468,21 +468,25 @@ function planRunning(
  * still wants it running, so asking again resumes it. While the agents work,
  * the provider's own stop is kept `BACKSTOP_GRACE_MS` past this owner's, and
  * moved only once it trails by half of that, so a busy sandbox costs one
- * provider call every few minutes.
+ * provider call every few minutes. A rotated token goes out on the looks in
+ * between: a delivery that keeps failing must not hold up the stop, the
+ * restart, or the deadline the provider's own stop follows.
  */
 function planReady(
   record: SandboxRecord,
   observation: SandboxObservation,
   machine: ProviderMachine,
 ): SandboxPlan {
-  // A rotation revoked the token the guest holds, so the new one goes out while it works.
-  if (githubTokenStale(record, observation)) return plan(ready, act("DeliverGitHubToken"));
+  const deliverOrWatch = () =>
+    githubTokenStale(record, observation)
+      ? plan(ready, act("DeliverGitHubToken"))
+      : plan(ready, act("Watch"));
   const activity = observation.activity;
   if (record.restartPending && activity !== null && !activity.busy) {
     return plan(ready, act("RestartGuest"));
   }
   const stopAfterSeconds = record.spec.machine.stopAfterSeconds;
-  if (stopAfterSeconds === null || activity === null) return plan(ready, act("Watch"));
+  if (stopAfterSeconds === null || activity === null) return deliverOrWatch();
   const stopAfter = stopAfterSeconds * 1000;
   // A resume restarts the count, however long the sandbox sat stopped.
   const idleSince = activity.busy
@@ -498,5 +502,5 @@ function planReady(
   );
   return machine.archiveAfter === null || machine.archiveAfter < until - BACKSTOP_GRACE_MS / 2
     ? plan(ready, { _tag: "ExtendDeadline", until })
-    : plan(ready, act("Watch"));
+    : deliverOrWatch();
 }

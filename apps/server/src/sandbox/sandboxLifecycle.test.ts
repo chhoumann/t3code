@@ -358,6 +358,24 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "ready" }, action: { _tag: "DeliverGitHubToken" } },
   ],
   [
+    "a stale token waits for a provider deadline that is due",
+    { ...ready, githubTokenGeneration: 1 },
+    observed({ ...watched(null, busy), githubTokenGeneration: 2 }),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a stale token does not keep an idle sandbox running",
+    { ...longReady, githubTokenGeneration: 1 },
+    observed({
+      ...watched(NOW + BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER)),
+      githubTokenGeneration: 2,
+    }),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Stop" } },
+  ],
+  [
     "a ready sandbox holding the current token keeps watching",
     { ...ready, githubTokenGeneration: 2 },
     observed({ ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy), githubTokenGeneration: 2 }),
@@ -408,13 +426,13 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
   ],
   [
-    "a new token goes out before a pending restart",
+    "a pending restart runs before a new token goes out",
     { ...ready, restartPending: true, githubTokenGeneration: 1 },
     observed({
       ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, idleSince(NOW - MINUTE)),
       githubTokenGeneration: 2,
     }),
-    { status: { _tag: "ready" }, action: { _tag: "DeliverGitHubToken" } },
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
   ],
   [
     "a resume after the project was prepared but before the seed launched launches it",
