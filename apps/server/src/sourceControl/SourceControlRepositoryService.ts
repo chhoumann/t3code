@@ -59,8 +59,8 @@ export class SourceControlRepositoryService extends Context.Service<
      * Clones into a staging directory beside the destination and moves it
      * into place once git is done, so the destination only ever holds a
      * complete clone. Asked to `reuseMatching`, adopts a clone of the same
-     * repository already at the destination instead. With a `checkout`, pins
-     * the base.
+     * repository already at the destination instead, with the origin it has.
+     * With a `checkout`, points origin at the requested URL and pins the base.
      */
     readonly cloneRepository: (
       input: SourceControlCloneRepositoryInput,
@@ -578,6 +578,16 @@ export const make = Effect.gen(function* () {
     const prepared = yield* prepareClone(input, options);
     let remoteUrl = prepared.remoteUrl;
     if (prepared.adopt) {
+      // A checkout adopts a template's clone and wants its own URL on it. A
+      // retry adopts the clone this service published, whose origin is the
+      // URL git could reach, which may not be the one asked for again.
+      if (options?.checkout === undefined) {
+        return {
+          cwd: prepared.destinationPath,
+          remoteUrl,
+          repository: prepared.repository,
+        } satisfies SourceControlCloneResult;
+      }
       const set = yield* gitStep("adoptClone", prepared.destinationPath, [
         "remote",
         "set-url",

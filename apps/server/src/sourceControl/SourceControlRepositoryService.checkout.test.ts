@@ -169,6 +169,22 @@ describe("cloneRepository with a checkout", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("a retry adoption keeps the origin the published clone was made with", () =>
+    Effect.gen(function* () {
+      const { git, remote, destination, service } = yield* fixture;
+      // The clone git ended up making, under another spelling of the remote than the one asked for.
+      const published = `${remote}/`;
+      yield* service.cloneRepository({ remoteUrl: published, destinationPath: destination });
+      assert.strictEqual(yield* git(destination, "remote", "get-url", "origin"), published);
+
+      yield* service.cloneRepository(
+        { remoteUrl: remote, destinationPath: destination },
+        { reuseMatching: true },
+      );
+      assert.strictEqual(yield* git(destination, "remote", "get-url", "origin"), published);
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("adopts a template's clone of the repository and fetches instead of recloning", () =>
     Effect.gen(function* () {
       const { fs, path, git, remote, destination, clone, commit } = yield* fixture;
