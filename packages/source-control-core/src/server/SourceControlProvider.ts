@@ -51,6 +51,10 @@ export function userFacingSourceControlDetail(cause: unknown): string | undefine
     : undefined;
 }
 
+export function repositoryNotFoundDetail(repository: string): string {
+  return `Repository ${transportSafeSourceControlErrorValue(repository)} was not found. Check the owner and name and try again.`;
+}
+
 export function transportSafeSourceControlErrorValue(value: string): string {
   let printable = "";
   for (const character of value) {
@@ -105,22 +109,18 @@ export class SourceControlProvider extends Context.Service<
   SourceControlProvider,
   {
     readonly kind: SourceControlProviderKind;
-    /**
-     * The caller checks the owner against what comes back, so a host that cannot search
-     * `owner:branch` can drop those selectors without losing anything.
-     */
+    /** The caller verifies owners, so hosts may drop unsupported `owner:branch` selectors. */
     readonly headBranchProbe?: (input: {
       readonly headSelectors: ReadonlyArray<string>;
       readonly state: "open" | "all";
+      /** `owner:branch` to read instead of bare names, when the caller knows the head's owner. */
+      readonly ownerHeadSelector?: string | undefined;
     }) => { readonly headSelectors: ReadonlyArray<string>; readonly limit: number };
     readonly readChangeRequestTemplate?: (input: {
       readonly cwd: string;
       readonly treeish: string;
     }) => Effect.Effect<Option.Option<string>>;
-    /**
-     * The repository's `owner/name` from a remote URL, for a host whose remote paths can carry
-     * more than that (Forgejo's HTTP installation mount). Absent means the whole path.
-     */
+    /** Strip installation mounts from remote paths; absent means use the whole path. */
     readonly repositoryNameFromRemoteUrl?: (url: string) => string | null;
     readonly refineRepositoryIdentity?: (input: {
       readonly identity: RepositoryIdentity;
@@ -162,6 +162,20 @@ export class SourceControlProvider extends Context.Service<
       readonly branch: string;
       readonly baseBranch: string;
     }) => Effect.Effect<void>;
+    /** True when `createChangeRequest` opens the change request as a draft when asked. */
+    readonly createsDraftChangeRequests?: boolean;
+    /**
+     * The private companion of the checkout's repository, made when it has none. The branch of
+     * a private change request is pushed to `url` and never to the repository itself, which
+     * everyone can read. Absent on a host without private change requests.
+     */
+    readonly privateChangeRequestRemote?: (input: {
+      readonly cwd: string;
+      readonly context?: SourceControlProviderContext;
+    }) => Effect.Effect<
+      { readonly url: string; readonly repository: string },
+      SourceControlProviderError
+    >;
     readonly listChangeRequests: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
@@ -169,6 +183,11 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly state: ChangeRequestState | "all";
       readonly limit?: number;
+      /**
+       * `owner/name` to search instead of the repository `createChangeRequest` targets. Only a
+       * host with `createsChangeRequestsIn` can target another repository, so others ignore it.
+       */
+      readonly repository?: string;
     }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
     readonly getChangeRequest: (input: {
       readonly cwd: string;
@@ -184,11 +203,17 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
+      /** Honored only by a provider with `createsDraftChangeRequests`. */
+      readonly draft?: boolean;
+      /** Asked only of a provider with `privateChangeRequestRemote`, which holds the head. */
+      readonly private?: boolean;
     }) => Effect.Effect<void, SourceControlProviderError>;
     readonly getRepositoryCloneUrls: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
       readonly repository: string;
+      /** The host the repository is on. Without it, the checkout's host. */
+      readonly host?: string;
     }) => Effect.Effect<SourceControlRepositoryCloneUrls, SourceControlProviderError>;
     readonly createRepository: (input: {
       readonly cwd: string;

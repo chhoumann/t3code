@@ -7,6 +7,7 @@ import type {
   SandboxSource,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { useGT } from "gt-react";
 
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { type SandboxDraftTarget, useSandboxDraftStore } from "../sandboxDraftStore";
@@ -33,12 +34,15 @@ export interface SandboxLaunchRequest {
  * reason it did not launch, or null.
  */
 export function useSandboxLaunch() {
+  const gt = useGT();
   const navigate = useNavigate();
   const launch = useAtomCommand(sandboxes.launch, { reportFailure: false });
 
   return async (request: SandboxLaunchRequest): Promise<string | null> => {
     if (request.extrasCount > 0) {
-      return "A sandbox starts from your message alone. Remove attachments and context to start one.";
+      return gt(
+        "A sandbox starts from your message alone. Remove attachments and context to start one.",
+      );
     }
     const { target } = request;
     const result = await launch({

@@ -14,7 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, type Atom, type AtomRegistry } from "effect/reactivity";
+import { type Atom, type AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -225,12 +225,8 @@ export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boo
 }
 
 /**
- * Wakes the sandbox an environment belongs to when work sent to it needs that
- * (`wakesForWork`): asks the sandbox's owner to run it, unless a resume is
- * already on its way, then waits for the owner to report it running and for
- * this device's socket to it. A sandbox its owner already reports running
- * still waits for that socket, which a wake that timed out on it never got.
- * Succeeds with whether it had to wake; any other environment is left alone.
+ * Wakes a sleeping sandbox on its owner and waits for it to report running and
+ * reconnect; returns whether a wake was triggered. Non-sandbox environments return false.
  */
 export const wakeSandbox = Effect.fn("SandboxCommands.wakeSandbox")(function* <E, R>(input: {
   readonly environmentId: EnvironmentId;
@@ -275,9 +271,4 @@ export const runAtomCommand = <W, A, E>(
   command: AtomCommand<W, A, E>,
   registry: AtomRegistry.AtomRegistry,
   input: W,
-): Effect.Effect<A, E> =>
-  Effect.promise(() => command.run(registry, input)).pipe(
-    Effect.flatMap((result) =>
-      AsyncResult.isSuccess(result) ? Effect.succeed(result.value) : Effect.failCause(result.cause),
-    ),
-  );
+): Effect.Effect<A, E> => command.run(registry, input);

@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { SandboxBranchName, type ProjectCloneCheckout } from "@t3tools/contracts";
@@ -22,6 +23,7 @@ const layer = SourceControlRepositoryService.layer.pipe(
   Layer.provide(layerGit),
   Layer.provide(layerConfig),
   Layer.provideMerge(layerGit),
+  Layer.provideMerge(NodeCrypto.layer),
   Layer.provideMerge(NodeServices.layer),
 );
 

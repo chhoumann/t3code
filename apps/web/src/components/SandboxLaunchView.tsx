@@ -14,6 +14,7 @@ import {
 import type { EnvironmentId, SandboxId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { Atom } from "effect/reactivity";
+import { T, useGT } from "gt-react";
 import { CheckIcon, CircleIcon, PlayIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -41,6 +42,7 @@ export function SandboxLaunchView(props: {
   readonly ownerEnvironmentId: EnvironmentId;
   readonly sandboxId: SandboxId;
 }) {
+  const gt = useGT();
   const owners = useAtomValue(sandboxes.ownersAtom);
   const view =
     owners.get(props.ownerEnvironmentId)?.find((sandbox) => sandbox.id === props.sandboxId) ?? null;
@@ -78,21 +80,27 @@ export function SandboxLaunchView(props: {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
         <WorkspacePageHeader electron={isElectron} className="border-b border-border">
           <span className="min-w-0 truncate text-sm font-medium text-foreground">
-            {view?.title ?? "Sandbox"}
+            {view?.title ?? gt("Sandbox")}
           </span>
         </WorkspacePageHeader>
         {view === null || panel === null ? (
           listed ? (
             <Empty className="flex-1">
               <EmptyHeader>
-                <EmptyTitle>This sandbox no longer exists</EmptyTitle>
+                <EmptyTitle>
+                  <T>This sandbox no longer exists</T>
+                </EmptyTitle>
               </EmptyHeader>
             </Empty>
           ) : ownerUnreachable ? (
             <Empty className="flex-1">
               <EmptyHeader>
-                <EmptyTitle>This sandbox's environment is offline</EmptyTitle>
-                <EmptyDescription>Reconnect it to follow the sandbox.</EmptyDescription>
+                <EmptyTitle>
+                  <T>This sandbox's environment is offline</T>
+                </EmptyTitle>
+                <EmptyDescription>
+                  <T>Reconnect it to follow the sandbox.</T>
+                </EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : null
@@ -128,6 +136,7 @@ function useOpenThread(action: SandboxLaunchAction | null) {
   const environmentId = action?._tag === "OpenThread" ? action.environmentId : null;
   const threadId = action?._tag === "OpenThread" ? action.threadId : null;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- redirects router to the sandbox thread once this device can display it
   useEffect(() => {
     if (environmentId === null || threadId === null) return;
     void navigate({
@@ -160,6 +169,7 @@ function useWakeOnArrival(
   const [failure, setFailure] = useState<SandboxWakeFailure | null>(null);
   const asked = useRef(false);
   const latestRevision = useRef(revision);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps latest revision ref current for in-flight async wake failures
   useEffect(() => {
     latestRevision.current = revision;
   }, [revision]);
@@ -175,6 +185,7 @@ function useWakeOnArrival(
   });
   const asleep = action?._tag === "Wake" ? action.environmentId : null;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends one-shot wake RPC to the owner environment on arrival
   useEffect(() => {
     if (asleep !== null) wakeOnArrival(asleep);
   }, [asleep]);
@@ -233,7 +244,7 @@ function SandboxProgress(props: {
               }}
             >
               <PlayIcon />
-              Resume
+              <T>Resume</T>
             </Button>
           </div>
         </div>
@@ -246,9 +257,10 @@ function SandboxProgress(props: {
 }
 
 function SandboxStages(props: { readonly current: number }) {
+  const gt = useGT();
   const { current } = props;
   return (
-    <ol className="flex flex-col gap-2 text-sm" aria-label="Sandbox progress">
+    <ol className="flex flex-col gap-2 text-sm" aria-label={gt("Sandbox progress")}>
       {SANDBOX_LAUNCH_STAGES.map((step, index) => (
         <li
           key={step}
@@ -288,12 +300,12 @@ function SandboxFailure(props: {
         {props.onRetry === null ? null : (
           <Button size="sm" variant="outline" onClick={props.onRetry}>
             <RotateCcwIcon />
-            Retry
+            <T>Retry</T>
           </Button>
         )}
         <Button size="sm" variant="ghost" onClick={props.onDelete}>
           <Trash2Icon />
-          Delete sandbox
+          <T>Delete sandbox</T>
         </Button>
       </div>
     </div>

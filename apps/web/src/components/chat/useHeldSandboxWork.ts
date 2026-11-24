@@ -45,11 +45,8 @@ interface HeldSandboxWorkInput {
 }
 
 /**
- * Delivers work to the thread on screen while its sandbox sleeps: `hold`
- * wakes the sandbox and waits for the thread to load from it, then `run`
- * sends the work on the render that shows it connected, so it goes as it
- * would to any running environment, uploads included. The draft stays in
- * the composer meanwhile, and leaving the thread drops the work.
+ * Holds composer work while waking a sleeping sandbox, then runs it once the thread loads
+ * connected so uploads and sends take the normal path; leaving the thread drops the work.
  */
 export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
   const wake = useWorkCommand(threadEnvironment.wake, { reportFailure: false });
@@ -83,6 +80,7 @@ export function useHeldSandboxWork(input: HeldSandboxWorkInput) {
     },
   );
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- schedules reconnect deadline timer and settles held work once the woken sandbox connects
   useEffect(() => {
     if (held === null) return;
     let timer: number | undefined;

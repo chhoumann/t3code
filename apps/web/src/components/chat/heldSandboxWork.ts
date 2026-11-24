@@ -73,12 +73,8 @@ const drop = (work: HeldWork, reason: string): HeldWorkStep => ({
 });
 
 /**
- * What held work does on a render of the thread on screen. It runs once its
- * woken sandbox is connected and the thread loaded, as long as the composer
- * still shows what was sent. Anything else that ends it is dropped with why:
- * the user left the thread, the message changed, the sandbox could not wake
- * or fell asleep again, or this device did not reach the woken sandbox within
- * the reconnect budget.
+ * Advances held work: runs once the woken sandbox connects and the thread loads with an
+ * unchanged draft, or drops it if navigation, edits, wake failure, or timeout intervene.
  */
 export function heldWorkStep(
   held: HeldOperation,

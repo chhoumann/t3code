@@ -138,12 +138,8 @@ const PROBE_MACHINE = "t3-preflight-probe";
 const probePath = `/sandboxes/${PROBE_MACHINE}`;
 
 /**
- * One request per Boat action sandboxes take. Boat refuses a scoped key's
- * missing action with 403 before looking any further, so every allowed probe
- * only lists the account's templates, or ends at the missing probe machine
- * or, for create, at a body Boat rejects before creating anything: no machine
- * type has the probe's name, and the setup script is not a string. Were one
- * ever made, it would stop within a minute.
+ * Boat returns 403 for a missing scoped action before validating the body or machine ID,
+ * so create uses an invalid type/setupScript and other probes hit a nonexistent ID.
  */
 const ACCESS_PROBES: ReadonlyArray<{
   readonly action: string;

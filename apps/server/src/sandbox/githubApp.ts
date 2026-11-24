@@ -82,10 +82,6 @@ export const manifestFormAction = (state: string): string =>
 export const installUrl = (slug: string, state: string): string =>
   `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(state)}`;
 
-/** GitHub's own page for adding and removing the repositories the App may reach. */
-export const installationsUrl = (slug: string): string =>
-  `${GITHUB_WEB}/apps/${encodeURIComponent(slug)}/installations/new`;
-
 export const authorizeUrl = (clientId: string, redirectUri: string, state: string): string => {
   const url = new URL(`${GITHUB_WEB}/login/oauth/authorize`);
   url.searchParams.set("client_id", clientId);

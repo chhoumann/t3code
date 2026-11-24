@@ -1,3 +1,5 @@
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 import {
   AuthOrchestrationOperateScope,
   type AuthSessionState,
@@ -188,21 +190,25 @@ export type SandboxWakeStatus =
 export function sandboxWakeStatus(
   view: Pick<SandboxView, "desired" | "status">,
   phase: EnvironmentConnectionPhase,
+  resolve: MFunctionType = mFallback,
 ): SandboxWakeStatus | null {
   switch (sandboxPresence(view)) {
     case "asleep":
-      return { kind: "asleep", label: "Asleep" };
+      return { kind: "asleep", label: resolve(msg("Asleep")) };
     case "waking":
-      return { kind: "waking", label: "Waking" };
+      return { kind: "waking", label: resolve(msg("Waking")) };
     case "running":
       return phase === "available" || phase === "connecting" || phase === "reconnecting"
-        ? { kind: "connecting", label: "Connecting" }
+        ? { kind: "connecting", label: resolve(msg("Connecting")) }
         : null;
     case "failed":
       return view.status._tag === "failed"
         ? {
             kind: "failed",
-            label: `${view.status.step === "resume" ? "Could not wake" : "Sandbox failed"}: ${view.status.message}`,
+            label:
+              view.status.step === "resume"
+                ? resolve(msg("Could not wake: {message}", { message: view.status.message }))
+                : resolve(msg("Sandbox failed: {message}", { message: view.status.message })),
           }
         : null;
     default:
@@ -220,8 +226,13 @@ export function sandboxLaunchStageIndex(status: SandboxStatus): number | null {
 }
 
 /** What a sandbox on its way to its thread is doing. Ready means the thread is about to open. */
-export function sandboxLaunchStatusLabel(status: SandboxStatus): string {
-  return status._tag === "ready" ? "Opening thread" : SANDBOX_STATUS_LABEL[status._tag];
+export function sandboxLaunchStatusLabel(
+  status: SandboxStatus,
+  resolve: MFunctionType = mFallback,
+): string {
+  return status._tag === "ready"
+    ? resolve(msg("Opening thread"))
+    : SANDBOX_STATUS_LABEL[status._tag];
 }
 
 type LandingCandidate = Pick<
@@ -260,13 +271,8 @@ function threadsLoaded(shell: EnvironmentShellStatus | null): boolean {
 }
 
 /**
- * What a sandbox's launch view does on this device. It opens the thread the
- * sandbox lands on once this device can show it: an asleep sandbox's from
- * cache, since sending to it wakes the sandbox, and a running one's once
- * connected. It wakes an asleep sandbox whose thread this device never
- * loaded, as sending it work would, so only with the grant to. It leaves one
- * asleep until it knows both. It offers to resume one the user put away.
- * Otherwise it follows the sandbox as its owner reports it.
+ * Action for the sandbox launch view: open the thread once viewable (from cache if asleep,
+ * once connected if running), wake an asleep uncached sandbox if granted, or offer Resume.
  */
 export type SandboxLaunchAction =
   | {
@@ -323,11 +329,8 @@ export interface SandboxWakeFailure {
 }
 
 /**
- * What a sandbox's launch view shows: the stages of a new sandbox, where it
- * stands, Resume for one the user put away, or why it failed. The sandbox's
- * own failure retries through its owner. A wake this device asked for that
- * failed retries the wake, and shows only until the sandbox's next request,
- * such as a resume asked for elsewhere, which that failure says nothing about.
+ * Panel shown by the sandbox launch view; local wake failures only apply until the
+ * sandbox's request revision advances.
  */
 export type SandboxLaunchPanel =
   | { readonly _tag: "Stages"; readonly current: number }
@@ -346,11 +349,14 @@ export type SandboxLaunchPanel =
       readonly environmentId: EnvironmentId;
     };
 
-export function sandboxLaunchPanel(input: {
-  readonly view: Pick<SandboxView, "status" | "revision" | "environmentId">;
-  readonly action: SandboxLaunchAction;
-  readonly wakeFailure: SandboxWakeFailure | null;
-}): SandboxLaunchPanel {
+export function sandboxLaunchPanel(
+  input: {
+    readonly view: Pick<SandboxView, "status" | "revision" | "environmentId">;
+    readonly action: SandboxLaunchAction;
+    readonly wakeFailure: SandboxWakeFailure | null;
+  },
+  resolve: MFunctionType = mFallback,
+): SandboxLaunchPanel {
   const { view, action, wakeFailure } = input;
   if (view.status._tag === "failed") {
     return {
@@ -374,7 +380,7 @@ export function sandboxLaunchPanel(input: {
   ) {
     return {
       _tag: "WakeFailed",
-      heading: "Could not wake",
+      heading: resolve(msg("Could not wake")),
       message: wakeFailure.message,
       environmentId: view.environmentId,
     };
@@ -385,9 +391,9 @@ export function sandboxLaunchPanel(input: {
     case "Wake":
       return { _tag: "Status", label: SANDBOX_STATUS_LABEL.resuming };
     case "Asleep":
-      return { _tag: "Status", label: "Asleep" };
+      return { _tag: "Status", label: resolve(msg("Asleep")) };
     default:
-      return { _tag: "Status", label: sandboxLaunchStatusLabel(view.status) };
+      return { _tag: "Status", label: sandboxLaunchStatusLabel(view.status, resolve) };
   }
 }
 
@@ -402,13 +408,8 @@ export interface PendingSandboxThread {
 }
 
 /**
- * The sandboxes to list until their thread arrives, newest first. A sandbox
- * stops being pending once its environment lists the thread its launch view
- * opens (`sandboxLandingThreadId`), so the thread replaces it in one update.
- * An asleep sandbox lists its threads from cache, so it is pending only on a
- * device that never loaded them, once that device has loaded what it cached.
- * Put-away sandboxes stand in for their threads under Settings and deleted
- * ones are gone, so neither is pending.
+ * Sandboxes pending until `sandboxLandingThreadId` lists their thread. Asleep sandboxes
+ * stay pending only after cached shells load if the thread is still absent.
  */
 const AWAITING_THREAD: ReadonlySet<SandboxPresence> = new Set([
   "launching",
@@ -470,8 +471,11 @@ export function sandboxAccountChoices(
     .sort((left, right) => left.label.localeCompare(right.label));
 }
 
-export function sandboxLaunchLabel(accountLabel: string): string {
-  return `New sandbox · ${accountLabel}`;
+export function sandboxLaunchLabel(
+  accountLabel: string,
+  resolve: MFunctionType = mFallback,
+): string {
+  return resolve(msg("New sandbox · {account}", { account: accountLabel }));
 }
 
 /**
@@ -497,7 +501,10 @@ const isSandboxError = Schema.is(SandboxError);
  * Why a sandbox command failed, in words, naming the actions an API key
  * lacks. Null when it succeeded or was interrupted, which needs no word.
  */
-export function sandboxCommandFailure(result: AtomCommandResult<unknown, unknown>): string | null {
+export function sandboxCommandFailure(
+  result: AtomCommandResult<unknown, unknown>,
+  resolve: MFunctionType = mFallback,
+): string | null {
   if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
   const error = squashAtomCommandFailure(result);
   if (
@@ -505,6 +512,12 @@ export function sandboxCommandFailure(result: AtomCommandResult<unknown, unknown
     error.missingActions !== undefined &&
     error.missingActions.length > 0
   )
-    return `This API key cannot use ${error.missingActions.join(", ")}. Allow those actions for the key, then save again.`;
-  return error instanceof Error && error.message.length > 0 ? error.message : "An error occurred.";
+    return resolve(
+      msg("This API key cannot use {actions}. Allow those actions for the key, then save again.", {
+        actions: error.missingActions.join(", "),
+      }),
+    );
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : resolve(msg("An error occurred."));
 }

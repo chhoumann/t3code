@@ -150,6 +150,7 @@ const FILE_ICON_BY_EXTENSION: Readonly<Record<string, MarkdownFileIcon>> = {
   bz2: "zip",
   c: "c",
   cc: "cpp",
+  cjs: "javascript",
   cpp: "cpp",
   cxx: "cpp",
   css: "css",
@@ -265,11 +266,7 @@ export function resolveMarkdownLinkPresentation(href: string): MarkdownLinkPrese
     }
   } catch {}
 
-  const target =
-    parseMarkdownFileLink(normalized) ??
-    (/^(?:[A-Za-z0-9._-]+(?: +[A-Za-z0-9._-]+)*\/)+$/.test(normalized)
-      ? { path: normalized }
-      : null);
+  const target = parseMarkdownFileLink(normalized);
   if (target) {
     return {
       kind: "file",

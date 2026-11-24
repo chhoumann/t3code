@@ -1,18 +1,6 @@
 /**
- * SandboxRegistrations - keeps every client's connections in step with the
- * sandboxes its environments own. Each owner's sandbox list decides which
- * sandbox environments this client is paired with: a ready sandbox is paired
- * through its owner; one whose machine sleeps stays switched on but dormant,
- * so its threads stay listed from cache while nothing redials a dead address;
- * one the user put away is switched off; and a destroyed one is forgotten.
- * The routes are the owner's contributions (`BearerConnectionProfile.managedBy`),
- * so a route the user paired by hand survives.
- *
- * An owner that cannot be reached has said nothing: its sandboxes keep their
- * registrations until it lists them again. A failed subscription or change is
- * retried with backoff for as long as the owner's latest list asks for it.
- *
- * @module SandboxRegistrations
+ * Keeps client connections in step with each owner's sandbox list via owner-contributed
+ * routes (`managedBy`) so hand-paired routes survive and unreachable owners keep registrations.
  */
 import {
   type EnvironmentId,
@@ -40,20 +28,7 @@ import { connectionRoutes } from "../connection/routes.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { request, subscribe } from "../rpc/client.ts";
 
-/**
- * What a sandbox is to this client, from what its user asked for and what its
- * machine does, so every client of the owner reads the same:
- * - `running`: serving its threads.
- * - `waking`: asked to run again and coming back.
- * - `asleep`: meant to run, but its machine stopped or is stopping. Its
- *   threads stay listed, and work sent to it wakes it.
- * - `put-away`: stopped because the user asked. It leaves the sidebar until
- *   it is resumed.
- * - `launching`: on its way to its first thread.
- * - `failed`: its last step failed while it was meant to run, or its delete
- *   failed.
- * - `gone`: deleted, or being deleted.
- */
+/** Client-side sandbox state combining user intent (`desired`) and machine status. */
 export type SandboxPresence =
   | "running"
   | "waking"
@@ -132,11 +107,8 @@ export type SandboxRegistrationAction =
   | { readonly _tag: "Remove"; readonly environmentId: EnvironmentId };
 
 /**
- * What one owner's latest list asks of this client's registry. Only routes the
- * owner contributed are switched or removed; an environment the user paired
- * is never touched, and one already registered is never paired again. An
- * environment is made dormant before it is switched on, so switching it on
- * never dials a machine that sleeps.
+ * Plans registry changes for one owner's sandboxes without touching user-paired routes.
+ * Sets dormant before enabling so sleeping machines are never dialed on enable.
  */
 export function planSandboxRegistrations(input: {
   readonly views: ReadonlyArray<SandboxView>;

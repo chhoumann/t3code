@@ -8,6 +8,9 @@ import {
   SANDBOX_MAX_STOP_AFTER_HOURS,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 export const SANDBOX_SIZE_LABELS: Record<SandboxMachineSize, string> = {
   small: "Small",
@@ -71,24 +74,35 @@ const isEnvName = Schema.is(SandboxEnvName);
 export function sandboxAccountSaveInput(
   id: SandboxAccountId,
   draft: SandboxAccountDraft,
+  resolve: MessageResolver = m,
 ):
   | { readonly _tag: "Ready"; readonly input: SandboxAccountSaveInput }
   | { readonly _tag: "Invalid"; readonly message: string } {
   const label = draft.label.trim();
-  if (label.length === 0) return { _tag: "Invalid", message: "Give the account a label." };
+  if (label.length === 0)
+    return { _tag: "Invalid", message: resolve(msg("Give the account a label.")) };
   const hours = draft.stopAfterHours.trim();
   const stopAfterHours = hours.length === 0 ? null : Number(hours);
   if (stopAfterHours !== null && !isSandboxStopAfterHours(stopAfterHours)) {
     return {
       _tag: "Invalid",
-      message: `Stop after inactivity must be above zero and at most ${SANDBOX_MAX_STOP_AFTER_HOURS} hours.`,
+      message: resolve(
+        msg("Stop after inactivity must be above zero and at most {maxHours} hours.", {
+          maxHours: SANDBOX_MAX_STOP_AFTER_HOURS,
+        }),
+      ),
     };
   }
   const badName = draft.env.find((entry) => !isEnvName(entry.name.trim()));
   if (badName !== undefined) {
     return {
       _tag: "Invalid",
-      message: `${badName.name.trim() || "An env variable"} is not a valid env variable name. Use letters, digits, and underscores, not starting with a digit.`,
+      message: resolve(
+        msg(
+          "{name} is not a valid env variable name. Use letters, digits, and underscores, not starting with a digit.",
+          { name: badName.name.trim() || resolve(msg("An env variable")) },
+        ),
+      ),
     };
   }
   const apiKey = draft.apiKey.trim();

@@ -1,15 +1,6 @@
 /**
- * SandboxGuest - what an owner environment does to the T3 server inside one
- * of its sandboxes: mint the owner's admin session, prepare the project
- * through the guest's own clone service, launch the seed thread, read what
- * its agents are doing, and mint client pairing grants.
- *
- * The guest is reached over its public HTTP API and RPC socket with the
- * admin bearer, the same seams any remote client uses. Its MCP endpoint is
- * not one of them: it accepts only MCP client sessions and allocates its own
- * thread ids, so a retried launch would create a second thread.
- *
- * @module SandboxGuest
+ * Drives a guest T3 server over its public HTTP API and RPC socket with an admin
+ * bearer (not MCP, which allocates its own thread ids and cannot retry idempotently).
  */
 import {
   type AuthGrantScope,
@@ -216,7 +207,7 @@ export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(functio
     ORCHESTRATION_PROTOCOL_QUERY_PARAM,
     String(ORCHESTRATION_PROTOCOL_VERSION),
   );
-  socketUrl.searchParams.set("wsTicket", ticket);
+  socketUrl.searchParams.set("wsTicket", Redacted.value(ticket));
   // Built into the caller's scope: the socket must outlive the client's construction.
   const protocol = yield* Layer.build(
     RpcClient.layerProtocolSocket().pipe(
@@ -623,11 +614,16 @@ const make = Effect.gen(function* () {
             ...bearer(target),
             [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
           },
+          query: {},
         }),
       ),
       Effect.timeout(ACTIVITY_TIMEOUT),
-      Effect.map(guestActivity),
       Effect.mapError(sessionCallError("read-activity")),
+      Effect.flatMap((snapshot) =>
+        "resumable" in snapshot
+          ? Effect.fail(new SandboxGuestError({ operation: "read-activity" }))
+          : Effect.succeed(guestActivity(snapshot)),
+      ),
     );
 
   const issuePairingCredential: SandboxGuest["Service"]["issuePairingCredential"] = (

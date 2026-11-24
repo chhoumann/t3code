@@ -7,6 +7,7 @@ import {
   sandboxPresence,
 } from "@t3tools/client-runtime/state/sandboxes";
 import type { SandboxView } from "@t3tools/contracts";
+import { useGT } from "gt-react";
 import { CircleAlertIcon, CircleDashedIcon, MoonIcon } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
@@ -20,7 +21,7 @@ import { ProjectMonogram } from "../ProjectMonogram";
 import { animateSidebarLayoutChanges, resolveSidebarRowAccessibility } from "../Sidebar.logic";
 
 /** Where a pending sandbox stands, as its row shows it. */
-function pendingStatus(view: SandboxView) {
+function pendingStatus(view: SandboxView, gt: ReturnType<typeof useGT>) {
   switch (sandboxPresence(view)) {
     case "failed":
       return {
@@ -30,7 +31,7 @@ function pendingStatus(view: SandboxView) {
       };
     case "asleep":
       return {
-        label: "Asleep",
+        label: gt("Asleep"),
         icon: <MoonIcon aria-hidden className="size-3.5 shrink-0" />,
         className: "text-muted-foreground",
       };
@@ -44,13 +45,8 @@ function pendingStatus(view: SandboxView) {
 }
 
 /**
- * A sandbox whose thread this device has yet to list, shaped like the thread
- * card that replaces it once the sandbox's environment lists that thread:
- * one on its way to its first thread, or one asleep that this device never
- * loaded. Opens the sandbox's launch view.
- * Its icon is the monogram a new project shows until its favicon loads.
- * It sits in the sortable list so dragged rows move around it, but it cannot
- * be picked up.
+ * Placeholder sidebar row for a sandbox whose thread this device has not listed yet.
+ * Participates in sortable layout shifts without being draggable.
  */
 export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(props: {
   sortableId: string;
@@ -62,6 +58,7 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
   onNavigate: (pending: PendingSandboxThread) => void;
   onContextMenu: (pending: PendingSandboxThread, position: { x: number; y: number }) => void;
 }) {
+  const gt = useGT();
   const { pending, onContextMenu, onNavigate } = props;
   const { setNodeRef, transform, transition } = useSortable({
     id: props.sortableId,
@@ -69,7 +66,7 @@ export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(p
     animateLayoutChanges: animateSidebarLayoutChanges,
   });
   const projectIdentity = deriveProjectIdentity(props.projectTitle);
-  const status = pendingStatus(pending.view);
+  const status = pendingStatus(pending.view, gt);
   // Mirrors a working thread: background progress recedes until it needs the user.
   const recede = sandboxPresence(pending.view) !== "failed" && !props.isActive;
   const accessibility = resolveSidebarRowAccessibility({

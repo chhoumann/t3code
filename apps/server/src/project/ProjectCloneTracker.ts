@@ -7,6 +7,7 @@ import type {
   ProjectCloneStartInput,
   ProjectCloneStartResult,
   ProjectId,
+  SourceControlCloneProtocol,
   SourceControlRepositoryInfo,
 } from "@t3tools/contracts";
 import {
@@ -15,6 +16,7 @@ import {
   PROJECT_CLONE_ERROR_MAX_LENGTH,
   SourceControlRepositoryError,
 } from "@t3tools/contracts";
+import { splitsSurrogatePair } from "@t3tools/shared/assistantCitations";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -32,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import type { ProjectConflictError } from "./ProjectService.ts";
 
 export class ProjectCloneTracker extends Context.Service<
   ProjectCloneTracker,
@@ -64,12 +67,13 @@ export class ProjectCloneTracker extends Context.Service<
 >()("t3/project/ProjectCloneTracker") {}
 
 export interface ProjectCloneHooks {
+  /** Fails with `ProjectConflictError` when another project already owns the destination. */
   readonly createProject: (input: {
     readonly projectId: ProjectId;
     readonly title: string;
     readonly workspaceRoot: string;
     readonly createdAt: string;
-  }) => Effect.Effect<void, OrchestrationDispatchCommandError>;
+  }) => Effect.Effect<void, OrchestrationDispatchCommandError | ProjectConflictError>;
   /**
    * Runs once git is done and before the clone is reported done, so a
    * thread cannot start until the project is complete. Its failure fails the
@@ -89,7 +93,9 @@ const DONE_RETENTION = "30 seconds";
 const STALL_AFTER = "20 seconds";
 
 function clampText(text: string, maxLength: number): string {
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  if (text.length <= maxLength) return text;
+  const end = splitsSurrogatePair(text, maxLength - 1) ? maxLength - 2 : maxLength - 1;
+  return `${text.slice(0, end)}…`;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -104,10 +110,11 @@ interface TrackedClone {
     readonly destinationPath: string;
     readonly repository: SourceControlRepositoryInfo | null;
     readonly checkout: ProjectCloneCheckout | undefined;
+    readonly protocol: SourceControlCloneProtocol;
   };
 }
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
   const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
@@ -116,8 +123,7 @@ export const make = Effect.gen(function* () {
   let sequence = 0;
   const cloneScope = yield* Scope.make("parallel");
   yield* Effect.addFinalizer(() => Scope.close(cloneScope, Exit.void));
-  // start/cancel/retry/discard mutate the same entry and the same directory;
-  // one at a time keeps a double-clicked Retry from racing two clones into it.
+  // Serialize actions on the shared entry and directory so retries cannot race clones.
   const actionLock = yield* Semaphore.make(1);
   const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) => actionLock.withPermits(1)(effect);
 
@@ -248,7 +254,11 @@ export const make = Effect.gen(function* () {
     const pulses = yield* Queue.sliding<void>(1);
     yield* watchForStall(projectId, pulses).pipe(Effect.forkScoped);
     return yield* repositories.cloneRepository(
-      { remoteUrl: tracked.input.cloneUrl, destinationPath: tracked.input.destinationPath },
+      {
+        remoteUrl: tracked.input.cloneUrl,
+        destinationPath: tracked.input.destinationPath,
+        protocol: tracked.input.protocol,
+      },
       {
         onProgress: (update) =>
           Queue.offer(pulses, undefined).pipe(Effect.andThen(progress(projectId, update))),
@@ -260,12 +270,8 @@ export const make = Effect.gen(function* () {
   }, Effect.scoped);
 
   /**
-   * Runs in its own fiber; the tracker records a failure through `onExit`,
-   * which still runs when the fiber is interrupted (a `matchCause` handler
-   * would be skipped). Once git has finished, the published checkout is
-   * complete and the user's: finalization and the done mark run as one
-   * uninterruptible step, so a late Cancel neither tears the checkout down
-   * nor records a finished clone as cancelled.
+   * Runs in its own fiber; `onExit` records failures even on interruption (unlike `matchCause`),
+   * and finalization runs uninterruptibly once git finishes so a late Cancel cannot tear down a complete clone.
    */
   const runClone = (
     projectId: ProjectId,
@@ -312,6 +318,16 @@ export const make = Effect.gen(function* () {
     });
   });
 
+  const moveClaim = (from: ProjectId, to: ProjectId) =>
+    Ref.modify(clones, (current) => {
+      const claim = current.get(from);
+      if (!claim || current.has(to)) return [false, current] as const;
+      const next = new Map(current);
+      next.delete(from);
+      next.set(to, { ...claim, snapshot: { ...claim.snapshot, projectId: to } });
+      return [true, next] as const;
+    });
+
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (input, hooks) {
       const adopt = input.checkout?.reuseMatching === true ? "retarget-origin" : undefined;
@@ -335,14 +351,19 @@ export const make = Effect.gen(function* () {
         endedAt: null,
         sequence: ++sequence,
       };
-      const claimed = yield* Ref.modify(clones, (current) => {
-        const conflict = Array.from(current.values()).some(
+      const claim = yield* Ref.modify(clones, (current) => {
+        const overlapping = Array.from(current.values()).filter(
           (tracked) =>
             tracked.snapshot.projectId === input.projectId ||
             tracked.input.destinationPath === prepared.destinationPath,
         );
-        if (conflict) return [false, current] as const;
+        // Only a running clone owns its destination; a failed or cancelled one
+        // left nothing behind, so a fresh start supersedes it.
+        if (overlapping.some((tracked) => tracked.snapshot.phase === "running")) {
+          return [null, current] as const;
+        }
         const next = new Map(current);
+        for (const stale of overlapping) next.delete(stale.snapshot.projectId);
         next.set(input.projectId, {
           snapshot,
           fiber: null,
@@ -352,37 +373,51 @@ export const make = Effect.gen(function* () {
             destinationPath: prepared.destinationPath,
             repository: prepared.repository,
             checkout: input.checkout,
+            protocol: input.protocol ?? "auto",
           },
         });
-        return [true, next] as const;
+        return [overlapping.map((stale) => stale.snapshot.projectId), next] as const;
       });
-      if (!claimed) {
-        return yield* new SourceControlRepositoryError({
-          operation: "cloneRepository",
-          provider: input.provider ?? SourceControlProviderKind.make("unknown"),
-          detail: "A clone into this destination is already in progress.",
-        });
-      }
-      // Everything after the claim runs to completion even if the requesting
-      // connection drops: a claimed entry with no fiber could neither be
-      // cancelled nor retried. Any failure in here releases the claim.
-      yield* Effect.uninterruptible(
+      const alreadyInProgress = new SourceControlRepositoryError({
+        operation: "cloneRepository",
+        provider: input.provider ?? SourceControlProviderKind.make("unknown"),
+        detail: "A clone into this destination is already in progress.",
+      });
+      if (claim === null) return yield* alreadyInProgress;
+      // A superseded done entry's pending removal would otherwise delete the new claim.
+      yield* Effect.forEach(claim, clearRetention, { discard: true });
+      // Finish or release the claim despite disconnects; a claim without a fiber cannot be cancelled or retried.
+      const projectId = yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* clearRetention(input.projectId);
-          // The entry is registered before the project exists so a
-          // thread.create or project.delete racing this call already sees it.
-          yield* hooks.createProject({
-            projectId: input.projectId,
-            title: input.title,
-            workspaceRoot: prepared.destinationPath,
-            createdAt: input.createdAt,
-          });
+          // Register before creation so racing thread.create and project.delete see the clone.
+          const projectId = yield* hooks
+            .createProject({
+              projectId: input.projectId,
+              title: input.title,
+              workspaceRoot: prepared.destinationPath,
+              createdAt: input.createdAt,
+            })
+            .pipe(
+              Effect.as(input.projectId),
+              // A failed clone's project still owns its empty folder after a restart
+              // forgets the clone; clone for that project instead.
+              Effect.catchTags({
+                ProjectConflictError: (conflict) =>
+                  moveClaim(input.projectId, conflict.conflictingProjectId).pipe(
+                    Effect.flatMap((moved) =>
+                      moved ? Effect.succeed(conflict.conflictingProjectId) : alreadyInProgress,
+                    ),
+                  ),
+              }),
+            );
           yield* publish;
-          yield* launch(input.projectId, adopt);
+          yield* launch(projectId, adopt);
+          return projectId;
         }).pipe(Effect.tapError(() => remove(input.projectId))),
       );
       return {
-        projectId: input.projectId,
+        projectId,
         cwd: prepared.destinationPath,
         remoteUrl: prepared.remoteUrl,
         repository: prepared.repository,
@@ -398,8 +433,7 @@ export const make = Effect.gen(function* () {
       const current = yield* Ref.get(clones);
       const tracked = current.get(projectId);
       if (!tracked || tracked.snapshot.phase !== "running" || !tracked.fiber) return false;
-      // Uninterruptible past this point: a client that disconnects mid-cancel
-      // must not leave a dead fiber behind a "running" snapshot.
+      // Finish cancellation despite disconnects to avoid dead fibers behind running snapshots.
       return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* Fiber.interrupt(tracked.fiber!);
@@ -479,11 +513,20 @@ export const make = Effect.gen(function* () {
     { bufferSize: 1, strategy: "sliding" },
   );
 
+  // Forwarders retain the underlying operation spans.
   return ProjectCloneTracker.of({
-    start: (input, hooks) => locked(start(input, hooks)),
-    cancel: (projectId) => locked(cancel(projectId)),
-    retry: (projectId) => locked(retry(projectId)),
-    discard: (projectId, workspaceRoot) => locked(discard(projectId, workspaceRoot)),
+    start: Effect.fnUntraced(function* (input, hooks) {
+      return yield* locked(start(input, hooks));
+    }),
+    cancel: Effect.fnUntraced(function* (projectId) {
+      return yield* locked(cancel(projectId));
+    }),
+    retry: Effect.fnUntraced(function* (projectId) {
+      return yield* locked(retry(projectId));
+    }),
+    discard: Effect.fnUntraced(function* (projectId, workspaceRoot) {
+      return yield* locked(discard(projectId, workspaceRoot));
+    }),
     get,
     stream,
   });

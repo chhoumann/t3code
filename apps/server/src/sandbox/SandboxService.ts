@@ -1,16 +1,6 @@
 /**
- * SandboxService - launches, stops, resumes, and destroys sandbox machines
- * for this owner environment, and keeps each `sandboxes` row converging on
- * what its user last asked for.
- *
- * Commands write only `desired` and wake the sandbox's loop. Each loop
- * observes the provider and the guest, asks `planNext` for the next action,
- * runs it, and records the facts it learned, then waits to be woken again.
- * Every provider call is recorded as in flight before it is made, so a
- * restart resolves it by looking before anything else happens. On start,
- * every unsettled row is planned again.
- *
- * @module SandboxService
+ * Reconciles each `sandboxes` row toward its desired state; every provider call
+ * is persisted as in-flight first so restarts inspect before acting again.
  */
 import {
   type AuthGrantScope,
@@ -39,7 +29,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -391,7 +381,7 @@ const statusKey = Schema.encodeSync(Schema.fromJsonString(SandboxStatus));
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const provider = yield* SandboxProvider;
   const guest = yield* SandboxGuest.SandboxGuest;
   const accounts = yield* SandboxAccounts.SandboxAccounts;
@@ -403,7 +393,7 @@ const make = Effect.gen(function* () {
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
 
-  const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
+  const uuid = random.uuidV4().pipe(Effect.orDie);
   const persistence = Effect.mapError((cause: unknown) => new SandboxPersistenceError({ cause }));
 
   const readRecord = (id: SandboxId) =>

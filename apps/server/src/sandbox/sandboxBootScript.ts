@@ -1,11 +1,8 @@
 import * as Schema from "effect/Schema";
 
 /**
- * Renders what a sandbox machine runs to become a T3 environment: the script
- * it runs once at creation, the account env file, and the command that
- * refreshes the account env on a later boot. Paths live under /home/user
- * because Boat keeps only /home/user and /etc across stop and resume, wipes
- * /tmp, and leaves ~/.cache out of snapshots.
+ * Paths live under /home/user because Boat keeps only /home/user and /etc across
+ * stop and resume, wipes /tmp, and leaves ~/.cache out of snapshots.
  */
 const SANDBOX_HOME = "/home/user";
 export const SANDBOX_T3_HOME = `${SANDBOX_HOME}/.t3`;
@@ -60,12 +57,8 @@ const SERVER_START_WAIT_SECONDS = 120;
 
 export const SandboxT3Source = Schema.Struct({
   /**
-   * `npm` installs a published release through `t3 service install` itself.
-   * `tarball` installs an unreleased build the owner uploaded: the server
-   * bundle beside its Linux runtime node_modules, laid out like a release
-   * archive but run by the machine's Node. It is placed in the pinned-runtime
-   * slot for its version, where `t3 service install` finds it instead of
-   * downloading.
+   * `npm` installs a published release; `tarball` installs an uploaded build into
+   * the pinned-runtime slot so `t3 service install` uses it instead of downloading.
    */
   kind: Schema.Literals(["npm", "tarball"]),
   version: Schema.String,
@@ -80,11 +73,11 @@ export const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}
  * a process behind (git's credential cache daemon, say) runs with
  * `CLOSE_EXEC_LOCK`, or that process holds the lock after the command ends.
  */
-export const SANDBOX_EXEC_LOCK_LINES: ReadonlyArray<string> = [
+const SANDBOX_EXEC_LOCK_LINES: ReadonlyArray<string> = [
   `exec 9>>${shellQuote(SANDBOX_EXEC_LOCK)}`,
   "flock 9",
 ];
-export const CLOSE_EXEC_LOCK = "9>&-";
+const CLOSE_EXEC_LOCK = "9>&-";
 
 /**
  * One `NAME="value"` line per variable. Double quotes with `\ " $ \`` escaped
@@ -260,12 +253,8 @@ const SETUP_RESTART_PENDING = `${SANDBOX_INPUTS_DIR}/restart-setup.pending`;
 const T3_RESTART_PENDING = `${SANDBOX_INPUTS_DIR}/restart-t3.pending`;
 
 /**
- * Swaps the staged env files and setup script in after a resume and re-runs
- * the setup unit when any of them changed. T3 itself is not restarted here:
- * Boat resumes a machine from memory, so its agents are mid-work, and the
- * owner runs `renderRestartServerCommand` once they are idle. A change marks
- * its restart pending before the swap, so a refresh cut short still reports
- * it on the next one even though the files then match.
+ * Swaps staged env/setup files after resume and re-runs setup when changed; T3 restarts
+ * separately once idle. Marks restart pending before swap so interrupted refreshes retry.
  * Prints `setup_restarted=0|1 t3_restart_pending=0|1`.
  */
 export function renderRefreshCredentialsCommand(): string {
@@ -319,11 +308,8 @@ export function renderRestartServerCommand(): string {
 }
 
 /**
- * Signs the machine in to GitHub as the owner's App user with the token the
- * owner uploaded to `SANDBOX_GITHUB_TOKEN_FILE`, and has git use that login.
- * The token reaches `gh` on stdin only: never as an argument, which agents
- * could read from the process list, and the file goes however the login
- * ends. Commits carry the user's name, and their email when GitHub shows one.
+ * Signs the machine into GitHub from `SANDBOX_GITHUB_TOKEN_FILE` on stdin only (never
+ * argv, which agents can inspect in ps) and always deletes the token file on exit.
  */
 export function renderGitHubLoginCommand(user: {
   readonly login: string;

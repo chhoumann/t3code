@@ -26,7 +26,9 @@ export const fakeEnvironmentRegistry = (
 ) => {
   const supervisor = (environmentId: EnvironmentId) =>
     EnvironmentSupervisor.EnvironmentSupervisor.of({
-      target: { environmentId },
+      target: {
+        environmentId,
+      } as unknown as EnvironmentSupervisor.EnvironmentSupervisor["Service"]["target"],
       session: sessions.get(environmentId)!,
     } as EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
   const run: Registry["run"] = Effect.fn("FakeEnvironmentRegistry.run")(function* <A, E, R>(

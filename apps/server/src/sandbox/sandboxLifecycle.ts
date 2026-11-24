@@ -1,11 +1,6 @@
 /**
- * The sandbox lifecycle as a pure planner. A sandbox row holds what the user
- * asked for (`desired`, bumped `desiredRevision` on every request) and the
- * facts the reconciler has established. `planNext` turns the row plus a fresh
- * look at the provider and the guest into the status to show and the one
- * action to take next. The reconciler runs that action and plans again.
- *
- * @module sandboxLifecycle
+ * Pure sandbox lifecycle planner: `planNext` maps desired state and provider/guest
+ * observations to the next status and single reconciler action.
  */
 import {
   CommandId,
@@ -401,11 +396,8 @@ function planStopped(record: SandboxRecord): SandboxPlan {
 }
 
 /**
- * The creation script runs once, so a stop requested mid-boot waits for T3 to
- * answer first; stopping earlier would leave a machine that never finishes
- * installing. Only a T3 the finished script started is this sandbox's: a
- * machine made from a template snapshot answers as the earlier sandbox until
- * the script replaces it.
+ * Wait for the one-shot creation script to finish before honoring a mid-boot stop,
+ * and require `machine.setup === "done"` so template snapshots don't answer as the old sandbox.
  */
 function planFirstBoot(
   record: SandboxRecord,
@@ -464,13 +456,8 @@ function planRunning(
 }
 
 /**
- * A ready sandbox stops once no agent has worked for its stop time; the user
- * still wants it running, so asking again resumes it. While the agents work,
- * the provider's own stop is kept `BACKSTOP_GRACE_MS` past this owner's, and
- * moved only once it trails by half of that, so a busy sandbox costs one
- * provider call every few minutes. A rotated token goes out on the looks in
- * between. A delivery that keeps failing must not hold up the stop, the
- * restart, or the deadline the provider's own stop follows.
+ * Stops idle sandboxes while keeping the provider's backstop `BACKSTOP_GRACE_MS` ahead
+ * when busy (refreshing only once it trails by half). Token delivery never blocks stop/restart/backstop.
  */
 function planReady(
   record: SandboxRecord,

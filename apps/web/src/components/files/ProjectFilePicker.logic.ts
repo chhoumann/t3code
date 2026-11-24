@@ -14,20 +14,28 @@ function fileName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/**
- * Returns null when `value` does not contain the subsequence at all — the
- * entry still renders (the server matched it), just without highlights.
- */
+/** Return null for unmatched subsequences; server-matched entries still render without highlights. */
 function findMatchIndices(value: string, query: string): number[] | null {
   if (!query) return [];
 
   const normalizedValue = value.toLowerCase();
+  // Lowercasing lengthens İ (to i̇) and shortens nothing, so only a longer result needs mapping back.
+  const sourceSpans: Array<readonly [number, number]> = [];
+  if (normalizedValue.length !== value.length) {
+    let sourceOffset = 0;
+    for (const char of value) {
+      const span = [sourceOffset, sourceOffset + char.length] as const;
+      for (let n = char.toLowerCase().length; n > 0; n -= 1) sourceSpans.push(span);
+      sourceOffset = span[1];
+    }
+  }
   const indices: number[] = [];
   let queryIndex = 0;
 
   for (let valueIndex = 0; valueIndex < normalizedValue.length; valueIndex += 1) {
     if (normalizedValue[valueIndex] !== query[queryIndex]) continue;
-    indices.push(valueIndex);
+    const [start, end] = sourceSpans[valueIndex] ?? [valueIndex, valueIndex + 1];
+    for (let i = Math.max(start, (indices.at(-1) ?? -1) + 1); i < end; i += 1) indices.push(i);
     queryIndex += 1;
     if (queryIndex === query.length) return indices;
   }
@@ -35,11 +43,7 @@ function findMatchIndices(value: string, query: string): number[] | null {
   return null;
 }
 
-/**
- * Server ordering is preserved — ranking already happened there; this pass only
- * filters to files and computes highlight positions with the same query
- * normalization the server applied.
- */
+/** Preserve server ranking and query normalization while filtering files and computing highlights. */
 export function getProjectFilePickerMatches(
   entries: ReadonlyArray<ProjectEntry>,
   rawQuery: string,

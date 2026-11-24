@@ -1,5 +1,5 @@
 import { OrchestratorMcpFailure, SandboxAccountId, SandboxId } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import { toSandboxError, type SandboxFailure } from "../../../sandbox/sandboxErrors.ts";
 import * as SandboxService from "../../../sandbox/SandboxService.ts";
@@ -21,17 +21,18 @@ export const layer = McpToolAccess.toLayer(
   Effect.gen(function* () {
     const sandboxes = yield* SandboxService.SandboxService;
     const settings = yield* Settings.ServerSettingsService;
-    const crypto = yield* Crypto.Crypto;
+    const random = yield* SecureRandom.SecureRandom;
     return {
       sandbox_launch: McpToolAccess.startsThreads(
         (params) => params,
         (params, modes) =>
           Effect.gen(function* () {
-            const id = params.id ?? SandboxId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie));
+            const id = params.id ?? SandboxId.make(yield* random.uuidV4().pipe(Effect.orDie));
             return yield* sandboxes
               .launch({ ...params, ...modes, id })
               .pipe(Effect.mapError(toFailure));
           }),
+        { refused: "launch sandboxes in this environment" },
       ),
       sandbox_update: McpToolAccess.writes((params) =>
         sandboxes.update(params).pipe(Effect.mapError(toFailure)),

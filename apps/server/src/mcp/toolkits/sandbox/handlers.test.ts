@@ -127,7 +127,7 @@ it.effect("offers sandbox tools on an owner and none inside a sandbox", () =>
         Effect.map((server) => server.tools.map((tool) => tool.tool.name)),
         Effect.provide(
           McpHttpServer.layerSandboxToolkit.pipe(
-            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
             Layer.provide(
               Layer.mergeAll(
                 Layer.mock(ThreadManagement.ThreadManagementService)({}),

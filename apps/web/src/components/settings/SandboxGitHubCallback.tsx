@@ -1,6 +1,7 @@
 import { sandboxCommandFailure } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
 import { GitBranchIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -36,6 +37,7 @@ export function SandboxGitHubCallback(props: {
   readonly code: string | null;
   readonly state: string | null;
 }) {
+  const gt = useGT();
   const { environmentId, code, state } = props;
   const navigate = useNavigate();
   const owner = useEnvironment(environmentId);
@@ -53,6 +55,7 @@ export function SandboxGitHubCallback(props: {
     phase !== "reconnecting" &&
     phase !== "connected";
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- relays GitHub OAuth callback to the owner environment once connected
   useEffect(() => {
     if (relayed.current || phase !== "connected" || code === null || state === null) return;
     relayed.current = true;
@@ -61,7 +64,7 @@ export function SandboxGitHubCallback(props: {
       if (result._tag !== "Success") {
         setOutcome({
           _tag: "failed",
-          message: sandboxCommandFailure(result) ?? "GitHub sign-in could not finish.",
+          message: sandboxCommandFailure(result) ?? gt("GitHub sign-in could not finish."),
         });
         return;
       }
@@ -79,20 +82,20 @@ export function SandboxGitHubCallback(props: {
       setOutcome({ _tag: "installing", url: result.value.url });
       window.location.assign(result.value.url);
     })();
-  }, [phase, code, state, environmentId, complete, navigate]);
+  }, [phase, code, state, environmentId, complete, navigate, gt]);
 
   const title =
     code === null || state === null
-      ? "Nothing to finish here"
+      ? gt("Nothing to finish here")
       : ownerMissing
-        ? "This environment is not on this device"
+        ? gt("This environment is not on this device")
         : ownerUnreachable
-          ? `${owner.label} is offline`
+          ? gt("{label} is offline", { label: owner.label })
           : outcome._tag === "failed"
-            ? "GitHub sign-in could not finish"
+            ? gt("GitHub sign-in could not finish")
             : outcome._tag === "installing"
-              ? "Choose repositories on GitHub"
-              : "Connecting GitHub…";
+              ? gt("Choose repositories on GitHub")
+              : gt("Connecting GitHub…");
   const working =
     code !== null &&
     state !== null &&
@@ -113,7 +116,7 @@ export function SandboxGitHubCallback(props: {
         {working ? null : (
           <EmptyContent>
             <Button size="sm" variant="outline" render={<Link to="/settings/sandboxes" />}>
-              Back to Sandboxes
+              <T>Back to Sandboxes</T>
             </Button>
           </EmptyContent>
         )}

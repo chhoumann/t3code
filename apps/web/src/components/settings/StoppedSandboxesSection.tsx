@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { SANDBOX_STATUS_LABEL, sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId, SandboxView } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
 import { BoxIcon, PlayIcon } from "lucide-react";
 
 import { useSandboxActions } from "../../hooks/useSandboxActions";
@@ -19,6 +20,7 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 export function StoppedSandboxesSection(props: {
   readonly ownerEnvironmentIds: ReadonlyArray<EnvironmentId>;
 }) {
+  const gt = useGT();
   const owners = useAtomValue(sandboxes.ownersAtom);
   const stopped = props.ownerEnvironmentIds.flatMap((ownerEnvironmentId) =>
     (owners.get(ownerEnvironmentId) ?? [])
@@ -27,7 +29,7 @@ export function StoppedSandboxesSection(props: {
   );
   if (stopped.length === 0) return null;
   return (
-    <SettingsSection title="Stopped sandboxes" icon={<BoxIcon className="size-3.5" />}>
+    <SettingsSection title={gt("Stopped sandboxes")} icon={<BoxIcon className="size-3.5" />}>
       {stopped.map(({ ownerEnvironmentId, sandbox }) => (
         <StoppedSandboxRow
           key={sandbox.id}
@@ -43,6 +45,7 @@ function StoppedSandboxRow(props: {
   readonly ownerEnvironmentId: EnvironmentId;
   readonly sandbox: SandboxView;
 }) {
+  const gt = useGT();
   const { sandbox } = props;
   const navigate = useNavigate();
   const { setDesired, confirmAndDelete } = useSandboxActions();
@@ -65,8 +68,8 @@ function StoppedSandboxRow(props: {
         void readLocalApi()
           ?.contextMenu.show(
             [
-              { id: "resume", label: "Resume" },
-              { id: "delete-sandbox", label: "Delete sandbox", destructive: true },
+              { id: "resume", label: gt("Resume") },
+              { id: "delete-sandbox", label: gt("Delete sandbox"), destructive: true },
             ],
             { x: event.clientX, y: event.clientY },
           )
@@ -85,7 +88,9 @@ function StoppedSandboxRow(props: {
           onClick={() => void resume()}
         >
           <PlayIcon className="size-3.5" />
-          <span>Resume</span>
+          <span>
+            <T>Resume</T>
+          </span>
         </Button>
       }
     />

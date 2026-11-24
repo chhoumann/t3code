@@ -13,6 +13,7 @@ import {
   type SandboxView,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
 import { BoxIcon, EllipsisIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
@@ -45,7 +46,7 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectSandboxSettings } from "./ProjectSandboxSettings";
 import { SandboxGitHubSection } from "./SandboxGitHubSection";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import {
   SANDBOX_SIZE_LABELS,
   sandboxAccountDraft,
@@ -55,6 +56,7 @@ import {
 } from "./sandboxesSettings.logic";
 
 const SANDBOX_SIZES = Object.keys(SANDBOX_SIZE_LABELS) as SandboxMachineSize[];
+const BOAT_PROVIDER_LABEL = "Boat";
 
 interface AccountEditor {
   readonly environmentId: EnvironmentId;
@@ -62,6 +64,8 @@ interface AccountEditor {
 }
 
 export function SandboxesSettings() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
   const { environments, scope } = useSettingsScope();
   const sandboxIndex = useAtomValue(sandboxes.indexAtom);
   // A sandbox runs T3 too, so it serves sandboxes; it is not where the user keeps accounts.
@@ -92,7 +96,7 @@ export function SandboxesSettings() {
     <SettingsPageContainer>
       <SettingsSection
         id={searchableSetting("sandboxes").id}
-        title="Sandboxes"
+        title={gt("Sandboxes")}
         variant="plain"
         headerAction={
           <Button
@@ -105,7 +109,7 @@ export function SandboxesSettings() {
             }
           >
             <PlusIcon className="size-3" />
-            New account
+            <T>New account</T>
           </Button>
         }
       >
@@ -115,7 +119,9 @@ export function SandboxesSettings() {
               <EmptyMedia variant="icon">
                 <BoxIcon />
               </EmptyMedia>
-              <EmptyTitle>No environment here can start sandboxes</EmptyTitle>
+              <EmptyTitle>
+                <T>No environment here can start sandboxes</T>
+              </EmptyTitle>
             </EmptyHeader>
           </Empty>
         ) : (
@@ -143,13 +149,13 @@ export function SandboxesSettings() {
   );
 }
 
-function accountSummary(account: SandboxAccountConfig): string {
+function accountSummary(account: SandboxAccountConfig, gt: ReturnType<typeof useGT>): string {
   return [
-    "Boat",
+    BOAT_PROVIDER_LABEL,
     SANDBOX_SIZE_LABELS[account.size],
     account.stopAfterHours === null
-      ? "Never stops"
-      : `Stops after ${account.stopAfterHours} h of inactivity`,
+      ? gt("Never stops")
+      : gt("Stops after {hours} h of inactivity", { hours: account.stopAfterHours }),
   ].join(" · ");
 }
 
@@ -158,6 +164,7 @@ function SandboxOwnerSection(props: {
   readonly showHeading: boolean;
   readonly onEdit: (accountId: SandboxAccountId) => void;
 }) {
+  const gt = useGT();
   const { owner } = props;
   const accountsById = owner.serverConfig?.settings.sandboxAccounts ?? {};
   const accounts = Object.entries(accountsById).sort(([, left], [, right]) =>
@@ -171,7 +178,7 @@ function SandboxOwnerSection(props: {
 
   const remove = async (accountId: SandboxAccountId, account: SandboxAccountConfig) => {
     const confirmed = await readLocalApi()?.dialogs.confirm(
-      `Remove sandbox account "${account.label}"?`,
+      gt('Remove sandbox account "{label}"?', { label: account.label }),
       { variant: "destructive" },
     );
     if (confirmed !== true) return;
@@ -184,7 +191,7 @@ function SandboxOwnerSection(props: {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: `Could not remove ${account.label}`,
+          title: gt("Could not remove {label}", { label: account.label }),
           description: failure,
         }),
       );
@@ -194,7 +201,7 @@ function SandboxOwnerSection(props: {
   return (
     <div className="space-y-4">
       <SettingsSection
-        title={props.showHeading ? owner.label : "Accounts"}
+        title={props.showHeading ? owner.label : gt("Accounts")}
         icon={
           props.showHeading ? (
             <EnvironmentMachineIcon
@@ -205,7 +212,7 @@ function SandboxOwnerSection(props: {
         }
       >
         {accounts.length === 0 ? (
-          <SettingsRow title="No accounts" />
+          <SettingsRow title={gt("No accounts")} />
         ) : (
           accounts.map(([id, account]) => {
             const accountId = SandboxAccountId.make(id);
@@ -213,7 +220,7 @@ function SandboxOwnerSection(props: {
               <SettingsRow
                 key={accountId}
                 title={account.label}
-                description={accountSummary(account)}
+                description={accountSummary(account, gt)}
                 control={
                   <Menu>
                     <MenuTrigger
@@ -223,20 +230,22 @@ function SandboxOwnerSection(props: {
                           variant="ghost-muted"
                           size="icon-xs"
                           disabled={!canSave}
-                          aria-label={`More actions for ${account.label}`}
+                          aria-label={gt("More actions for {label}", { label: account.label })}
                         />
                       }
                     >
                       <EllipsisIcon className="size-3.5" />
                     </MenuTrigger>
                     <MenuPopup align="end">
-                      <MenuItem onClick={() => props.onEdit(accountId)}>Edit</MenuItem>
+                      <MenuItem onClick={() => props.onEdit(accountId)}>
+                        <T>Edit</T>
+                      </MenuItem>
                       <MenuSeparator />
                       <MenuItem
                         variant="destructive"
                         onClick={() => void remove(accountId, account)}
                       >
-                        Remove…
+                        <T>Remove…</T>
                       </MenuItem>
                     </MenuPopup>
                   </Menu>
@@ -248,7 +257,7 @@ function SandboxOwnerSection(props: {
       </SettingsSection>
       <SandboxGitHubSection owner={owner} />
       {ownerSandboxes.length > 0 ? (
-        <SettingsSection title="Sandboxes">
+        <SettingsSection title={gt("Sandboxes")}>
           {ownerSandboxes.map((sandbox) => (
             <SandboxRow
               key={sandbox.id}
@@ -268,6 +277,7 @@ function SandboxRow(props: {
   readonly sandbox: SandboxView;
   readonly accountLabel: string | null;
 }) {
+  const gt = useGT();
   const { sandbox } = props;
   const navigate = useNavigate();
   const { setDesired, confirmAndDelete } = useSandboxActions();
@@ -298,26 +308,34 @@ function SandboxRow(props: {
                 variant="ghost-muted"
                 size="icon-xs"
                 disabled={status === "destroying"}
-                aria-label={`More actions for ${sandbox.title}`}
+                aria-label={gt("More actions for {title}", { title: sandbox.title })}
               />
             }
           >
             <EllipsisIcon className="size-3.5" />
           </MenuTrigger>
           <MenuPopup align="end">
-            <MenuItem onClick={() => void open()}>Open</MenuItem>
+            <MenuItem onClick={() => void open()}>
+              <T>Open</T>
+            </MenuItem>
             {status === "ready" ? (
-              <MenuItem onClick={() => void setDesired(ref, "stopped")}>Stop</MenuItem>
+              <MenuItem onClick={() => void setDesired(ref, "stopped")}>
+                <T>Stop</T>
+              </MenuItem>
             ) : null}
             {status === "stopped" ? (
-              <MenuItem onClick={() => void setDesired(ref, "running")}>Resume</MenuItem>
+              <MenuItem onClick={() => void setDesired(ref, "running")}>
+                <T>Resume</T>
+              </MenuItem>
             ) : null}
             {sandbox.status._tag === "failed" && sandbox.status.retryable ? (
-              <MenuItem onClick={() => void setDesired(ref, sandbox.desired)}>Retry</MenuItem>
+              <MenuItem onClick={() => void setDesired(ref, sandbox.desired)}>
+                <T>Retry</T>
+              </MenuItem>
             ) : null}
             <MenuSeparator />
             <MenuItem variant="destructive" onClick={() => void confirmAndDelete(ref)}>
-              Delete sandbox…
+              <T>Delete sandbox…</T>
             </MenuItem>
           </MenuPopup>
         </Menu>
@@ -331,6 +349,7 @@ function SandboxAccountDialog(props: {
   readonly accountId: SandboxAccountId | null;
   readonly onClose: () => void;
 }) {
+  const gt = useGT();
   const saved =
     props.accountId === null
       ? null
@@ -383,7 +402,9 @@ function SandboxAccountDialog(props: {
     >
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>{saved ? `Edit ${saved.label}` : "New sandbox account"}</DialogTitle>
+          <DialogTitle>
+            {saved ? gt("Edit {label}", { label: saved.label }) : gt("New sandbox account")}
+          </DialogTitle>
         </DialogHeader>
         <DialogPanel>
           <form
@@ -395,37 +416,37 @@ function SandboxAccountDialog(props: {
           >
             <fieldset disabled={saving} className="grid gap-4">
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Label" htmlFor="sandbox-account-label">
+                <Field label={gt("Label")} htmlFor="sandbox-account-label">
                   <Input
                     id="sandbox-account-label"
                     value={draft.label}
-                    placeholder="Work"
+                    placeholder={gt("Work")}
                     onChange={(event) => update({ label: event.target.value })}
                   />
                 </Field>
-                <Field label="Provider" htmlFor="sandbox-account-provider">
+                <Field label={gt("Provider")} htmlFor="sandbox-account-provider">
                   <Select value="boat" disabled>
                     <SelectTrigger id="sandbox-account-provider">
-                      <SelectValue>Boat</SelectValue>
+                      <SelectValue>{BOAT_PROVIDER_LABEL}</SelectValue>
                     </SelectTrigger>
                     <SelectPopup>
-                      <SelectItem value="boat">Boat</SelectItem>
+                      <SelectItem value="boat">{BOAT_PROVIDER_LABEL}</SelectItem>
                     </SelectPopup>
                   </Select>
                 </Field>
               </div>
-              <Field label="API key" htmlFor="sandbox-account-key">
+              <Field label={gt("API key")} htmlFor="sandbox-account-key">
                 <Input
                   id="sandbox-account-key"
                   type="password"
                   autoComplete="off"
-                  placeholder={saved ? "Set" : undefined}
+                  placeholder={saved ? gt("Set") : undefined}
                   value={draft.apiKey}
                   onChange={(event) => update({ apiKey: event.target.value })}
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Size" htmlFor="sandbox-account-size">
+                <Field label={gt("Size")} htmlFor="sandbox-account-size">
                   <Select
                     value={draft.size}
                     onValueChange={(size) => update({ size: size as SandboxMachineSize })}
@@ -442,27 +463,30 @@ function SandboxAccountDialog(props: {
                     </SelectPopup>
                   </Select>
                 </Field>
-                <Field label="Stop after inactivity (hours)" htmlFor="sandbox-account-stop-after">
+                <Field
+                  label={gt("Stop after inactivity (hours)")}
+                  htmlFor="sandbox-account-stop-after"
+                >
                   <Input
                     id="sandbox-account-stop-after"
                     inputMode="decimal"
-                    placeholder="Never"
+                    placeholder={gt("Never")}
                     value={draft.stopAfterHours}
                     onChange={(event) => update({ stopAfterHours: event.target.value })}
                   />
                 </Field>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Provider environment" htmlFor="sandbox-account-provider-env">
+                <Field label={gt("Provider environment")} htmlFor="sandbox-account-provider-env">
                   <Input
                     id="sandbox-account-provider-env"
-                    placeholder="None"
+                    placeholder={gt("None")}
                     value={draft.providerEnvironment}
                     onChange={(event) => update({ providerEnvironment: event.target.value })}
                   />
                 </Field>
               </div>
-              <Field label="Machine setup script" htmlFor="sandbox-account-setup">
+              <Field label={gt("Machine setup script")} htmlFor="sandbox-account-setup">
                 <Textarea
                   id="sandbox-account-setup"
                   spellCheck={false}
@@ -471,20 +495,24 @@ function SandboxAccountDialog(props: {
                 />
               </Field>
               <div className="grid gap-2">
-                <Label>Environment variables</Label>
+                <Label>
+                  <T>Environment variables</T>
+                </Label>
                 {draft.env.map((entry) => (
                   <div key={entry.key} className="flex items-center gap-2">
                     <Input
-                      aria-label="Name"
+                      aria-label={gt("Name")}
                       placeholder="NAME"
                       value={entry.name}
                       onChange={(event) => updateEnv(entry.key, { name: event.target.value })}
                     />
                     <Input
-                      aria-label={`Value of ${entry.name || "variable"}`}
+                      aria-label={gt("Value of {name}", {
+                        name: entry.name || gt("variable"),
+                      })}
                       type="password"
                       autoComplete="off"
-                      placeholder={entry.savedName === entry.name.trim() ? "Set" : "Value"}
+                      placeholder={entry.savedName === entry.name.trim() ? gt("Set") : gt("Value")}
                       value={entry.value}
                       onChange={(event) => updateEnv(entry.key, { value: event.target.value })}
                     />
@@ -494,13 +522,15 @@ function SandboxAccountDialog(props: {
                         checked={entry.setupOnly}
                         onCheckedChange={(setupOnly) => updateEnv(entry.key, { setupOnly })}
                       />
-                      Setup only
+                      <T>Setup only</T>
                     </label>
                     <Button
                       type="button"
                       variant="ghost-muted"
                       size="icon-xs"
-                      aria-label={`Remove ${entry.name || "variable"}`}
+                      aria-label={gt("Remove {name}", {
+                        name: entry.name || gt("variable"),
+                      })}
                       onClick={() =>
                         setDraft((current) => ({
                           ...current,
@@ -534,7 +564,7 @@ function SandboxAccountDialog(props: {
                     }
                   >
                     <PlusIcon className="size-3" />
-                    Add variable
+                    <T>Add variable</T>
                   </Button>
                 </div>
               </div>
@@ -548,10 +578,10 @@ function SandboxAccountDialog(props: {
         </DialogPanel>
         <DialogFooter>
           <DialogClose render={<Button variant="outline" size="sm" disabled={saving} />}>
-            Cancel
+            <T>Cancel</T>
           </DialogClose>
           <Button size="sm" disabled={saving || props.owner === null} onClick={() => void submit()}>
-            {saving ? "Checking key…" : saved ? "Save" : "Add account"}
+            {saving ? gt("Checking key…") : saved ? gt("Save") : gt("Add account")}
           </Button>
         </DialogFooter>
       </DialogPopup>

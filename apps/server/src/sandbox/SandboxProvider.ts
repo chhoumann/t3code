@@ -1,12 +1,6 @@
 /**
- * SandboxProvider - the provider-neutral seam for machines that run a T3
- * server. Implementations translate their native API into this model, so no
- * provider JSON reaches the sandbox lifecycle.
- *
- * Every call names the account it acts for. Two accounts of one provider are
- * two configs passed to the same layer, never two layers.
- *
- * @module SandboxProvider
+ * Provider-neutral seam for sandbox machines; each call takes its account config
+ * so multiple accounts share one provider layer.
  */
 import type { SandboxMachineSize } from "@t3tools/contracts";
 import * as Context from "effect/Context";

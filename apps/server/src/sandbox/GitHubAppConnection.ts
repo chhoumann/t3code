@@ -1,16 +1,6 @@
 /**
- * GitHubAppConnection - the owner's GitHub App for its sandboxes. The owner
- * registers a per-user App, keeps the App user's single rotating refresh
- * token, and hands sandboxes 8-hour user tokens, so agents push and open pull
- * requests as the user without a long-lived credential on the machine.
- *
- * The App's id, slug, client id, and connection state live in the server
- * settings, so clients see them. The client secret and one token envelope live
- * in the secret store. GitHub's callbacks land on a client route that relays
- * them here over the client's own connection, so the owner is never reached
- * from the outside.
- *
- * @module GitHubAppConnection
+ * Owner's GitHub App for sandboxes: stores public metadata in server settings,
+ * secrets and rotating refresh token in the secret store, and mints 8-hour tokens.
  */
 import {
   type SandboxGitHubAppConfig,
@@ -24,7 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -191,7 +181,7 @@ const tokenOf = (envelope: TokenEnvelope): GitHubUserToken => ({
 const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const http = yield* HttpClient.HttpClient;
   const environmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
   const callbackPath = sandboxGitHubCallbackPath(environmentId);
@@ -274,7 +264,7 @@ const make = Effect.gen(function* () {
   const publish = (generation: number | null) =>
     PubSub.publish(generationsPubSub, generation).pipe(Effect.asVoid);
 
-  const newState = crypto.randomBytes(32).pipe(
+  const newState = random.randomBytes(32).pipe(
     Effect.map(Hex.encode),
     Effect.mapError(() => failure("Could not generate a sign-in state.")),
   );
@@ -320,13 +310,8 @@ const make = Effect.gen(function* () {
   const reauthorize = failure(REAUTHORIZE_MESSAGE, true);
 
   /**
-   * Settles a refresh with no usable answer, after which GitHub may or may
-   * not have rotated. Its word on the old access token tells. Still accepted
-   * means it did not, and the envelope is ready again. Refused means it did
-   * and the new tokens are lost, so the user must sign in again. An expired
-   * token is refused either way and an unreachable GitHub says nothing, so
-   * the envelope stays `rotating` for the next attempt to send the same
-   * refresh again, which GitHub answers one way or the other.
+   * Probes the old access token after an ambiguous refresh: 200 restores `ready`,
+   * 401 marks reauthorization required, and inconclusive results stay `rotating`.
    */
   const settleLostAnswer = Effect.fn("GitHubAppConnection.settleLostAnswer")(function* (
     envelope: TokenEnvelope,
@@ -346,11 +331,8 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * The one refresh. Runs under the mutex. `rotating` goes to disk first, so a
-   * crash before the answer lands is told apart from a clean envelope at the
-   * next start. An answer that refuses breaks the chain. A refusal to act
-   * leaves the envelope as it was. No usable answer is settled by asking
-   * GitHub about the old token.
+   * Runs under the mutex; persists `rotating` before calling GitHub so a crash
+   * mid-refresh is distinguished from a clean envelope on restart.
    */
   const rotate = Effect.fn("GitHubAppConnection.rotate")(function* (envelope: TokenEnvelope) {
     const registration = yield* readRegistration;
@@ -515,7 +497,7 @@ const make = Effect.gen(function* () {
       const callbackUrls = githubApp.githubAppCallbackUrls(callbackUrl, callbackPath);
       pending.set(state, { step: "register", callbackUrls, expiresAt });
       // App names are unique across GitHub; the user can still edit it on GitHub's page.
-      const suffix = yield* crypto.randomBytes(2).pipe(
+      const suffix = yield* random.randomBytes(2).pipe(
         Effect.map(Hex.encode),
         Effect.orElseSucceed(() => state.slice(0, 4)),
       );

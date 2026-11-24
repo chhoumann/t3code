@@ -5,6 +5,7 @@ import {
   type SandboxGitHubFlowStart,
   sandboxGitHubCallbackPath,
 } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { EllipsisIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -17,7 +18,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/men
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 /** Where GitHub sends this client back. The route there relays the callback to the owner it names. */
-export const githubCallbackUrl = (ownerEnvironmentId: EnvironmentId): string =>
+const githubCallbackUrl = (ownerEnvironmentId: EnvironmentId): string =>
   `${window.location.origin}${sandboxGitHubCallbackPath(ownerEnvironmentId)}`;
 
 /**
@@ -25,7 +26,7 @@ export const githubCallbackUrl = (ownerEnvironmentId: EnvironmentId): string =>
  * form POST, which the desktop window cannot make itself, so the desktop
  * serves the form to the system browser instead.
  */
-export async function openGitHubFlow(start: SandboxGitHubFlowStart): Promise<void> {
+async function openGitHubFlow(start: SandboxGitHubFlowStart): Promise<void> {
   if (start._tag === "authorize") return ensureLocalApi().shell.openExternal(start.url);
   const desktop = window.desktopBridge?.openGitHubAppManifest;
   if (desktop) return desktop({ action: start.action, manifest: start.manifest });
@@ -44,6 +45,7 @@ export async function openGitHubFlow(start: SandboxGitHubFlowStart): Promise<voi
 }
 
 export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresentation }) {
+  const gt = useGT();
   const { owner } = props;
   const app = owner.serverConfig?.settings.sandboxGitHubApp ?? null;
   const canWrite = useAtomValue(sandboxes.githubBegin.permissionAtom(owner.environmentId));
@@ -61,7 +63,7 @@ export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresent
     });
     if (result._tag === "Success") {
       await openGitHubFlow(result.value).catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : "Could not open GitHub."),
+        setError(cause instanceof Error ? cause.message : gt("Could not open GitHub.")),
       );
     } else {
       setError(sandboxCommandFailure(result));
@@ -72,8 +74,10 @@ export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresent
   const remove = async (forgetApp: boolean) => {
     const confirmed = await readLocalApi()?.dialogs.confirm(
       forgetApp
-        ? "Remove the GitHub App from this environment? Sandboxes lose GitHub access until you connect again."
-        : "Disconnect GitHub? Sandboxes lose GitHub access until you reconnect.",
+        ? gt(
+            "Remove the GitHub App from this environment? Sandboxes lose GitHub access until you connect again.",
+          )
+        : gt("Disconnect GitHub? Sandboxes lose GitHub access until you reconnect."),
       { variant: "destructive" },
     );
     if (confirmed !== true) return;
@@ -89,15 +93,15 @@ export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresent
     connection === null || connection._tag === "disconnected"
       ? null
       : connection._tag === "connected"
-        ? `Connected as ${connection.user.login}`
-        : `Sign in again to keep working as ${connection.user.login}`;
+        ? gt("Connected as {login}", { login: connection.user.login })
+        : gt("Sign in again to keep working as {login}", { login: connection.user.login });
   const connectStep = app === null ? "register" : "authorize";
-  const connectLabel = connection?._tag === "reauthorize" ? "Reconnect" : "Connect GitHub";
+  const connectLabel = connection?._tag === "reauthorize" ? gt("Reconnect") : gt("Connect GitHub");
 
   return (
     <SettingsSection title="GitHub">
       <SettingsRow
-        title="GitHub App"
+        title={gt("GitHub App")}
         description={description}
         status={error ? <span className="block text-destructive">{error}</span> : null}
         control={
@@ -121,7 +125,7 @@ export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresent
                       variant="ghost-muted"
                       size="icon-xs"
                       disabled={!canWrite || busy}
-                      aria-label="More actions for the GitHub App"
+                      aria-label={gt("More actions for the GitHub App")}
                     />
                   }
                 >
@@ -135,14 +139,16 @@ export function SandboxGitHubSection(props: { readonly owner: EnvironmentPresent
                       )
                     }
                   >
-                    Manage repositories
+                    <T>Manage repositories</T>
                   </MenuItem>
                   {connection?._tag === "disconnected" ? null : (
-                    <MenuItem onClick={() => void remove(false)}>Disconnect…</MenuItem>
+                    <MenuItem onClick={() => void remove(false)}>
+                      <T>Disconnect…</T>
+                    </MenuItem>
                   )}
                   <MenuSeparator />
                   <MenuItem variant="destructive" onClick={() => void remove(true)}>
-                    Remove App…
+                    <T>Remove App…</T>
                   </MenuItem>
                 </MenuPopup>
               </Menu>

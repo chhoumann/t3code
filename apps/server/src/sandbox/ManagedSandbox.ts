@@ -1,14 +1,6 @@
 /**
- * ManagedSandbox - what a sandbox's own T3 server knows about the owner that
- * runs it, and the guard that keeps clients and agents in the sandbox from
- * archiving or deleting its last active top-level thread, directly or with
- * its project. That would leave the machine running unseen; the owner stops
- * or destroys the sandbox instead.
- *
- * The owner writes the marker with the boot inputs. A server without one is
- * not a sandbox and is never guarded.
- *
- * @module ManagedSandbox
+ * Reads the boot marker identifying a sandbox's owner and guards against archiving or
+ * deleting the last active top-level thread so the sandbox cannot be left running unseen.
  */
 import {
   EnvironmentId,

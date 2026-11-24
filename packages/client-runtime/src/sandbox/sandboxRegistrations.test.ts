@@ -396,7 +396,7 @@ describe("SandboxRegistrations", () => {
       let attempts = 0;
       yield* harness({
         sandboxes: () => Stream.fromQueue(lists),
-        pair: () => Effect.suspend(() => Effect.fail(`guest not answering ${++attempts}`)),
+        pair: () => Effect.failSync(() => `guest not answering ${++attempts}`),
       });
       yield* Queue.offer(lists, [view(ready)]);
       yield* advanceUntil(() => attempts >= 2);

@@ -66,30 +66,41 @@ export const layer = Layer.effectContext(
       ),
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
-      register: (registration, routes) =>
-        catalog
-          .update((document) => registerConnectionInCatalog(document, registration, routes))
-          .pipe(Effect.mapError((error) => targetPersistenceError("register-connection", error))),
-      setRoutes: (environmentId, routes) =>
-        catalog
-          .update((document) => setRoutesInCatalog(document, environmentId, routes))
-          .pipe(Effect.mapError((error) => targetPersistenceError("set-connection-routes", error))),
-      remove: (environmentId) =>
+      register: Effect.fn("Persistence.ConnectionRegistrationStore.register")(
+        (registration, routes) =>
+          catalog
+            .update((document) => registerConnectionInCatalog(document, registration, routes))
+            .pipe(Effect.mapError((error) => targetPersistenceError("register-connection", error))),
+      ),
+      setRoutes: Effect.fn("Persistence.ConnectionRegistrationStore.setRoutes")(
+        (environmentId, routes) =>
+          catalog
+            .update((document) => setRoutesInCatalog(document, environmentId, routes))
+            .pipe(
+              Effect.mapError((error) => targetPersistenceError("set-connection-routes", error)),
+            ),
+      ),
+      remove: Effect.fn("Persistence.ConnectionRegistrationStore.remove")((environmentId) =>
         catalog
           .update((document) => removeConnectionFromCatalog(document, environmentId))
           .pipe(Effect.mapError((error) => targetPersistenceError("remove-connection", error))),
-      setEnabled: (environmentId, enabled) =>
-        catalog
-          .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
-          .pipe(
-            Effect.mapError((error) => targetPersistenceError("set-connection-enabled", error)),
-          ),
-      setDormant: (environmentId, dormant) =>
-        catalog
-          .update((document) => setConnectionDormantInCatalog(document, environmentId, dormant))
-          .pipe(
-            Effect.mapError((error) => targetPersistenceError("set-connection-dormant", error)),
-          ),
+      ),
+      setEnabled: Effect.fn("Persistence.ConnectionRegistrationStore.setEnabled")(
+        (environmentId, enabled) =>
+          catalog
+            .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
+            .pipe(
+              Effect.mapError((error) => targetPersistenceError("set-connection-enabled", error)),
+            ),
+      ),
+      setDormant: Effect.fn("Persistence.ConnectionRegistrationStore.setDormant")(
+        (environmentId, dormant) =>
+          catalog
+            .update((document) => setConnectionDormantInCatalog(document, environmentId, dormant))
+            .pipe(
+              Effect.mapError((error) => targetPersistenceError("set-connection-dormant", error)),
+            ),
+      ),
     });
     const profileStore = ProfileStore.make({
       get: (connectionId) =>

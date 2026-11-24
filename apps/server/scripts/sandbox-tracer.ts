@@ -1,14 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - host-side live verifier that packs with Node's filesystem.
+// @effect-diagnostics nodeBuiltinImport:off globalJsonInEffect:off - host-side live verifier that packs with Node's filesystem.
 /**
- * End-to-end tracer for sandbox environments against real Boat, through the
- * durable SandboxService. Run from the repository root with a Boat key in the
- * environment:
- *
- *   node --env-file=.env.local apps/server/scripts/sandbox-tracer.ts [--skip-build]
- *
- * Packs this checkout's server, launches one sandbox to ready, stops and
- * resumes it twice (changing the account env between resumes), and destroys
- * it on every exit path. Tokens are never printed.
+ * End-to-end tracer for sandbox environments against real Boat via SandboxService.
+ * Run: `node --env-file=.env.local apps/server/scripts/sandbox-tracer.ts [--skip-build]`.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -16,6 +9,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import * as EffectNodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -220,9 +214,13 @@ const accountsLayer = (apiKey: Redacted.Redacted<string>, proxyEnv: AccountEnv |
     SandboxAccounts.SandboxAccounts,
     SandboxAccounts.SandboxAccounts.of({
       get,
-      withAccount: (accountId, use) => get(accountId).pipe(Effect.flatMap(use)),
-      save: () => Effect.die("The tracer's account is fixed."),
-      remove: () => Effect.die("The tracer's account is fixed."),
+      withAccount: Effect.fn("SandboxAccounts.withAccount")((accountId, use) =>
+        get(accountId).pipe(Effect.flatMap(use)),
+      ),
+      save: Effect.fn("SandboxAccounts.save")(() => Effect.die("The tracer's account is fixed.")),
+      remove: Effect.fn("SandboxAccounts.remove")(() =>
+        Effect.die("The tracer's account is fixed."),
+      ),
     }),
   );
 };
@@ -231,11 +229,19 @@ const secrets = new Map<string, Uint8Array>();
 const secretStoreLayer = Layer.succeed(
   ServerSecretStore.ServerSecretStore,
   ServerSecretStore.ServerSecretStore.of({
-    get: (name) => Effect.sync(() => Option.fromUndefinedOr(secrets.get(name))),
-    set: (name, value) => Effect.sync(() => void secrets.set(name, value)),
-    create: (name, value) => Effect.sync(() => void secrets.set(name, value)),
-    getOrCreateRandom: () => Effect.die("unused"),
-    remove: (name) => Effect.sync(() => void secrets.delete(name)),
+    get: Effect.fn("ServerSecretStore.get")((name) =>
+      Effect.sync(() => Option.fromUndefinedOr(secrets.get(name))),
+    ),
+    set: Effect.fn("ServerSecretStore.set")((name, value) =>
+      Effect.sync(() => void secrets.set(name, value)),
+    ),
+    create: Effect.fn("ServerSecretStore.create")((name, value) =>
+      Effect.sync(() => void secrets.set(name, value)),
+    ),
+    getOrCreateRandom: Effect.fn("ServerSecretStore.getOrCreateRandom")(() => Effect.die("unused")),
+    remove: Effect.fn("ServerSecretStore.remove")((name) =>
+      Effect.sync(() => void secrets.delete(name)),
+    ),
   }),
 );
 
@@ -430,11 +436,15 @@ const trace = Effect.fn("SandboxTracer.trace")(function* (
       Effect.gen(function* () {
         const client = yield* api(baseUrl);
         const shell = yield* client.orchestration.shellSnapshot({
+          query: {},
           headers: {
             authorization: `Bearer ${Redacted.value(token)}`,
             [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
           },
         });
+        if ("resumable" in shell) {
+          return yield* new TracerError({ reason: "unexpected resumable shell snapshot" });
+        }
         yield* check(shell.projects.length === 1, `one project (saw ${shell.projects.length})`);
         yield* check(
           shell.threads.length === 1 && shell.threads[0]?.id === seed.threadId,
@@ -793,7 +803,7 @@ const program = Effect.gen(function* () {
           Layer.succeed(
             GitHubAppConnection,
             GitHubAppConnection.of({
-              current: () => Effect.succeed(null),
+              current: Effect.fn("GitHubAppConnection.current")(() => Effect.succeed(null)),
               generation: Effect.succeed(null),
               generations: Stream.empty,
             }),
@@ -820,4 +830,8 @@ const program = Effect.gen(function* () {
   yield* say(`OK in ${seconds((yield* Clock.currentTimeMillis) - runStartedAt)}s`);
 });
 
-program.pipe(Effect.scoped, Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+program.pipe(
+  Effect.scoped,
+  Effect.provide(Layer.merge(NodeServices.layer, EffectNodeCrypto.layer)),
+  NodeRuntime.runMain,
+);

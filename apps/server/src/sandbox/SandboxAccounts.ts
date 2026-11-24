@@ -1,12 +1,6 @@
 /**
- * SandboxAccounts - the configured accounts sandboxes are created under, such
- * as a personal and a work Boat account. Every lifecycle call reads its
- * sandbox's own account, so credentials never cross accounts.
- *
- * An account's settings live in the server settings; its API key and env
- * values live only in the secret store.
- *
- * @module SandboxAccounts
+ * Configured sandbox accounts; public config lives in server settings while
+ * API keys and env values stay in the secret store.
  */
 import type {
   SandboxAccountConfig,
@@ -354,9 +348,15 @@ export const layerStatic = (accounts: ReadonlyArray<SandboxAccount>) => {
     SandboxAccounts,
     SandboxAccounts.of({
       get,
-      withAccount: (accountId, use) => get(accountId).pipe(Effect.flatMap(use)),
-      save: () => Effect.die("layerStatic accounts cannot be edited."),
-      remove: () => Effect.die("layerStatic accounts cannot be edited."),
+      withAccount: Effect.fn("SandboxAccounts.withAccount")((accountId, use) =>
+        get(accountId).pipe(Effect.flatMap(use)),
+      ),
+      save: Effect.fn("SandboxAccounts.save")(() =>
+        Effect.die("layerStatic accounts cannot be edited."),
+      ),
+      remove: Effect.fn("SandboxAccounts.remove")(() =>
+        Effect.die("layerStatic accounts cannot be edited."),
+      ),
     }),
   );
 };

@@ -15,8 +15,10 @@ import {
   ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -136,11 +138,8 @@ const makeHarness = Effect.fn("TestSandboxThreadCommands.makeHarness")(function*
         SandboxRegistrations.SandboxRegistrations.of({ owners, start: Effect.void }),
       ),
       Layer.succeed(
-        Crypto.Crypto,
-        Crypto.make({
-          randomBytes: (size) => new Uint8Array(size),
-          digest: (_algorithm, data) => Effect.succeed(data),
-        }),
+        SecureRandom.SecureRandom,
+        SecureRandom.make((size) => new Uint8Array(size)),
       ),
     ),
   );
@@ -178,16 +177,21 @@ describe("thread commands in a sandbox", () => {
   it.effect("two sends to an asleep sandbox ask its owner once, then both start", () =>
     Effect.gen(function* () {
       const h = yield* makeHarness(sandboxView({ _tag: "stopped", reason: "external" }, "running"));
-      const first = h.commands.startTurn.run(h.registry, send("thread-a"));
-      const second = h.commands.startTurn.run(h.registry, send("thread-b"));
+      const first = yield* Effect.forkChild(h.commands.startTurn.run(h.registry, send("thread-a")));
+      const second = yield* Effect.forkChild(
+        h.commands.startTurn.run(h.registry, send("thread-b")),
+      );
       yield* Effect.yieldNow;
       expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
 
       yield* h.showStatus({ _tag: "resuming" }, 1);
       yield* h.showStatus({ _tag: "ready" });
       yield* h.connect;
-      const results = yield* Effect.promise(() => Promise.all([first, second]));
-      expect(results.map((result) => result._tag)).toEqual(["Success", "Success"]);
+      const results = yield* Effect.all([
+        Effect.exit(Fiber.join(first)),
+        Effect.exit(Fiber.join(second)),
+      ]);
+      expect(results.map((result) => Exit.isSuccess(result))).toEqual([true, true]);
       expect(h.asked).toHaveLength(1);
       expect(
         h.dispatched.map((command) => [command.type, "threadId" in command && command.threadId]),
@@ -204,15 +208,17 @@ describe("thread commands in a sandbox", () => {
         sandboxView({ _tag: "stopped", reason: "external" }, "running"),
         { paired: false },
       );
-      const result = h.commands.wake.run(h.registry, { environmentId: SANDBOX_ENV });
+      const fiber = yield* Effect.forkChild(
+        h.commands.wake.run(h.registry, { environmentId: SANDBOX_ENV }),
+      );
       yield* Effect.yieldNow;
       expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
 
       yield* h.showStatus({ _tag: "ready" });
       yield* h.pair;
       yield* h.connect;
-      const woke = yield* Effect.promise(() => result);
-      expect(AsyncResult.isSuccess(woke) && woke.value).toBe(true);
+      const woke = yield* Fiber.join(fiber);
+      expect(woke).toBe(true);
     }),
   );
 
@@ -221,16 +227,19 @@ describe("thread commands in a sandbox", () => {
       const h = yield* makeHarness(
         sandboxView({ _tag: "stopped", reason: "requested" }, "stopped"),
       );
-      const result = h.commands.unarchive.run(h.registry, {
-        environmentId: SANDBOX_ENV,
-        input: { threadId: ThreadId.make("thread-seed") },
-      });
+      const fiber = yield* Effect.forkChild(
+        h.commands.unarchive.run(h.registry, {
+          environmentId: SANDBOX_ENV,
+          input: { threadId: ThreadId.make("thread-seed") },
+        }),
+      );
       yield* Effect.yieldNow;
       expect(h.asked).toEqual([{ id: SANDBOX_ID, desired: "running" }]);
 
       yield* h.showStatus({ _tag: "ready" });
       yield* h.connect;
-      expect((yield* Effect.promise(() => result))._tag).toBe("Success");
+      const exit = yield* Effect.exit(Fiber.join(fiber));
+      expect(Exit.isSuccess(exit)).toBe(true);
       expect(h.dispatched.map((command) => command.type)).toEqual(["thread.unarchive"]);
     }),
   );

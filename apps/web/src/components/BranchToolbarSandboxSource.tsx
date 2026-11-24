@@ -7,6 +7,7 @@ import type {
   SandboxRemoteUrl,
 } from "@t3tools/contracts";
 import { sandboxRepositoryIdentity, sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
+import { T, useGT, Var } from "gt-react";
 import { ChevronDownIcon, FolderGit2Icon, GitBranchIcon, type LucideIcon } from "lucide-react";
 import { type Ref, useDeferredValue, useImperativeHandle, useState } from "react";
 
@@ -206,6 +207,7 @@ function SandboxRepositoryPicker({
   disabled: boolean;
   displayMode: DisplayMode;
 }) {
+  const gt = useGT();
   const [query, setQuery] = useState("");
   const popupProps = usePickerPopupProps(displayMode);
   const choice = sandboxRepositoryChoice(query, projectRemoteUrl);
@@ -233,14 +235,14 @@ function SandboxRepositoryPicker({
     >
       <SandboxSourceTrigger
         icon={FolderGit2Icon}
-        label={remoteUrl === null ? "Choose repository" : repositoryLabel(remoteUrl)}
+        label={remoteUrl === null ? gt("Choose repository") : repositoryLabel(remoteUrl)}
         disabled={disabled}
         displayMode={displayMode}
       />
       <ComboboxPopup {...popupProps}>
         <ComboboxSearchInput
-          aria-label="Repository"
-          placeholder="Git URL or owner/repo"
+          aria-label={gt("Repository")}
+          placeholder={gt("Git URL or owner/repo")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -248,13 +250,20 @@ function SandboxRepositoryPicker({
           {choice !== null ? (
             <ComboboxItem hideIndicator index={0} value={choice._tag}>
               <span className="truncate">
-                Use {repositoryLabel(choice.remoteUrl)}
-                {choice._tag === "project" ? " (project)" : null}
+                {choice._tag === "project" ? (
+                  <T>
+                    Use <Var>{repositoryLabel(choice.remoteUrl)}</Var> (project)
+                  </T>
+                ) : (
+                  <T>
+                    Use <Var>{repositoryLabel(choice.remoteUrl)}</Var>
+                  </T>
+                )}
               </span>
             </ComboboxItem>
           ) : query.trim().length > 0 ? (
             <p className="p-2 text-xs text-muted-foreground">
-              Enter an HTTPS or SSH URL, or owner/repo.
+              <T>Enter an HTTPS or SSH URL, or owner/repo.</T>
             </p>
           ) : null}
         </ComboboxList>
@@ -288,6 +297,7 @@ function SandboxBasePicker({
   disabled: boolean;
   displayMode: DisplayMode;
 }) {
+  const gt = useGT();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query.trim());
   const popupProps = usePickerPopupProps(displayMode);
@@ -310,11 +320,11 @@ function SandboxBasePicker({
   const hasNextPage = branches.data?.nextCursor != null;
   const statusText =
     deferredQuery.length > 0 && typed === null
-      ? `"${deferredQuery}" is not a valid branch name`
+      ? gt('"{name}" is not a valid branch name', { name: deferredQuery })
       : suggestionsFrom === null
         ? null
         : (branches.error ??
-          (branches.isPending && branches.data === null ? "Loading branches..." : null));
+          (branches.isPending && branches.data === null ? gt("Loading branches...") : null));
   const handleOpenChange = (next: boolean) => {
     onOpenChange(next);
     if (!next) setQuery("");
@@ -332,7 +342,6 @@ function SandboxBasePicker({
       filteredItems={items}
       value={base._tag === "default" ? DEFAULT_BASE_ITEM : base.name}
       query={query}
-      resultsQuery={deferredQuery}
       onQueryChange={setQuery}
       open={open}
       onOpenChange={handleOpenChange}
@@ -341,7 +350,7 @@ function SandboxBasePicker({
       isFetchingNextPage={branches.isFetchingNextPage}
       onLoadNext={branches.loadNext}
       statusText={statusText}
-      searchPlaceholder="Branch name"
+      searchPlaceholder={gt("Branch name")}
       popupProps={{ ...popupProps, className: cn("flex flex-col", popupProps.className) }}
       renderItem={(item, index) => (
         <ComboboxItem
@@ -352,10 +361,14 @@ function SandboxBasePicker({
           onClick={() => select(item)}
         >
           {item === DEFAULT_BASE_ITEM ? (
-            <span className="truncate">Default branch</span>
+            <span className="truncate">
+              <T>Default branch</T>
+            </span>
           ) : item.startsWith(USE_BASE_ITEM_PREFIX) ? (
             <span className="truncate">
-              Use &quot;{item.slice(USE_BASE_ITEM_PREFIX.length)}&quot;
+              <T>
+                Use &quot;<Var>{item.slice(USE_BASE_ITEM_PREFIX.length)}</Var>&quot;
+              </T>
             </span>
           ) : (
             <MiddleTruncate value={item} className="flex-1" />
@@ -365,7 +378,11 @@ function SandboxBasePicker({
     >
       <SandboxSourceTrigger
         icon={GitBranchIcon}
-        label={base._tag === "default" ? "From default branch" : `From ${base.name}`}
+        label={
+          base._tag === "default"
+            ? gt("From default branch")
+            : gt("From {branch}", { branch: base.name })
+        }
         disabled={disabled}
         displayMode={displayMode}
       />

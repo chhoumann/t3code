@@ -16,6 +16,7 @@ import {
 } from "@t3tools/contracts";
 import { sandboxProjectKey } from "@t3tools/shared/sandboxProject";
 import * as Schema from "effect/Schema";
+import { T, useGT, Var } from "gt-react";
 import { useState } from "react";
 
 import { useEnvironments } from "../../state/environments";
@@ -33,6 +34,7 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 const isSize = Schema.is(SandboxMachineSize);
 
 export function ProjectSandboxSettings({ repository }: { repository: string | null }) {
+  const gt = useGT();
   const { environments } = useEnvironments();
   const choices = environments.flatMap((owner) =>
     sandboxAccountChoices(owner.environmentId, owner.serverConfig).map((account) => ({
@@ -59,12 +61,12 @@ export function ProjectSandboxSettings({ repository }: { repository: string | nu
   const projectKey = sandboxProjectKey(choice.accountId, repository, sourceControlClients);
   const saved = choice.owner.serverConfig.settings.sandboxProjectDefaults[projectKey];
   return (
-    <SettingsSection title="Sandboxes">
+    <SettingsSection title={gt("Sandboxes")}>
       <SettingsRow
-        title="Account"
+        title={gt("Account")}
         control={
           <Select value={choice.key} onValueChange={setSelected}>
-            <SelectTrigger size="sm" aria-label="Sandbox account">
+            <SelectTrigger size="sm" aria-label={gt("Sandbox account")}>
               <SelectValue>
                 {choice.label} · {choice.owner.label}
               </SelectValue>
@@ -107,6 +109,7 @@ function ProjectSandboxForm({
   saved: SandboxProjectDefaults | undefined;
   onSelectAccount: () => void;
 }) {
+  const gt = useGT();
   const templates = useEnvironmentQuery(
     sandboxes.templates({ environmentId, input: { accountId } }),
   );
@@ -132,7 +135,9 @@ function ProjectSandboxForm({
     if (!reset && stop === "custom" && !isSandboxStopAfterHours(stopAfterHours)) {
       toastManager.add({
         type: "error",
-        title: `Stop after inactivity must be above zero and at most ${SANDBOX_MAX_STOP_AFTER_HOURS} hours.`,
+        title: gt("Stop after inactivity must be above zero and at most {maxHours} hours.", {
+          maxHours: SANDBOX_MAX_STOP_AFTER_HOURS,
+        }),
       });
       return;
     }
@@ -160,8 +165,9 @@ function ProjectSandboxForm({
       const error = squashAtomCommandFailure(result);
       toastManager.add({
         type: "error",
-        title: "Sandbox defaults not saved",
-        description: error instanceof Error ? error.message : "Could not save sandbox defaults.",
+        title: gt("Sandbox defaults not saved"),
+        description:
+          error instanceof Error ? error.message : gt("Could not save sandbox defaults."),
       });
     }
   };
@@ -169,7 +175,7 @@ function ProjectSandboxForm({
   return (
     <fieldset disabled={!allowed || saving}>
       <SettingsRow
-        title="Template"
+        title={gt("Template")}
         control={
           <div className="flex items-center gap-2">
             <Select
@@ -180,18 +186,22 @@ function ProjectSandboxForm({
             >
               <SelectTrigger
                 size="sm"
-                aria-label="Sandbox template"
+                aria-label={gt("Sandbox template")}
                 disabled={templates.isPending && templates.data === null}
               >
                 <SelectValue>
-                  {template || (templates.isPending ? "Loading templates…" : "None")}
+                  {template || (templates.isPending ? gt("Loading templates…") : gt("None"))}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup>
-                <SelectItem value="">None</SelectItem>
+                <SelectItem value="">
+                  <T>None</T>
+                </SelectItem>
                 {template && !templates.data?.includes(template) ? (
                   <SelectItem value={template} disabled>
-                    {template} (unavailable)
+                    <T>
+                      <Var>{template}</Var> (unavailable)
+                    </T>
                   </SelectItem>
                 ) : null}
                 {templates.data?.map((name) => (
@@ -207,18 +217,20 @@ function ProjectSandboxForm({
               disabled={templates.isPending}
               onClick={templates.refresh}
             >
-              Refresh
+              <T>Refresh</T>
             </Button>
           </div>
         }
       />
       {templates.error !== null ? (
         <p role="alert" className="px-4 pb-3 text-sm text-destructive">
-          Could not load templates: {templates.error}
+          <T>
+            Could not load templates: <Var>{templates.error}</Var>
+          </T>
         </p>
       ) : null}
       <SettingsRow
-        title="Size"
+        title={gt("Size")}
         control={
           <Select
             value={size}
@@ -226,15 +238,17 @@ function ProjectSandboxForm({
               if (value !== null) setSize(value);
             }}
           >
-            <SelectTrigger size="sm" aria-label="Sandbox size">
+            <SelectTrigger size="sm" aria-label={gt("Sandbox size")}>
               <SelectValue>
                 {isSize(size)
                   ? SANDBOX_SIZE_LABELS[size]
-                  : `Account default · ${SANDBOX_SIZE_LABELS[account.size]}`}
+                  : gt("Account default · {size}", { size: SANDBOX_SIZE_LABELS[account.size] })}
               </SelectValue>
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="account">Account default</SelectItem>
+              <SelectItem value="account">
+                <T>Account default</T>
+              </SelectItem>
               {SandboxMachineSize.literals.map((value) => (
                 <SelectItem key={value} value={value}>
                   {SANDBOX_SIZE_LABELS[value]}
@@ -245,7 +259,7 @@ function ProjectSandboxForm({
         }
       />
       <SettingsRow
-        title="Stop after inactivity"
+        title={gt("Stop after inactivity")}
         control={
           <div className="flex items-center gap-2">
             <Select
@@ -254,26 +268,37 @@ function ProjectSandboxForm({
                 if (value !== null) setStop(value);
               }}
             >
-              <SelectTrigger size="sm" aria-label="Sandbox stop after inactivity">
+              <SelectTrigger size="sm" aria-label={gt("Sandbox stop after inactivity")}>
                 <SelectValue>
                   {stop === "account"
-                    ? `Account default · ${account.stopAfterHours === null ? "Never" : `${account.stopAfterHours}h`}`
+                    ? gt("Account default · {value}", {
+                        value:
+                          account.stopAfterHours === null
+                            ? gt("Never")
+                            : `${account.stopAfterHours}h`,
+                      })
                     : stop === "never"
-                      ? "Never"
-                      : "Custom"}
+                      ? gt("Never")
+                      : gt("Custom")}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup>
-                <SelectItem value="account">Account default</SelectItem>
-                <SelectItem value="never">Never</SelectItem>
-                <SelectItem value="custom">Custom</SelectItem>
+                <SelectItem value="account">
+                  <T>Account default</T>
+                </SelectItem>
+                <SelectItem value="never">
+                  <T>Never</T>
+                </SelectItem>
+                <SelectItem value="custom">
+                  <T>Custom</T>
+                </SelectItem>
               </SelectPopup>
             </Select>
             {stop === "custom" ? (
               <Input
                 size="sm"
                 inputMode="decimal"
-                aria-label="Sandbox stop after inactivity, in hours"
+                aria-label={gt("Sandbox stop after inactivity, in hours")}
                 value={hours}
                 onChange={(event) => setHours(event.target.value)}
               />
@@ -288,10 +313,10 @@ function ProjectSandboxForm({
           disabled={saved === undefined}
           onClick={() => void save(true)}
         >
-          Reset
+          <T>Reset</T>
         </Button>
         <Button size="sm" onClick={() => void save(false)}>
-          Save
+          <T>Save</T>
         </Button>
       </div>
     </fieldset>

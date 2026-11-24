@@ -1,11 +1,6 @@
 /**
- * ProjectProvisioning - creates a project from a repository clone. It owns
- * what happens around `ProjectCloneTracker`'s clone: the project row before
- * git starts, and after git is done the repository identity, the clone's
- * `t3.json` scripts when asked for, and the status refresh. The WebSocket
- * RPC and a sandbox owner driving a guest both go through `clone`.
- *
- * @module ProjectProvisioning
+ * Creates a project from a repository clone: project row, clone tracking,
+ * repository identity, optional `t3.json` scripts, and status refresh.
  */
 import {
   CommandId,
@@ -48,7 +43,7 @@ export class ProjectProvisioning extends Context.Service<
 
 const T3_PROJECT_FILE = "t3.json";
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const projectService = yield* ProjectService.ProjectService;
@@ -117,12 +112,13 @@ export const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.asVoid,
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationDispatchCommandError({
-                  message: "Failed to create clone project.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "ProjectConflictError"
+                ? cause
+                : new OrchestrationDispatchCommandError({
+                    message: "Failed to create clone project.",
+                    cause,
+                  }),
             ),
           ),
       finalize: (project) =>
