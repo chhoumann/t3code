@@ -168,6 +168,11 @@ export default mergeConfig(
         __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: JSON.stringify(
           repoEnv.T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN?.trim() ?? "",
         ),
+        __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_HEADERS__: JSON.stringify(
+          repoEnv.T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS?.trim() ?? "",
+        ),
+        __T3CODE_BUILD_POSTHOG_HOST__: JSON.stringify(repoEnv.T3CODE_POSTHOG_HOST?.trim() ?? ""),
+        __T3CODE_BUILD_POSTHOG_KEY__: JSON.stringify(repoEnv.T3CODE_POSTHOG_KEY?.trim() ?? ""),
       },
     },
     test: {

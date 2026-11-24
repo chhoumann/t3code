@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { hasCloudPublicConfig } from "./publicConfig.ts";
+import { hasCloudPublicConfig, resolveRelayTracingConfig } from "./publicConfig.ts";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -74,5 +74,34 @@ describe("hasCloudPublicConfig", () => {
 
       expect(hasCloudPublicConfig()).toBe(true);
     });
+  });
+});
+
+describe("resolveRelayTracingConfig", () => {
+  it("stays off until a receiver is configured", () => {
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_URL", "");
+
+    expect(resolveRelayTracingConfig()).toBeNull();
+  });
+
+  it("exports to a generic OTLP receiver with only a URL", () => {
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_URL", "https://otel.example.test/v1/traces");
+
+    expect(resolveRelayTracingConfig()).toEqual({
+      tracesUrl: "https://otel.example.test/v1/traces",
+    });
+  });
+
+  it("sends custom OTLP headers and fails closed when they are malformed", () => {
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_URL", "https://otel.example.test/v1/traces");
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_HEADERS", "x-api-key=web%20key");
+
+    expect(resolveRelayTracingConfig()).toEqual({
+      tracesUrl: "https://otel.example.test/v1/traces",
+      tracesHeaders: { "x-api-key": "web key" },
+    });
+
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_HEADERS", "x-api-key");
+    expect(resolveRelayTracingConfig()).toBeNull();
   });
 });

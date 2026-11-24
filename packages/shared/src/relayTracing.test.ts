@@ -2,12 +2,17 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Tracer from "effect/Tracer";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 
 import {
+  layer,
   nonInterferingTracer,
   RelayClientTracer,
+  resolveRelayClientTracingConfig,
   withLocalTracing,
   withRelayClientTracing,
 } from "./relayTracing.ts";
@@ -115,6 +120,138 @@ describe("withLocalTracing", () => {
         "environment.orchestration.threadSnapshot",
       ]);
       expect(localSpans).toEqual(["sql.execute", "ServerSecretStore.get"]);
+    }),
+  );
+});
+
+describe("resolveRelayClientTracingConfig", () => {
+  it("accepts a generic OTLP receiver with only a URL", () => {
+    expect(
+      resolveRelayClientTracingConfig({ tracesUrl: " https://otel.example.com/v1/traces " }),
+    ).toEqual({ tracesUrl: "https://otel.example.com/v1/traces" });
+  });
+
+  it("parses OTLP header strings", () => {
+    expect(
+      resolveRelayClientTracingConfig({
+        tracesUrl: "https://otel.example.com/v1/traces",
+        tracesHeaders: "x-honeycomb-team=abc%3D,x-scope=relay",
+      }),
+    ).toEqual({
+      tracesUrl: "https://otel.example.com/v1/traces",
+      tracesHeaders: { "x-honeycomb-team": "abc=", "x-scope": "relay" },
+    });
+  });
+
+  it("keeps the Axiom dataset and token", () => {
+    expect(
+      resolveRelayClientTracingConfig({
+        tracesUrl: "https://api.axiom.co/v1/traces",
+        tracesDataset: "relay",
+        tracesToken: "xaat-token",
+        tracesHeaders: "",
+      }),
+    ).toEqual({
+      tracesUrl: "https://api.axiom.co/v1/traces",
+      tracesDataset: "relay",
+      tracesToken: "xaat-token",
+    });
+  });
+
+  it.each(["no-separator", "=value", "key=%E0%A4%A"])(
+    "turns tracing off for malformed headers %j",
+    (tracesHeaders) => {
+      expect(
+        resolveRelayClientTracingConfig({
+          tracesUrl: "https://otel.example.com/v1/traces",
+          tracesHeaders,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("allows plain HTTP only to a loopback collector", () => {
+    expect(
+      resolveRelayClientTracingConfig({ tracesUrl: "http://localhost:4318/v1/traces" }),
+    ).toEqual({ tracesUrl: "http://localhost:4318/v1/traces" });
+    expect(resolveRelayClientTracingConfig({ tracesUrl: "http://[::1]:4318/v1/traces" })).toEqual({
+      tracesUrl: "http://[::1]:4318/v1/traces",
+    });
+    expect(
+      resolveRelayClientTracingConfig({ tracesUrl: "http://example.com/v1/traces" }),
+    ).toBeNull();
+    expect(resolveRelayClientTracingConfig({ tracesUrl: "" })).toBeNull();
+    expect(resolveRelayClientTracingConfig({ tracesUrl: "not a url" })).toBeNull();
+  });
+});
+
+describe("layer", () => {
+  const EXPORTER_TRANSPORT_HEADERS = new Set(["content-type", "content-length", "user-agent"]);
+  const exportedHeaders = (config: Parameters<typeof resolveRelayClientTracingConfig>[0]) =>
+    Effect.gen(function* () {
+      const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+      const client = HttpClient.make((request) => {
+        requests.push({ url: request.url, headers: { ...request.headers } });
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, new Response(null, { status: 200 })),
+        );
+      });
+      const relayLayer = layer(resolveRelayClientTracingConfig(config), {
+        serviceName: "t3code-test",
+        runtime: "node",
+        serviceInstanceId: "instance",
+        client: "test",
+      }).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, client)));
+
+      // Closing the layer's scope flushes the exporter.
+      yield* Effect.void.pipe(
+        Effect.withSpan("relay.operation"),
+        withRelayClientTracing,
+        Effect.provide(relayLayer),
+      );
+
+      expect(requests.map((request) => request.url)).toEqual([config.tracesUrl]);
+      return Object.fromEntries(
+        Object.entries(requests[0]?.headers ?? {}).filter(
+          ([name]) => !EXPORTER_TRANSPORT_HEADERS.has(name),
+        ),
+      );
+    });
+
+  it.effect("sends no auth headers to a generic OTLP receiver", () =>
+    Effect.gen(function* () {
+      expect(yield* exportedHeaders({ tracesUrl: "http://127.0.0.1:4318/v1/traces" })).toEqual({});
+    }),
+  );
+
+  it.effect("sends custom OTLP headers", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* exportedHeaders({
+          tracesUrl: "https://otel.example.com/v1/traces",
+          tracesHeaders: "x-api-key=secret,x-tenant=t3",
+        }),
+      ).toEqual({ "x-api-key": "secret", "x-tenant": "t3" });
+    }),
+  );
+
+  it.effect("sends Axiom headers, letting explicit headers override them", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* exportedHeaders({
+          tracesUrl: "https://api.axiom.co/v1/traces",
+          tracesDataset: "relay",
+          tracesToken: "xaat-token",
+        }),
+      ).toEqual({ authorization: "Bearer xaat-token", "x-axiom-dataset": "relay" });
+      expect(
+        yield* exportedHeaders({
+          tracesUrl: "https://api.axiom.co/v1/traces",
+          tracesDataset: "relay",
+          tracesToken: "xaat-token",
+          tracesHeaders: "Authorization=Basic%20abc",
+        }),
+      ).toEqual({ authorization: "Basic abc", "x-axiom-dataset": "relay" });
     }),
   );
 });

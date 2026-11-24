@@ -10,8 +10,91 @@ import { OtlpSerialization, OtlpTracer } from "effect/observability";
 
 export interface RelayClientTracingConfig {
   readonly tracesUrl: string;
-  readonly tracesDataset: string;
-  readonly tracesToken: string;
+  readonly tracesDataset?: string | undefined;
+  readonly tracesToken?: string | undefined;
+  readonly tracesHeaders?: Readonly<Record<string, string>> | undefined;
+}
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** HTTPS anywhere, or plain HTTP to this machine for a local collector. */
+export function normalizeTelemetryTracesUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    const url = new URL(value.trim());
+    const allowed =
+      url.protocol === "https:" ||
+      (url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname));
+    return allowed ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses OTLP's `key=percentEncodedValue,...` header format, the same format as
+ * `OtlpHeadersFromString` in `observability.ts` (which needs Node and is not imported here).
+ * Returns `undefined` when unset and `null` when malformed, so callers can fail closed.
+ */
+function parseRelayTracingHeaders(
+  input: string | null | undefined,
+): Readonly<Record<string, string>> | null | undefined {
+  if (input === null || input === undefined || input.trim() === "") return undefined;
+  const headers: Record<string, string> = {};
+  for (const pair of input.split(",")) {
+    if (pair.trim() === "") continue;
+    const separator = pair.indexOf("=");
+    const key = separator === -1 ? "" : pair.slice(0, separator).trim();
+    if (key === "") return null;
+    try {
+      headers[key] = decodeURIComponent(pair.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return headers;
+}
+
+function trimOptional(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+export function resolveRelayClientTracingConfig(input: {
+  readonly tracesUrl?: unknown;
+  readonly tracesDataset?: unknown;
+  readonly tracesToken?: unknown;
+  readonly tracesHeaders?: string | Readonly<Record<string, string>> | null | undefined;
+}): RelayClientTracingConfig | null {
+  const tracesUrl = normalizeTelemetryTracesUrl(input.tracesUrl);
+  if (tracesUrl === null) return null;
+  const tracesHeaders =
+    typeof input.tracesHeaders === "string" || input.tracesHeaders === null
+      ? parseRelayTracingHeaders(input.tracesHeaders)
+      : input.tracesHeaders;
+  if (tracesHeaders === null) return null;
+  const tracesDataset = trimOptional(input.tracesDataset);
+  const tracesToken = trimOptional(input.tracesToken);
+  return {
+    tracesUrl,
+    ...(tracesDataset ? { tracesDataset } : {}),
+    ...(tracesToken ? { tracesToken } : {}),
+    ...(tracesHeaders && Object.keys(tracesHeaders).length > 0 ? { tracesHeaders } : {}),
+  };
+}
+
+/** Explicit headers win over the Axiom-style token and dataset shorthands. */
+function buildRelayTracingHeaders(
+  config: RelayClientTracingConfig,
+): Readonly<Record<string, string>> | undefined {
+  const headers: Record<string, string> = { ...config.tracesHeaders };
+  const has = (name: string) => Object.keys(headers).some((key) => key.toLowerCase() === name);
+  if (config.tracesToken && !has("authorization")) {
+    headers.Authorization = `Bearer ${config.tracesToken}`;
+  }
+  if (config.tracesDataset && !has("x-axiom-dataset")) {
+    headers["X-Axiom-Dataset"] = config.tracesDataset;
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
 export interface RelayClientTracingResource {
@@ -156,12 +239,10 @@ export function layer(
     return Layer.succeed(RelayClientTracer, Option.none());
   }
 
+  const headers = buildRelayTracingHeaders(config);
   const layerTracer = OtlpTracer.layer({
     url: config.tracesUrl,
-    headers: {
-      Authorization: `Bearer ${config.tracesToken}`,
-      "X-Axiom-Dataset": config.tracesDataset,
-    },
+    ...(headers ? { headers } : {}),
     resource: {
       serviceName: resource.serviceName,
       serviceVersion: resource.serviceVersion,

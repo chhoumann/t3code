@@ -465,6 +465,7 @@ describe("DesktopShellEnvironment", () => {
             SSL_CERT_FILE: "/cached/cert.pem",
             SSL_CERT_DIR: "/cached/certs",
             T3CODE_TELEMETRY_ENABLED: "false",
+            T3CODE_POSTHOG_HOST: "https://posthog.example.com",
             SSH_AUTH_SOCK: "/stale.sock",
             NODE_OPTIONS: "--bad",
           },
@@ -506,6 +507,7 @@ describe("DesktopShellEnvironment", () => {
         assert.equal(env.SSL_CERT_FILE, "");
         assert.equal(env.SSL_CERT_DIR, "/cached/certs");
         assert.equal(env.T3CODE_TELEMETRY_ENABLED, "false");
+        assert.equal(env.T3CODE_POSTHOG_HOST, "https://posthog.example.com");
         assert.equal(env.SSH_AUTH_SOCK, "/current.sock");
         assert.isUndefined(env.NODE_OPTIONS);
         assert.equal(yield* fs.readFileString(cachePath), contents);
@@ -711,6 +713,32 @@ describe("DesktopShellEnvironment", () => {
       assert.equal(env.SSL_CERT_DIR, "/etc/ssl/certs");
       assert.equal(env.NODE_EXTRA_CA_CERTS, "/Users/me/corp-root.pem");
     }),
+  );
+
+  it.effect(
+    "hydrates the analytics endpoint from the login shell without overriding the launcher",
+    () =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = {
+          SHELL: "/bin/zsh",
+          PATH: "/usr/bin",
+          T3CODE_POSTHOG_KEY: "launcher-key",
+        };
+
+        yield* runShellEnvironment({
+          env,
+          platform: "darwin",
+          handler: () =>
+            envOutput({
+              PATH: "/usr/bin",
+              T3CODE_POSTHOG_HOST: "https://posthog.example.com",
+              T3CODE_POSTHOG_KEY: "shell-key",
+            }),
+        });
+
+        assert.equal(env.T3CODE_POSTHOG_HOST, "https://posthog.example.com");
+        assert.equal(env.T3CODE_POSTHOG_KEY, "launcher-key");
+      }),
   );
 
   it.effect.each([

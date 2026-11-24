@@ -51,6 +51,35 @@ describe("loadRepoEnv", () => {
       VITE_T3CODE_RELAY_URL: "https://ci.example.test",
     });
   });
+
+  it("propagates self-hosted telemetry endpoints from root env files to every surface", () => {
+    const repoRoot = makeTemporaryDirectory();
+    NodeFS.writeFileSync(
+      NodePath.join(repoRoot, ".env"),
+      [
+        "T3CODE_POSTHOG_HOST=https://posthog.example.test",
+        "T3CODE_POSTHOG_KEY=phc_self_hosted",
+        "T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS=x-api-key=relay",
+        "EXPO_PUBLIC_OTLP_TRACES_HEADERS=x-api-key=mobile",
+        "T3CODE_MOBILE_OBSERVE_ENDPOINT_URL=https://observe.example.test/crash",
+      ].join("\n"),
+    );
+
+    expect(loadRepoEnv({ baseEnv: {}, repoRoot })).toMatchObject({
+      T3CODE_POSTHOG_HOST: "https://posthog.example.test",
+      T3CODE_POSTHOG_KEY: "phc_self_hosted",
+      T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS: "x-api-key=relay",
+      VITE_RELAY_OTLP_TRACES_HEADERS: "x-api-key=relay",
+      T3CODE_MOBILE_OTLP_TRACES_HEADERS: "x-api-key=mobile",
+      EXPO_PUBLIC_OTLP_TRACES_HEADERS: "x-api-key=mobile",
+      T3CODE_MOBILE_OBSERVE_ENDPOINT_URL: "https://observe.example.test/crash",
+      EXPO_PUBLIC_MOBILE_OBSERVE_ENDPOINT_URL: "https://observe.example.test/crash",
+    });
+    expect(
+      loadRepoEnv({ baseEnv: { T3CODE_POSTHOG_HOST: " https://ci.example.test " }, repoRoot })
+        .T3CODE_POSTHOG_HOST,
+    ).toBe("https://ci.example.test");
+  });
 });
 
 function makeTemporaryDirectory() {

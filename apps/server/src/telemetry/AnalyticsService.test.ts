@@ -113,20 +113,22 @@ const recordTwentyEvents = Effect.gen(function* () {
   }
 });
 
-const analyticsLayerWith = (client: HttpClient.HttpClient, policy?: ManagedPolicyDocument) =>
+const DEFAULT_TEST_ENV: Readonly<Record<string, unknown>> = {
+  T3CODE_TELEMETRY_ENABLED: true,
+  T3CODE_POSTHOG_KEY: "phc_test_key",
+  T3CODE_POSTHOG_HOST: "http://localhost",
+};
+
+const analyticsLayerWith = (
+  client: HttpClient.HttpClient,
+  policy?: ManagedPolicyDocument,
+  env: Readonly<Record<string, unknown>> = DEFAULT_TEST_ENV,
+) =>
   AnalyticsService.layer.pipe(
     Layer.provideMerge(
       ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
     ),
-    Layer.provide(
-      ConfigProvider.layer(
-        ConfigProvider.fromUnknown({
-          T3CODE_TELEMETRY_ENABLED: true,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
-          T3CODE_POSTHOG_HOST: "http://localhost",
-        }),
-      ),
-    ),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env))),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(HostProcess.Platform, "win32"),
@@ -176,6 +178,40 @@ const sendFor = (
     return batches;
   });
 
+/** Records one event with `env` as the server config and returns every request that left. */
+const recordOneEvent = Effect.gen(function* () {
+  const analytics = yield* AnalyticsService.AnalyticsService;
+  return [yield* analytics.record("test.endpoint")];
+});
+
+const captureRequests = (
+  env: Readonly<Record<string, unknown>>,
+  record: Effect.Effect<
+    ReadonlyArray<boolean>,
+    never,
+    AnalyticsService.AnalyticsService | Effect.Services<typeof getTelemetryIdentity>
+  > = recordOneEvent,
+) =>
+  Effect.gen(function* () {
+    const sent: Array<{ readonly url: string; readonly body: Record<string, unknown> }> = [];
+    const client = HttpClient.make((request) =>
+      Effect.gen(function* () {
+        const body =
+          request.body._tag === "Uint8Array"
+            ? (JSON.parse(new TextDecoder().decode(request.body.body)) as Record<string, unknown>)
+            : {};
+        sent.push({ url: request.url, body });
+        return yield* respondWithStatus(204)(request);
+      }),
+    );
+    const recorded = yield* Effect.gen(function* () {
+      const queued = yield* record;
+      yield* (yield* AnalyticsService.AnalyticsService).flush;
+      return queued;
+    }).pipe(Effect.provide(analyticsLayerWith(client, undefined, env)));
+    return { recorded, sent };
+  });
+
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService test", (it) => {
   it.effect("waits for desktop shell consent and honors a late telemetry opt-out", () =>
     Effect.gen(function* () {
@@ -199,6 +235,50 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
       assert.deepEqual(
         batches.flat().map((event) => event.event),
         ["test.allowed"],
+      );
+    }),
+  );
+
+  it.effect("sends nothing anywhere when no analytics host is configured", () =>
+    Effect.gen(function* () {
+      const requests = yield* captureRequests({ T3CODE_TELEMETRY_ENABLED: true });
+      assert.deepEqual(requests.recorded, [false]);
+      assert.deepEqual(requests.sent, []);
+    }),
+  );
+
+  it.effect("posts to a self-hosted batch path without a project key", () =>
+    Effect.gen(function* () {
+      const requests = yield* captureRequests({
+        T3CODE_TELEMETRY_ENABLED: true,
+        T3CODE_POSTHOG_HOST: " https://telemetry.example.com/ingest/ ",
+      });
+      assert.deepEqual(requests.recorded, [true]);
+      assert.deepEqual(
+        requests.sent.map(({ url }) => url),
+        ["https://telemetry.example.com/ingest/batch/"],
+      );
+      assert.notProperty(requests.sent[0]?.body, "api_key");
+    }),
+  );
+
+  it.effect("uses the analytics endpoint the desktop login shell names", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+      const requests = yield* captureRequests(
+        { T3CODE_TELEMETRY_ENABLED: true },
+        Effect.gen(function* () {
+          const analytics = yield* AnalyticsService.AnalyticsService;
+          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+          env.T3CODE_POSTHOG_HOST = "http://localhost:8010";
+          env.T3CODE_POSTHOG_KEY = "phc_shell";
+          return [yield* analytics.record("test.shell-endpoint")];
+        }),
+      ).pipe(Effect.provideService(HostProcess.Environment, env));
+      assert.deepEqual(requests.recorded, [true]);
+      assert.deepEqual(
+        requests.sent.map(({ url, body }) => [url, body.api_key]),
+        [["http://localhost:8010/batch/", "phc_shell"]],
       );
     }),
   );

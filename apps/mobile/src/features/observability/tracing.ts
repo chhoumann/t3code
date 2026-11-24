@@ -2,13 +2,7 @@ import Constants from "expo-constants";
 import { type ReleaseChannel, releaseResourceAttributes } from "@t3tools/shared/releaseResource";
 import * as RelayTracing from "@t3tools/shared/relayTracing";
 
-import { hasTracingPublicConfig, resolveCloudPublicConfig } from "../cloud/publicConfig";
-
-export interface TracingConfig {
-  readonly tracesUrl: string;
-  readonly tracesDataset: string;
-  readonly tracesToken: string;
-}
+import { resolveCloudPublicConfig } from "../cloud/publicConfig";
 
 export interface TracingResource {
   readonly serviceVersion?: string;
@@ -22,16 +16,15 @@ const RELEASE_CHANNEL_BY_VARIANT: Readonly<Record<string, ReleaseChannel | undef
   production: "stable",
 };
 
-export function resolveTracingConfig(): TracingConfig | null {
-  const config = resolveCloudPublicConfig();
-  if (!hasTracingPublicConfig(config)) {
-    return null;
-  }
-  const { tracesUrl, tracesDataset, tracesToken } = config.observability;
-  return { tracesUrl, tracesDataset, tracesToken };
+/** Any valid traces URL is enough; dataset, token, and headers are optional. */
+export function resolveTracingConfig() {
+  return RelayTracing.resolveRelayClientTracingConfig(resolveCloudPublicConfig().observability);
 }
 
-export function layerFromConfig(config: TracingConfig | null, resource: TracingResource) {
+export function layerFromConfig(
+  config: RelayTracing.RelayClientTracingConfig | null,
+  resource: TracingResource,
+) {
   const channel =
     typeof __DEV__ !== "undefined" && __DEV__
       ? "dev"

@@ -1,11 +1,13 @@
 import Constants from "expo-constants";
 import { Observe } from "expo-observe";
 
-// Importing expo-observe installs its global JS error handler; reports leave only through the relay.
-const relayUrl: unknown = Constants.expoConfig?.extra?.relay?.url;
+// Importing expo-observe installs its global JS error handler; reports leave only for the
+// endpoint app.config.ts compiled in (an explicit one, else the relay's).
+const observeEndpointUrl: unknown = Constants.expoConfig?.extra?.observability?.observeEndpointUrl;
 const appVariant: unknown = Constants.expoConfig?.extra?.appVariant;
 
-export const crashReportingAvailable = typeof relayUrl === "string" && relayUrl.trim() !== "";
+export const crashReportingAvailable =
+  typeof observeEndpointUrl === "string" && observeEndpointUrl.trim() !== "";
 
 interface PromiseRejectionTracker {
   readonly enablePromiseRejectionTracker?: (options: {

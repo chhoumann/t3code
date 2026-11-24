@@ -9,13 +9,45 @@ import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 
 import * as Tracing from "./tracing";
 
-vi.mock("expo-constants", () => ({
-  default: {
-    expoConfig: {
-      extra: {},
-    },
-  },
+const expoConstants = vi.hoisted(() => ({
+  expoConfig: { extra: {} as Record<string, unknown> },
 }));
+vi.mock("expo-constants", () => ({ default: expoConstants }));
+
+it("leaves mobile tracing off when no receiver is configured", () => {
+  expoConstants.expoConfig.extra = { observability: { tracesUrl: null, tracesDataset: null } };
+  expect(Tracing.resolveTracingConfig()).toBeNull();
+});
+
+it.effect("sends spans to a generic OTLP receiver with only its own headers", () =>
+  Effect.gen(function* () {
+    expoConstants.expoConfig.extra = {
+      observability: {
+        tracesUrl: "https://otel.example.test/v1/traces",
+        tracesHeaders: "x-api-key=mobile%20key",
+      },
+    };
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+    const layerTracing = Tracing.layerFromConfig(Tracing.resolveTracingConfig(), {
+      appVariant: "test",
+      serviceInstanceId: "test-instance",
+    }).pipe(Layer.provide(layerRemoteHttpClient(fetchFn)));
+
+    // Closing the layer's scope flushes the exporter.
+    yield* Effect.void.pipe(
+      Effect.withSpan("mobile.test.span"),
+      withRelayClientTracing,
+      Effect.provide(layerTracing),
+    );
+
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe("https://otel.example.test/v1/traces");
+    const headers = new Headers(fetchFn.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("x-api-key")).toBe("mobile key");
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.has("x-axiom-dataset")).toBe(false);
+  }),
+);
 
 it.effect("does not let OTLP serialization failures alter application effects", () => {
   const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));

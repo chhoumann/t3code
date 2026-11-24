@@ -80,3 +80,40 @@ it("product opt-out disables relay tracing with either built-in or runtime crede
     null,
   );
 });
+
+it("relay tracing exports to any OTLP receiver, with or without headers", () => {
+  const env = { T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://otel.example.test/v1/traces" };
+
+  assert.deepEqual(resolveRelayClientTracingConfig(env, {}), {
+    tracesUrl: "https://otel.example.test/v1/traces",
+  });
+  assert.deepEqual(
+    resolveRelayClientTracingConfig(
+      { ...env, T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS: "x-api-key=runtime" },
+      { tracesHeaders: "x-api-key=embedded" },
+    ),
+    {
+      tracesUrl: "https://otel.example.test/v1/traces",
+      tracesHeaders: { "x-api-key": "runtime" },
+    },
+  );
+  assert.deepEqual(
+    resolveRelayClientTracingConfig({}, { tracesUrl: env.T3CODE_RELAY_CLIENT_OTLP_TRACES_URL }),
+    { tracesUrl: "https://otel.example.test/v1/traces" },
+  );
+  assert.equal(
+    resolveRelayClientTracingConfig(
+      {
+        ...env,
+        T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS: "x-api-key=runtime",
+        T3CODE_TELEMETRY_ENABLED: "false",
+      },
+      {},
+    ),
+    null,
+  );
+});
+
+it("relay tracing stays off when nothing names a receiver", () => {
+  assert.equal(resolveRelayClientTracingConfig({}, {}), null);
+});
