@@ -51,6 +51,8 @@ export interface PairingConnectionInput {
   readonly host?: string;
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
+  /** Registers the route as contributed by this environment; see `BearerConnectionProfile`. */
+  readonly managedBy?: EnvironmentId;
 }
 
 export interface SshConnectionInput {
@@ -150,6 +152,7 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      ...(input.managedBy === undefined ? {} : { managedBy: input.managedBy }),
     }),
   };
   // The registry checks again under its lease; this early check keeps a refused code unspent.

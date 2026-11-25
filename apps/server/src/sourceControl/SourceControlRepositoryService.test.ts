@@ -65,6 +65,18 @@ function processOutput(): GitVcsDriver.ExecuteGitResult {
   };
 }
 
+/** What a successful `git clone` leaves behind: the directory it was asked to make. */
+const fakeClone = (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  input: GitVcsDriver.ExecuteGitInput,
+) =>
+  input.args[0] === "clone"
+    ? fs
+        .makeDirectory(path.join(input.cwd, input.args.at(-1)!), { recursive: true })
+        .pipe(Effect.orDie)
+    : Effect.void;
+
 function layer(input: {
   readonly provider?: SourceControlProvider.SourceControlProvider["Service"];
   readonly git?: Partial<GitVcsDriver.GitVcsDriver["Service"]>;
@@ -181,9 +193,11 @@ it.effect("clones a looked-up repository after creating missing parent directori
       assert.deepStrictEqual(cloneCalls, [
         {
           cwd: parent,
-          args: ["clone", "--progress", "--", CLONE_URLS.url, "t3code"],
+          args: ["clone", "--progress", "--", CLONE_URLS.url, ".t3code.t3-clone"],
         },
       ]);
+      assert.isTrue(yield* fs.exists(destinationPath));
+      assert.isFalse(yield* fs.exists(path.join(parent, ".t3code.t3-clone")));
     }).pipe(
       Effect.provide(
         layer({
@@ -192,6 +206,7 @@ it.effect("clones a looked-up repository after creating missing parent directori
               Effect.gen(function* () {
                 assert.isTrue(yield* fs.exists(parent).pipe(Effect.orDie));
                 cloneCalls.push({ cwd: input.cwd, args: input.args });
+                yield* fakeClone(fs, path, input);
                 return processOutput();
               }),
           },
@@ -267,13 +282,14 @@ it.effect.each([
       .pipe(Effect.map((result) => result.refs.map((ref) => ref.name)));
     let duringClone: ReadonlyArray<string> | null = null;
     // Stands in for git clone so the read lands at a chosen point inside it.
-    const cloneInTwoSteps = Effect.gen(function* () {
-      yield* fs.makeDirectory(destinationPath).pipe(Effect.orDie);
-      if (readBeforeInit) duringClone = yield* refNames;
-      yield* run(parent, ["init", "--initial-branch=staging", destinationPath]);
-      if (!readBeforeInit) duringClone = yield* refNames;
-      return yield* run(destinationPath, ["pull", source, "staging"]);
-    });
+    const cloneInTwoSteps = (target: string) =>
+      Effect.gen(function* () {
+        yield* fs.makeDirectory(target).pipe(Effect.orDie);
+        if (readBeforeInit) duringClone = yield* refNames;
+        yield* run(parent, ["init", "--initial-branch=staging", target]);
+        if (!readBeforeInit) duringClone = yield* refNames;
+        return yield* run(target, ["pull", source, "staging"]);
+      });
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
       yield* service.cloneRepository({ remoteUrl: source, destinationPath });
@@ -282,7 +298,10 @@ it.effect.each([
         layer({
           git: {
             ...git,
-            execute: (input) => (input.args[0] === "clone" ? cloneInTwoSteps : git.execute(input)),
+            execute: (input) =>
+              input.args[0] === "clone"
+                ? cloneInTwoSteps(path.join(input.cwd, input.args.at(-1)!))
+                : git.execute(input),
           },
         }),
       ),
@@ -370,7 +389,7 @@ it.effect("reports a Git LFS download as progress only while its partial files c
     const path = yield* Path.Path;
     const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-source-control-clone-lfs-" });
     const destinationPath = path.join(parent, "t3code");
-    const incomplete = path.join(destinationPath, ".git", "lfs", "incomplete");
+    const incomplete = path.join(parent, ".t3code.t3-clone", ".git", "lfs", "incomplete");
     const progress = yield* Queue.unbounded<GitCloneProgressLine>();
     const firstDownloading = yield* Deferred.make<void>();
     const firstLanded = yield* Deferred.make<void>();
@@ -502,6 +521,8 @@ it.effect("says a clone that ran out of time timed out, not git's last remote li
 );
 
 function rejectingSsh(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
   urls: Array<string>,
   httpsFails: boolean,
   reason: GitCommandError["reason"] = "authentication_failed",
@@ -511,7 +532,10 @@ function rejectingSsh(
       Effect.gen(function* () {
         const url = input.args.at(-2)!;
         urls.push(url);
-        if (url.startsWith("https://") && !httpsFails) return processOutput();
+        if (url.startsWith("https://") && !httpsFails) {
+          yield* fakeClone(fs, path, input);
+          return processOutput();
+        }
         yield* (
           input.progress?.onStderrLine?.(
             url.startsWith("https://")
@@ -531,7 +555,12 @@ function rejectingSsh(
 }
 
 const cloneInTemporaryDirectory = (
-  git: Partial<GitVcsDriver.GitVcsDriver["Service"]>,
+  git:
+    | Partial<GitVcsDriver.GitVcsDriver["Service"]>
+    | ((
+        fs: FileSystem.FileSystem,
+        path: Path.Path,
+      ) => Partial<GitVcsDriver.GitVcsDriver["Service"]>),
   input: Omit<SourceControlCloneRepositoryInput, "destinationPath">,
 ) =>
   Effect.gen(function* () {
@@ -546,15 +575,20 @@ const cloneInTemporaryDirectory = (
         ...input,
         destinationPath: path.join(parent, "t3code"),
       });
-    }).pipe(Effect.provide(layer({ git }).pipe(Layer.orDie)));
+    }).pipe(
+      Effect.provide(
+        layer({ git: typeof git === "function" ? git(fs, path) : git }).pipe(Layer.orDie),
+      ),
+    );
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 it.effect("retries a clone over HTTPS when the SSH login is refused", () =>
   Effect.gen(function* () {
     const urls: Array<string> = [];
-    const result = yield* cloneInTemporaryDirectory(rejectingSsh(urls, false), {
-      remoteUrl: CLONE_URLS.sshUrl,
-    });
+    const result = yield* cloneInTemporaryDirectory(
+      (fs, path) => rejectingSsh(fs, path, urls, false),
+      { remoteUrl: CLONE_URLS.sshUrl },
+    );
 
     assert.deepStrictEqual(urls, [CLONE_URLS.sshUrl, "https://github.com/octocat/t3code.git"]);
     assert.strictEqual(result.remoteUrl, "https://github.com/octocat/t3code.git");
@@ -565,7 +599,9 @@ it.effect("reports both failures when the HTTPS retry fails too", () =>
   Effect.gen(function* () {
     const urls: Array<string> = [];
     const error = yield* Effect.flip(
-      cloneInTemporaryDirectory(rejectingSsh(urls, true), { remoteUrl: CLONE_URLS.sshUrl }),
+      cloneInTemporaryDirectory((fs, path) => rejectingSsh(fs, path, urls, true), {
+        remoteUrl: CLONE_URLS.sshUrl,
+      }),
     );
 
     assert.strictEqual(urls.length, 2);
@@ -583,9 +619,12 @@ it.effect.each([
 ])("retries Azure SSH URL %s using its HTTPS host and repository path", (remoteUrl) =>
   Effect.gen(function* () {
     const urls: Array<string> = [];
-    const result = yield* cloneInTemporaryDirectory(rejectingSsh(urls, false), {
-      remoteUrl,
-    });
+    const result = yield* cloneInTemporaryDirectory(
+      (fs, path) => rejectingSsh(fs, path, urls, false),
+      {
+        remoteUrl,
+      },
+    );
 
     assert.deepStrictEqual(urls, [
       remoteUrl,
@@ -602,7 +641,7 @@ it.effect.each([
   Effect.gen(function* () {
     const urls: Array<string> = [];
     yield* Effect.flip(
-      cloneInTemporaryDirectory(rejectingSsh(urls, false, reason), {
+      cloneInTemporaryDirectory((fs, path) => rejectingSsh(fs, path, urls, false, reason), {
         remoteUrl: CLONE_URLS.sshUrl,
         ...(protocol === undefined ? {} : { protocol }),
       }),
@@ -699,34 +738,26 @@ it.effect("strips embedded credentials from the remote URL it reports", () =>
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("discards only a directory git wrote to", () =>
+it.effect("discards the staging clone and never the destination", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-source-control-discard-" });
-    const partial = path.join(parent, "partial");
-    yield* fs.makeDirectory(path.join(partial, ".git"), { recursive: true });
-    yield* fs.writeFileString(path.join(partial, "README.md"), "half");
-    const foreign = path.join(parent, "foreign");
-    yield* fs.makeDirectory(foreign);
-    yield* fs.writeFileString(path.join(foreign, "notes.txt"), "mine");
-
-    const replaced = path.join(parent, "replaced");
-    yield* fs.writeFileString(replaced, "not a directory");
+    const destination = path.join(parent, "project");
+    const staging = path.join(parent, ".project.t3-clone");
+    yield* fs.makeDirectory(path.join(staging, ".git"), { recursive: true });
+    yield* fs.writeFileString(path.join(staging, "README.md"), "half");
+    yield* fs.makeDirectory(destination);
+    yield* fs.writeFileString(path.join(destination, "notes.txt"), "mine");
 
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      yield* service.discardClone(partial);
-      const error = yield* Effect.flip(service.discardClone(foreign));
-      assert.include(error.detail, "not from the clone");
-      const replacedError = yield* Effect.flip(service.discardClone(replaced));
-      assert.include(replacedError.detail, "could not be inspected");
+      yield* service.discardClone(destination);
       yield* service.discardClone(path.join(parent, "missing"));
     }).pipe(Effect.provide(layer({})));
 
-    assert.deepStrictEqual(yield* fs.readDirectory(partial), []);
-    assert.deepStrictEqual(yield* fs.readDirectory(foreign), ["notes.txt"]);
-    assert.strictEqual(yield* fs.readFileString(replaced), "not a directory");
+    assert.isFalse(yield* fs.exists(staging));
+    assert.deepStrictEqual(yield* fs.readDirectory(destination), ["notes.txt"]);
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
@@ -968,6 +999,7 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
               branch: "main",
               upstreamRef: null,
               hasWorkingTreeChanges: false,
+              hasTrackedChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
               hasUpstream: false,
               aheadCount: 0,

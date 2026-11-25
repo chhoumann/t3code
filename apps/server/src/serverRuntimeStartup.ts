@@ -349,7 +349,7 @@ const resolveStartupBrowserTarget = Effect.gen(function* () {
   const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const baseTarget =
     serverConfig.devUrl?.toString() ?? resolveLocalOrigin(serverConfig.host, serverConfig.port);
-  return serverConfig.mode === "desktop"
+  return serverConfig.mode === "desktop" || serverConfig.noStartupPairing
     ? baseTarget
     : yield* serverAuth.issueStartupPairingUrl(baseTarget);
 });
@@ -625,7 +625,9 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           }),
           Effect.ignoreCause({ log: true }),
         );
-        if (serverConfig.startupPresentation === "headless") {
+        if (serverConfig.startupPresentation === "headless" && serverConfig.noStartupPairing) {
+          yield* Console.log("T3 Code server is ready.");
+        } else if (serverConfig.startupPresentation === "headless") {
           yield* Effect.logDebug("startup phase: headless access info");
           const accessInfo = yield* issueHeadlessServeAccessInfo();
           yield* runStartupPhase(
@@ -635,7 +637,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
         } else {
           yield* Effect.logDebug("startup phase: browser open check");
           const startupBrowserTarget = yield* resolveStartupBrowserTarget;
-          if (serverConfig.mode !== "desktop") {
+          if (serverConfig.mode !== "desktop" && !serverConfig.noStartupPairing) {
             yield* announceStartupPairingUrl(startupBrowserTarget);
           }
           yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));

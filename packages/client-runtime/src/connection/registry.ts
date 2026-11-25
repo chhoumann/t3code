@@ -117,6 +117,20 @@ export class EnvironmentRegistry extends Context.Service<
     readonly assertKnownAddress: (
       route: ConnectionRoute,
     ) => Effect.Effect<void, ConnectionBlockedError>;
+    /**
+     * Drops routes `source` contributed to `environmentId`, removing the environment
+     * if none remain or resuming dialing if another route stays behind.
+     */
+    readonly removeContributed: (
+      source: EnvironmentId,
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<
+      void,
+      | Persistence.ConnectionPersistenceError
+      | ConnectionAttemptError
+      | EnvironmentNotRegisteredError
+      | PlatformEnvironmentRemovalError
+    >;
     readonly reconcilePlatform: (
       registrations: ReadonlyArray<PlatformConnectionRegistration>,
     ) => Effect.Effect<void>;
@@ -169,6 +183,19 @@ export class EnvironmentRegistry extends Context.Service<
       | Persistence.ConnectionPersistenceError
       | ConnectionBlockedError
     >;
+    /**
+     * Marks an environment dormant (see `ConnectionCatalogEntry.dormant`) or
+     * lets it dial again, and persists so the next launch starts the same. A
+     * dormant environment stays enabled, with its cache, but drops its socket
+     * and stops retrying.
+     */
+    readonly setDormant: (
+      environmentId: EnvironmentId,
+      dormant: boolean,
+    ) => Effect.Effect<
+      void,
+      EnvironmentNotRegisteredError | Persistence.ConnectionPersistenceError
+    >;
     readonly setCompatibility: (
       environmentId: EnvironmentId,
       error: ConnectionBlockedError | null,
@@ -202,6 +229,22 @@ export class EnvironmentRegistry extends Context.Service<
   }
 >()("@t3tools/client-runtime/connection/registry/EnvironmentRegistry") {}
 
+function contributedRouteIds(
+  entry: ConnectionCatalogEntry,
+  source: EnvironmentId,
+): ReadonlyArray<string> {
+  return connectionRoutes(entry).flatMap((route) => {
+    const profile = Option.getOrNull(route.profile);
+    return profile?._tag === "BearerConnectionProfile" && profile.managedBy === source
+      ? [connectionRouteId(route.target)]
+      : [];
+  });
+}
+
+/** Whether an environment's supervisor should hold a connection. */
+const dials = (entry: ConnectionCatalogEntry) =>
+  entry.enabled && entry.dormant !== true && entry.unsupportedReason === undefined;
+
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
   readonly supervisor: EnvironmentSupervisor.EnvironmentSupervisor["Service"];
@@ -224,6 +267,7 @@ export const make = Effect.gen(function* () {
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
   const persistedTargets = yield* storage.list;
   const disabledEnvironmentIds = new Set(yield* storage.listDisabled);
+  const dormantEnvironmentIds = new Set(yield* storage.listDormant);
   const loadRoute = Effect.fn("EnvironmentRegistry.loadRoute")(function* (
     target: ConnectionTarget,
   ) {
@@ -260,6 +304,7 @@ export const make = Effect.gen(function* () {
               target: first.target,
               profile: first.profile,
               enabled: !disabledEnvironmentIds.has(environmentId),
+              ...(dormantEnvironmentIds.has(environmentId) ? { dormant: true as const } : {}),
             },
             routes,
           ),
@@ -367,8 +412,8 @@ export const make = Effect.gen(function* () {
           const scope = yield* Scope.fork(registryScope);
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             // Seed the intent to avoid publishing a false switched-off state
-            // before an enabled, compatible environment starts connecting.
-            initiallyDesired: entry.enabled && entry.unsupportedReason === undefined,
+            // before an enabled, compatible, awake environment starts connecting.
+            initiallyDesired: dials(entry),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -823,6 +868,7 @@ export const make = Effect.gen(function* () {
             ],
             { concurrency: "unbounded", discard: true },
           );
+          yield* withdrawContributions(environmentId);
           return true;
         }),
       );
@@ -905,11 +951,55 @@ export const make = Effect.gen(function* () {
         yield* disconnectSsh(environmentId, profile);
       }
     }
+
+    yield* withdrawContributions(environmentId);
+  });
+
+  /** Drops the routes an environment that left the registry contributed to others. */
+  const withdrawContributions = Effect.fn("EnvironmentRegistry.withdrawContributions")(function* (
+    source: EnvironmentId,
+  ) {
+    const contributedTo = [...(yield* SubscriptionRef.get(entries)).values()]
+      .filter((candidate) => contributedRouteIds(candidate, source).length > 0)
+      .map((candidate) => candidate.target.environmentId);
+    yield* Effect.forEach(
+      contributedTo,
+      (contributedId) =>
+        removeContributed(source, contributedId).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Could not remove routes a removed environment contributed.", {
+              environmentId: contributedId,
+              error,
+            }),
+          ),
+        ),
+      { discard: true },
+    );
   });
 
   const remove = Effect.fn("EnvironmentRegistry.remove")(function* (environmentId: EnvironmentId) {
     return yield* withLeaseLock(environmentId, removeLocked(environmentId));
   });
+
+  const removeContributed: EnvironmentRegistry["Service"]["removeContributed"] = (
+    source,
+    environmentId,
+  ) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) return;
+        const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (entry === undefined) return;
+        const removedIds = contributedRouteIds(entry, source);
+        if (removedIds.length === 0) return;
+        const remaining = removedIds.reduce(routesAfterRemoving, connectionRoutes(entry));
+        if (remaining.length === 0) return yield* removeLocked(environmentId);
+        const { dormant, ...awake } = entry;
+        yield* replaceRoutesLocked(awake, remaining);
+        if (dormant === true) yield* registrations.setDormant(environmentId, false);
+      }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.removeContributed"));
 
   const disconnectSsh = (environmentId: EnvironmentId, profile: SshConnectionProfile) =>
     ssh.disconnect(profile.target).pipe(
@@ -1064,6 +1154,46 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  /**
+   * Installs an entry whose switches changed and applies them to its
+   * supervisor in place, so it keeps its generation and durable streams;
+   * `installEntryLocked` would tear it down instead.
+   */
+  const switchLocked = Effect.fn("EnvironmentRegistry.switchLocked")(function* (
+    next: ConnectionCatalogEntry,
+  ) {
+    const environmentId = next.target.environmentId;
+    const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+    if (lease !== undefined) {
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(environmentId, { ...lease, entry: next }),
+      );
+    }
+    yield* SubscriptionRef.update(entries, (current) => new Map(current).set(environmentId, next));
+    if (lease !== undefined) {
+      yield* dials(next) ? lease.supervisor.connect : lease.supervisor.disconnect;
+    } else if (dials(next)) {
+      yield* createServiceScope(next);
+    }
+  });
+
+  const setDormant = Effect.fn("EnvironmentRegistry.setDormant")(function* (
+    environmentId: EnvironmentId,
+    dormant: boolean,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const { dormant: previous, ...entry } = yield* getEntry(environmentId);
+        if ((previous === true) === dormant) return;
+        if (!(yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+          yield* registrations.setDormant(environmentId, dormant);
+        }
+        yield* switchLocked(dormant ? { ...entry, dormant: true } : entry);
+      }),
+    );
+  });
+
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1087,27 +1217,7 @@ export const make = Effect.gen(function* () {
         }
         // A cached rejection can outlive a server update.
         const { unsupportedReason: _reason, serverUpdateRequired: _update, ...rest } = entry;
-        const next: ConnectionCatalogEntry = { ...(retryUnsupported ? rest : entry), enabled };
-        // Update the lease in place so the supervisor keeps its generation and
-        // durable streams; `installEntryLocked` would tear it down instead.
-        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
-        if (lease !== undefined) {
-          yield* SubscriptionRef.update(serviceScopes, (current) => {
-            const nextScopes = new Map(current);
-            nextScopes.set(environmentId, { ...lease, entry: next });
-            return nextScopes;
-          });
-        }
-        yield* SubscriptionRef.update(entries, (current) => {
-          const nextEntries = new Map(current);
-          nextEntries.set(environmentId, next);
-          return nextEntries;
-        });
-        if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
-        } else if (enabled) {
-          yield* createServiceScope(next);
-        }
+        yield* switchLocked({ ...(retryUnsupported ? rest : entry), enabled });
         // The supervisor only owns the RPC session. A managed SSH backend and
         // its tunnel outlive it, so switching off tears those down as well.
         if (!enabled) {
@@ -1185,7 +1295,7 @@ export const make = Effect.gen(function* () {
             new Map(current).set(environmentId, { ...lease, entry: next }),
           );
           if (error !== null) yield* lease.supervisor.disconnect;
-          else if (next.enabled) yield* lease.supervisor.connect;
+          else if (dials(next)) yield* lease.supervisor.connect;
         }
         yield* SubscriptionRef.update(entries, (current) =>
           new Map(current).set(environmentId, next),
@@ -1202,11 +1312,13 @@ export const make = Effect.gen(function* () {
     assertKnownAddress,
     reconcilePlatform,
     remove,
+    removeContributed,
     removeRoute,
     reorderRoutes,
     removeRelayEnvironments,
     retryNow,
     setEnabled,
+    setDormant,
     setCompatibility,
     state,
     stateChanges,

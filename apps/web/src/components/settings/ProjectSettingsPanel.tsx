@@ -7,7 +7,11 @@ import { useEnvironmentsWithScope } from "../../state/session";
 import { mapAtomCommandResult, settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
-import { type EnvironmentId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
+import {
+  repositoryGroupingKeyOf,
+  type EnvironmentId,
+  type SidebarProjectGroupingMode,
+} from "@t3tools/contracts";
 import {
   checkProjectAccess,
   reportProjectFailure,
@@ -56,6 +60,7 @@ import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { ProjectRepositoriesSettings } from "./ProjectRepositoriesSettings";
 import { ProjectWorktreeLayoutSettings } from "./ProjectWorktreeLayoutSettings";
+import { ProjectSandboxSettings } from "./ProjectSandboxSettings";
 import {
   defaultProjectIcon,
   hasDefaultProjectIcon,
@@ -285,6 +290,10 @@ function ProjectDetail({
     group.memberProjects.find(
       (member) => environmentById.get(member.environmentId)?.serverConfig != null,
     ) ?? group.memberProjects[0]!;
+  // A sandbox clones the repository the checkout groups under, so its defaults key with it.
+  const sandboxRepository = group.repositoryIdentity
+    ? repositoryGroupingKeyOf(group.repositoryIdentity)
+    : null;
   const threads = useThreadShells();
   const deleteProject = useOrchestrationCommand(projectEnvironment.delete, {
     reportFailure: false,
@@ -694,6 +703,10 @@ function ProjectDetail({
           ) : null}
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
+        <ProjectSandboxSettings
+          key={sandboxRepository ?? undefined}
+          repository={sandboxRepository}
+        />
         <ProjectActionsSettings />
         <ProjectRepositoriesSettings members={group.memberProjects} />
         <ProjectWorktreeLayoutSettings members={group.memberProjects} />

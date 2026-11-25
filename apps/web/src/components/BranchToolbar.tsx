@@ -14,7 +14,14 @@ import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environ
 import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m as resolveMessage } from "../i18n/messages";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
+import {
+  BoxIcon,
+  FolderGit2Icon,
+  FolderGitIcon,
+  FolderIcon,
+  PlusIcon,
+  ScaleIcon,
+} from "lucide-react";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
@@ -33,6 +40,7 @@ import {
   ADD_TO_MACHINE_LABEL_CLASS,
   type EnvMode,
   type EnvironmentOption,
+  type SandboxRunChoice,
   resolveContextStripLabelsCompact,
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
@@ -46,6 +54,10 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
+import {
+  BranchToolbarSandboxSource,
+  type BranchToolbarSandboxSourceHandle,
+} from "./BranchToolbarSandboxSource";
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
@@ -85,8 +97,10 @@ const isClipboardApiUnavailableError = Schema.is(ClipboardApiUnavailableError);
 const isClipboardWriteError = Schema.is(ClipboardWriteError);
 
 export interface BranchToolbarHandle {
+  /** Opens the base picker instead while the draft launches a sandbox. */
   openBranchPicker: () => void;
   usePreviousWorktree: () => void;
+  openSandboxRepository: () => void;
 }
 
 interface BranchToolbarProps {
@@ -119,6 +133,9 @@ interface BranchToolbarProps {
   trailing?: ReactNode;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  sandboxChoices?: readonly SandboxRunChoice[] | undefined;
+  activeSandboxValue?: string | null | undefined;
+  onSandboxChoose?: ((choice: SandboxRunChoice) => void) | undefined;
 }
 
 function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string) {
@@ -171,6 +188,9 @@ interface RunContextSelectorProps {
   showEnvironmentPicker: boolean;
   showEnvironmentIndicator: boolean;
   onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
+  sandboxChoices: readonly SandboxRunChoice[];
+  activeSandboxValue: string | null;
+  onSandboxChoose: ((choice: SandboxRunChoice) => void) | undefined;
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   onEnvModeChange: (mode: EnvMode) => void;
@@ -195,6 +215,9 @@ const RunContextSelector = memo(function RunContextSelector({
   showEnvironmentPicker,
   showEnvironmentIndicator,
   onEnvironmentChange,
+  sandboxChoices,
+  activeSandboxValue,
+  onSandboxChoose,
   effectiveEnvMode: requestedEnvMode,
   activeWorktreePath,
   onEnvModeChange,
@@ -209,6 +232,8 @@ const RunContextSelector = memo(function RunContextSelector({
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
+  const activeSandbox =
+    sandboxChoices.find((choice) => choice.value === activeSandboxValue) ?? null;
   // A folder no worktree can come from runs threads in place, whatever mode was requested.
   const forceNewWorktree = offersWorkspaceModes && requestedForceNewWorktree;
   const effectiveEnvMode = offersWorkspaceModes ? requestedEnvMode : "local";
@@ -254,7 +279,12 @@ const RunContextSelector = memo(function RunContextSelector({
   const environmentIcon = (
     <Tooltip>
       <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
-        {autoEnvironmentLabel ? (
+        {activeSandbox ? (
+          <BoxIcon
+            className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
+            aria-hidden="true"
+          />
+        ) : autoEnvironmentLabel ? (
           <ScaleIcon
             className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
             aria-hidden="true"
@@ -270,7 +300,7 @@ const RunContextSelector = memo(function RunContextSelector({
         )}
       </TooltipTrigger>
       <TooltipPopup>
-        {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+        {activeSandbox?.label ?? autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
       </TooltipPopup>
     </Tooltip>
   );
@@ -279,11 +309,12 @@ const RunContextSelector = memo(function RunContextSelector({
     <>
       {icon}
       <ComposerContextLabel displayMode={displayMode}>
-        {autoEnvironmentLabel ??
+        {activeSandbox?.label ??
+          autoEnvironmentLabel ??
           (showEnvironmentIndicator ? (activeEnvironment?.label ?? gt("Run on")) : workspaceLabel)}
       </ComposerContextLabel>
       {/* Trailing in the panel, so every row label starts on the same edge. */}
-      {isPanel && showEnvironmentIndicator ? workspaceIcon : null}
+      {isPanel && showEnvironmentIndicator && !activeSandbox ? workspaceIcon : null}
     </>
   );
 
@@ -337,7 +368,7 @@ const RunContextSelector = memo(function RunContextSelector({
         data-composer-context-control
         data-composer-shortcut={[
           showEnvironmentPicker && !envLocked ? "composer.host" : "",
-          !workspaceModesLocked ? "composer.workspace" : "",
+          !workspaceModesLocked && !activeSandbox ? "composer.workspace" : "",
         ].join(" ")}
       >
         {triggerContent}
@@ -362,12 +393,13 @@ const RunContextSelector = memo(function RunContextSelector({
                 <T>Run on</T>
               </MenuGroupLabel>
               <MenuRadioGroup
-                value={autoEnvironmentLabel ? "auto" : environmentId}
-                onValueChange={(value) =>
-                  value === "auto"
-                    ? onAutoEnvironment?.()
-                    : onEnvironmentChange?.(value as EnvironmentId)
-                }
+                value={activeSandbox?.value ?? (autoEnvironmentLabel ? "auto" : environmentId)}
+                onValueChange={(value) => {
+                  if (value === "auto") return onAutoEnvironment?.();
+                  const sandbox = sandboxChoices.find((choice) => choice.value === value);
+                  if (sandbox) return onSandboxChoose?.(sandbox);
+                  onEnvironmentChange?.(value as EnvironmentId);
+                }}
               >
                 {onAutoEnvironment && (
                   <MenuRadioItem
@@ -401,6 +433,20 @@ const RunContextSelector = memo(function RunContextSelector({
                     </span>
                   </MenuRadioItem>
                 ))}
+                {sandboxChoices.length > 0 ? <MenuSeparator /> : null}
+                {sandboxChoices.map((choice) => (
+                  <MenuRadioItem
+                    key={choice.value}
+                    disabled={envLocked || !onEnvironmentChange}
+                    value={choice.value}
+                    closeOnClick
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <BoxIcon className="size-3" aria-hidden="true" />
+                      <span className="min-w-0 truncate">{choice.label}</span>
+                    </span>
+                  </MenuRadioItem>
+                ))}
               </MenuRadioGroup>
               {addTargets.length > 0 ? (
                 <MenuSub>
@@ -428,10 +474,10 @@ const RunContextSelector = memo(function RunContextSelector({
                 </MenuSub>
               ) : null}
             </MenuGroup>
-            {offersWorkspaceModes ? <MenuSeparator /> : null}
+            {offersWorkspaceModes && !activeSandbox ? <MenuSeparator /> : null}
           </>
         ) : null}
-        {offersWorkspaceModes ? (
+        {offersWorkspaceModes && !activeSandbox ? (
           <MenuGroup>
             <MenuGroupLabel>
               <T>Workspace</T>
@@ -640,6 +686,8 @@ function useLabelsOverflow(): readonly [
   return [attach, overflows] as const;
 }
 
+const EMPTY_SANDBOX_CHOICES: readonly SandboxRunChoice[] = [];
+
 export const BranchToolbar = memo(function BranchToolbar({
   layout = "composer",
   panelSection = "all",
@@ -666,10 +714,14 @@ export const BranchToolbar = memo(function BranchToolbar({
   onComposerFocusRequest,
   availableEnvironments,
   onEnvironmentChange,
+  sandboxChoices = EMPTY_SANDBOX_CHOICES,
+  activeSandboxValue = null,
+  onSandboxChoose,
   trailing,
 }: BranchToolbarProps) {
   const m = useMessages();
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
+  const sandboxSourceRef = useRef<BranchToolbarSandboxSourceHandle>(null);
   const threadRef = scopeThreadRef(environmentId, threadId);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   // The composer retains resolved thread details while bootstrap cleanup can remove its shell.
@@ -679,7 +731,11 @@ export const BranchToolbar = memo(function BranchToolbar({
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
 
-  const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
+  // A sandbox clones its own checkout, so the local workspace and branch do not apply.
+  const sandboxSelected = activeSandboxValue !== null;
+
+  const canUsePreviousWorktree =
+    !isServerThread && !envModeLocked && !forceNewWorktree && !sandboxSelected;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];
   const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
   const previousWorktreeSeed = canUsePreviousWorktree
@@ -704,18 +760,21 @@ export const BranchToolbar = memo(function BranchToolbar({
   useImperativeHandle(
     ref,
     () => ({
-      openBranchPicker: () => branchSelectorRef.current?.open(),
+      openBranchPicker: () =>
+        sandboxSelected ? sandboxSourceRef.current?.openBase() : branchSelectorRef.current?.open(),
       usePreviousWorktree: () => {
         if (!showGitControls || !canUsePreviousWorktree || !previousWorktreeSeed) return;
         onUsePreviousWorktree();
         onComposerFocusRequest?.();
       },
+      openSandboxRepository: () => sandboxSourceRef.current?.openRepository(),
     }),
     [
       canUsePreviousWorktree,
       onComposerFocusRequest,
       onUsePreviousWorktree,
       previousWorktreeSeed,
+      sandboxSelected,
       showGitControls,
     ],
   );
@@ -723,8 +782,10 @@ export const BranchToolbar = memo(function BranchToolbar({
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
-  // A project on one machine still gets the picker when it can be added to another.
-  const hasMultipleEnvironments = (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0;
+  // A project on one machine still gets the picker when it can be added to another
+  // or run in a new sandbox.
+  const hasMultipleEnvironments =
+    (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0 || sandboxChoices.length > 0;
   const showEnvironmentPicker = hasMultipleEnvironments && onEnvironmentChange !== undefined;
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
@@ -765,6 +826,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={activeEnvironmentOption !== null}
             onEnvironmentChange={onEnvironmentChange}
+            sandboxChoices={sandboxChoices}
+            activeSandboxValue={activeSandboxValue}
+            onSandboxChoose={onSandboxChoose}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
@@ -775,7 +839,16 @@ export const BranchToolbar = memo(function BranchToolbar({
             onAddToMachine={onAddToMachine}
           />
         ) : null}
-        {panelSection !== "workspace" ? (
+        {panelSection !== "branch" && sandboxSelected && draftId ? (
+          <BranchToolbarSandboxSource
+            draftId={draftId}
+            environmentId={environmentId}
+            project={activeProject}
+            disabled={envLocked}
+            displayMode="panel"
+          />
+        ) : null}
+        {panelSection !== "workspace" && !sandboxSelected ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -816,6 +889,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             showEnvironmentPicker={showEnvironmentPicker}
             showEnvironmentIndicator={showEnvironmentIndicator}
             onEnvironmentChange={onEnvironmentChange}
+            sandboxChoices={sandboxChoices}
+            activeSandboxValue={activeSandboxValue}
+            onSandboxChoose={onSandboxChoose}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
@@ -845,8 +921,11 @@ export const BranchToolbar = memo(function BranchToolbar({
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker ? { onEnvironmentChange } : {})}
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
+                sandboxChoices={sandboxChoices}
+                activeSandboxValue={activeSandboxValue}
+                onSandboxChoose={onSandboxChoose}
               />
-              {showGitControls ? (
+              {showGitControls && !sandboxSelected ? (
                 <Separator
                   orientation="vertical"
                   className="mx-0.5 h-3.5!"
@@ -855,7 +934,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls ? (
+          {showGitControls && !sandboxSelected ? (
             <BranchToolbarEnvModeSelector
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}
@@ -877,7 +956,19 @@ export const BranchToolbar = memo(function BranchToolbar({
           offersBaseBranch={!showBranchControls}
         />
       ) : null}
-      {!showGitControls ? null : !showBranchControls ? (
+      {sandboxSelected && draftId ? (
+        <div className="flex min-w-0 flex-initial justify-end @xl/composer-surface:ml-auto">
+          <BranchToolbarSandboxSource
+            ref={sandboxSourceRef}
+            draftId={draftId}
+            environmentId={environmentId}
+            project={activeProject}
+            disabled={envLocked}
+            displayMode="toolbar"
+          />
+        </div>
+      ) : null}
+      {!showGitControls || sandboxSelected ? null : !showBranchControls ? (
         startsNewWorktree ? (
           <span
             className="min-w-0 flex-initial truncate px-1.75 @xl/composer-surface:ml-auto"

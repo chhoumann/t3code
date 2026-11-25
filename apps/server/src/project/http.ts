@@ -1,7 +1,9 @@
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  AuthOrchestrationOperateScope,
   requiredScopesForProjectMutation,
+  type SandboxManagedByOwnerError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -16,12 +18,17 @@ import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
 
 const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
-  cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
+  cause:
+    | ProjectService.ProjectServiceError
+    | SandboxManagedByOwnerError
+    | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
   if (
+    cause._tag === "SandboxManagedByOwnerError" ||
     cause._tag === "ProjectNotFoundError" ||
     cause._tag === "ProjectConflictError" ||
     cause._tag === "ProjectNotEmptyError" ||
@@ -56,10 +63,13 @@ export const layer = HttpApiBuilder.group(
         "mutate",
         Effect.fn("environment.projects.mutate")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           for (const scope of requiredScopesForProjectMutation(args.payload)) {
             yield* requireEnvironmentScope(scope);
           }
-          const operation = mutateProjectWithClone(projects, projectClones, args.payload);
+          const operation = mutateProjectWithClone(projects, projectClones, args.payload).pipe(
+            Effect.provideService(ManagedSandbox.CommandCaller, { subject: principal.subject }),
+          );
           return yield* startup
             .enqueueCommand(operation)
             .pipe(traceLocalHandlerWork, Effect.catch(failProjectMutation));

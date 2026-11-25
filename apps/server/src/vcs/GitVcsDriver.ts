@@ -15,6 +15,7 @@ import { ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
+  type GitRemote,
   VcsCheckpointStorageError,
   VcsProcessExitError,
   VcsUnsupportedOperationError,
@@ -97,8 +98,11 @@ export interface GitStatusDetails {
   hasOriginRemote: boolean;
   isDefaultBranch: boolean;
   branch: string | null;
+  /** Absent before the first commit. */
+  headCommit?: string;
   upstreamRef: string | null;
   hasWorkingTreeChanges: boolean;
+  hasTrackedChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
   branchChanges?: VcsStatusResult["branchChanges"];
   hasUpstream: boolean;
@@ -448,6 +452,8 @@ export class GitVcsDriver extends Context.Service<
       input: GitRefreshCheckedOutBranchInput,
     ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
     readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
+    /** Every remote and its fetch URL, as `git remote -v` lists them. */
+    readonly listRemoteFetchUrls: (cwd: string) => Effect.Effect<GitRemote[], GitCommandError>;
     readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
     readonly resolveDefaultBranchName: (
       cwd: string,

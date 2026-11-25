@@ -23,6 +23,12 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import {
+  SandboxAccountConfig,
+  SandboxAccountId,
+  SandboxGitHubAppConfig,
+  SandboxProjectDefaults,
+} from "./sandbox.ts";
 import { UsageModelFilter } from "./usage.ts";
 import { SecretProviderId, SecretProviderSlug } from "./secretReference.ts";
 import { containsSecretReference, SettingsSecretValue } from "./settingsSecretValue.ts";
@@ -1620,6 +1626,27 @@ export const ServerSettings = Schema.Struct({
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /**
+   * Accounts this environment creates sandbox machines under. Written only
+   * through `sandboxes.saveAccount`, which checks the key, and
+   * `sandboxes.removeAccount`, which refuses while the account owns a live
+   * sandbox; the settings patch cannot change them.
+   */
+  sandboxAccounts: Schema.Record(SandboxAccountId, SandboxAccountConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /** Repository/account bindings, keyed by sandboxProjectKey on the owning environment. */
+  sandboxProjectDefaults: Schema.Record(Schema.String, SandboxProjectDefaults).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /**
+   * The GitHub App this environment hands its sandboxes user tokens from.
+   * Written only by the App connection as it registers, authorizes, and
+   * disconnects; the settings patch cannot change it.
+   */
+  sandboxGitHubApp: Schema.NullOr(SandboxGitHubAppConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   textGenerators: Schema.Record(ProviderInstanceId, TextGeneratorConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1937,6 +1964,10 @@ export const ServerSettingsPatch = Schema.Struct({
         ),
       ),
     ),
+  ),
+  /** Replaces each named binding; null removes it and restores account defaults. */
+  sandboxProjectDefaults: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(SandboxProjectDefaults)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),

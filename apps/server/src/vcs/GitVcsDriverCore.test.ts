@@ -465,6 +465,23 @@ it.effect.each(["root", "nested", "worktree"] as const)(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("reports the checked-out commit once there is one", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const cwd = yield* makeTmpDir();
+    yield* driver.initRepo({ cwd });
+    assert.isUndefined((yield* driver.statusDetailsLocal(cwd)).headCommit);
+
+    yield* git(cwd, ["config", "user.email", "test@test.com"]);
+    yield* git(cwd, ["config", "user.name", "Test"]);
+    yield* writeTextFile(cwd, "README.md", "# test\n");
+    yield* git(cwd, ["add", "."]);
+    yield* git(cwd, ["commit", "-m", "initial commit"]);
+    const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+    assert.equal((yield* driver.statusDetailsLocal(cwd)).headCommit, head);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each(["origin", "github"] as const)(
   "recognizes %s as the primary remote after a driver mutation",
   (remoteName) =>
@@ -5862,6 +5879,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             yield* git(cwd, ["config", "status.showUntrackedFiles", mode]);
             untrackedScanRoots.length = 0;
             const status = yield* driver.statusDetailsLocal(cwd, { includeBranchChanges: true });
+            assert.equal(status.hasTrackedChanges, false);
             assert.deepStrictEqual(status.branchChanges, {
               baseRef: "main",
               insertions: scenario === "long names" ? 2_052 : 2_002,
@@ -6032,6 +6050,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
 
         assert.equal(status.isRepo, true);
         assert.equal(status.hasWorkingTreeChanges, true);
+        assert.equal(status.hasTrackedChanges, true);
         assert.deepInclude(status.workingTree.files, {
           path: "HEAD",
           insertions: 1,

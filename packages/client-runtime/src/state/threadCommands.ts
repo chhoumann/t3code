@@ -2,7 +2,7 @@ import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contract
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
@@ -10,6 +10,14 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 
+import {
+  type SandboxOwnerChange,
+  createSandboxEnvironmentAtoms,
+  routeSandboxArchive,
+  runAtomCommand,
+  wakeSandbox,
+} from "./sandboxCommands.ts";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import type { EnvironmentShellStatus } from "./shell.ts";
 import { createThreadTriageOutbox } from "./threadTriageOutbox.ts";
@@ -20,11 +28,20 @@ import {
   createAtomCommandScheduler,
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
+  createRuntimeCommand,
   environmentConnectionAtom,
 } from "./runtime.ts";
 import { waitForTitleRegenerationOutcome } from "./threadTitleRegeneration.ts";
 import {
+  type ArchiveThreadInput,
+  type EditQueuedRunInput,
   type InterruptThreadTurnInput,
+  type PromoteQueuedRunInput,
+  type RespondToThreadApprovalInput,
+  type RespondToThreadUserInputInput,
+  type ResumeThreadQueueInput,
+  type StartThreadTurnInput,
+  type UnarchiveThreadInput,
   type UpdateThreadMetadataInput,
   archiveThread,
   closeGuestShare,
@@ -58,6 +75,7 @@ import {
   startThreadTurn,
   stopThreadSession,
   unarchiveThread,
+  unarchiveThreadIfArchived,
   unlinkThreadPullRequest,
   unlinkThreadIssue,
   unpinThread,
@@ -120,6 +138,8 @@ function applySnooze(
       };
 }
 
+/** How long a woken sandbox may take to answer for this device's session. */
+const SESSION_READ_TIMEOUT = "10 seconds";
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
@@ -127,11 +147,48 @@ export function createThreadEnvironmentAtoms<R, E>(
   shellStatusAtom: (environmentId: EnvironmentId) => Atom.Atom<EnvironmentShellStatus>,
 ) {
   const scheduler = createAtomCommandScheduler();
+  const sandboxes = createSandboxEnvironmentAtoms(runtime);
+  // A sandbox's lifecycle is its owner's: archive and unarchive may stop or resume it there.
+  const updateSandbox = (registry: AtomRegistry.AtomRegistry, change: SandboxOwnerChange) =>
+    runAtomCommand(sandboxes.update, registry, {
+      environmentId: change.ownerEnvironmentId,
+      input: { id: change.sandboxId, desired: change.desired },
+    });
   const concurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
       JSON.stringify([environmentId, input.threadId]),
   };
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  /**
+   * Reads a sandbox's own session once it is awake, so this device's
+   * up-front checks (permissions, uploads) answer from it again.
+   */
+  const readSession = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) => {
+    const atom = sessions.sessionStateAtom(environmentId);
+    return Effect.scoped(
+      AtomRegistry.mount(registry, atom).pipe(
+        Effect.andThen(AtomRegistry.getResult(registry, atom, { suspendOnWaiting: true })),
+        Effect.timeoutOption(SESSION_READ_TIMEOUT),
+        Effect.ignore,
+      ),
+    );
+  };
+  // Runs beside the sandbox's environment, not in it: a device pairs with a sandbox only once
+  // it runs, so one that never saw it awake has no connection to it until the wake ends.
+  const wake = createRuntimeCommand(runtime, {
+    label: "environment-data:commands:thread:wake",
+    execute: ({ environmentId }: { readonly environmentId: EnvironmentId }, registry) =>
+      wakeSandbox({ environmentId, toOwner: (change) => updateSandbox(registry, change) }).pipe(
+        Effect.tap((woke) => (woke ? readSession(registry, environmentId) : Effect.void)),
+      ),
+    scheduler,
+    // Everything one device sends while a sandbox wakes shares one wake, so its owner is asked once.
+    concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+  });
+  /** Wakes the environment's sandbox when it sleeps; succeeds with whether it had to. */
+  const wakeFirst = (registry: AtomRegistry.AtomRegistry, environmentId: EnvironmentId) =>
+    runAtomCommand(wake, registry, { environmentId });
   const loadEarlierHistory = Effect.fn("ThreadCommands.loadEarlierHistory")(function* (
     input: LoadEarlierThreadHistoryInput,
   ) {
@@ -233,13 +290,13 @@ export function createThreadEnvironmentAtoms<R, E>(
   ) =>
     mcpNoticeSignedInFamily(JSON.stringify([mcpSignInKey(environmentId, input), input.noticeAt]));
   const sent = {
+    wake,
     armTitleRegeneration: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:regenerate-title",
       execute: armTitleRegeneration,
       scheduler,
       concurrency,
     }),
-
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: createThread,
@@ -266,13 +323,26 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     archive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:archive",
-      execute: archiveThread,
+      execute: (input: ArchiveThreadInput, registry) =>
+        routeSandboxArchive({
+          run: archiveThread(input),
+          toOwner: (change) => updateSandbox(registry, change),
+        }),
       scheduler,
       concurrency,
     }),
     unarchive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unarchive",
-      execute: unarchiveThread,
+      execute: (input: UnarchiveThreadInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(
+          // Archiving a sandbox's last thread puts the sandbox away and keeps the thread
+          // active, and a sandbox that only slept kept its threads as they were.
+          Effect.flatMap((woke) =>
+            woke
+              ? unarchiveThreadIfArchived(input).pipe(Effect.asVoid)
+              : unarchiveThread(input).pipe(Effect.asVoid),
+          ),
+        ),
       scheduler,
       concurrency,
     }),
@@ -399,7 +469,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     startTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:start-turn",
-      execute: startThreadTurn,
+      execute: (input: StartThreadTurnInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(startThreadTurn(input))),
       scheduler,
       concurrency,
     }),
@@ -411,13 +482,15 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     respondToApproval: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:respond-to-approval",
-      execute: respondToThreadApproval,
+      execute: (input: RespondToThreadApprovalInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(respondToThreadApproval(input))),
       scheduler,
       concurrency,
     }),
     respondToUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:respond-to-user-input",
-      execute: respondToThreadUserInput,
+      execute: (input: RespondToThreadUserInputInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(respondToThreadUserInput(input))),
       scheduler,
       concurrency,
     }),
@@ -469,13 +542,15 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     resumeThreadQueue: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resume-queue",
-      execute: resumeThreadQueue,
+      execute: (input: ResumeThreadQueueInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(resumeThreadQueue(input))),
       scheduler,
       concurrency,
     }),
     promoteQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:promote-queued-run",
-      execute: promoteQueuedRun,
+      execute: (input: PromoteQueuedRunInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(promoteQueuedRun(input))),
       scheduler,
       concurrency,
     }),
@@ -493,7 +568,8 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     editQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:edit-queued-run",
-      execute: editQueuedRun,
+      execute: (input: EditQueuedRunInput, registry, environmentId) =>
+        wakeFirst(registry, environmentId).pipe(Effect.andThen(editQueuedRun(input))),
       scheduler,
       concurrency,
     }),

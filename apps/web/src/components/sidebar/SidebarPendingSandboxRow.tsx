@@ -1,0 +1,161 @@
+import { useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  type PendingSandboxThread,
+  SANDBOX_STATUS_LABEL,
+  sandboxLaunchStatusLabel,
+  sandboxPresence,
+} from "@t3tools/client-runtime/state/sandboxes";
+import type { SandboxView } from "@t3tools/contracts";
+import { useGT } from "gt-react";
+import { CircleAlertIcon, CircleDashedIcon, MoonIcon } from "lucide-react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  memo,
+} from "react";
+
+import { cn } from "~/lib/utils";
+import { deriveProjectIdentity } from "../../projectIdentity";
+import { ProjectMonogram } from "../ProjectMonogram";
+import { animateSidebarLayoutChanges, resolveSidebarRowAccessibility } from "../Sidebar.logic";
+
+/** Where a pending sandbox stands, as its row shows it. */
+function pendingStatus(view: SandboxView, gt: ReturnType<typeof useGT>) {
+  switch (sandboxPresence(view)) {
+    case "failed":
+      return {
+        label: SANDBOX_STATUS_LABEL.failed,
+        icon: <CircleAlertIcon aria-hidden className="size-4 shrink-0" />,
+        className: "text-error",
+      };
+    case "asleep":
+      return {
+        label: gt("Asleep"),
+        icon: <MoonIcon aria-hidden className="size-3.5 shrink-0" />,
+        className: "text-muted-foreground",
+      };
+    default:
+      return {
+        label: sandboxLaunchStatusLabel(view.status),
+        icon: <CircleDashedIcon aria-hidden className="size-4 shrink-0" />,
+        className: "text-info",
+      };
+  }
+}
+
+/**
+ * Placeholder sidebar row for a sandbox whose thread this device has not listed yet.
+ * Participates in sortable layout shifts without being draggable.
+ */
+export const SidebarPendingSandboxRow = memo(function SidebarPendingSandboxRow(props: {
+  sortableId: string;
+  pending: PendingSandboxThread;
+  /** The title the sandbox's project will have, which its icon is drawn from. */
+  projectTitle: string;
+  projectDisplayName: string;
+  isActive: boolean;
+  onNavigate: (pending: PendingSandboxThread) => void;
+  onContextMenu: (pending: PendingSandboxThread, position: { x: number; y: number }) => void;
+}) {
+  const gt = useGT();
+  const { pending, onContextMenu, onNavigate } = props;
+  const { setNodeRef, transform, transition } = useSortable({
+    id: props.sortableId,
+    disabled: { draggable: true },
+    animateLayoutChanges: animateSidebarLayoutChanges,
+  });
+  const projectIdentity = deriveProjectIdentity(props.projectTitle);
+  const status = pendingStatus(pending.view, gt);
+  // Mirrors a working thread: background progress recedes until it needs the user.
+  const recede = sandboxPresence(pending.view) !== "failed" && !props.isActive;
+  const accessibility = resolveSidebarRowAccessibility({
+    title: pending.view.title,
+    statusLabel: status.label,
+    projectDisplayName: props.projectDisplayName,
+    isActive: props.isActive,
+  });
+  const handleKeyDown = (event: ReactKeyboardEvent) => {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      event.preventDefault();
+      const rect = event.currentTarget.getBoundingClientRect();
+      onContextMenu(pending, { x: rect.left, y: rect.bottom });
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onNavigate(pending);
+    }
+  };
+  const handleContextMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    onContextMenu(pending, { x: event.clientX, y: event.clientY });
+  };
+
+  return (
+    <li
+      ref={setNodeRef}
+      data-thread-selection-safe
+      className="list-none py-0.5"
+      style={{
+        transform: CSS.Translate.toString(transform),
+        transition,
+        visibility: transform?.scaleY === 0 ? "hidden" : undefined,
+      }}
+    >
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={accessibility.label}
+        aria-current={accessibility.current}
+        data-testid="sidebar-pending-sandbox-row"
+        className={cn(
+          "group/sidebar-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          props.isActive
+            ? "bg-sidebar-row-active text-sidebar-foreground"
+            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+          recede &&
+            "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
+        )}
+        onClick={() => onNavigate(pending)}
+        onContextMenu={handleContextMenu}
+        onKeyDown={handleKeyDown}
+      >
+        <span className="sr-only">{pending.view.title}</span>
+        <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
+          <div className="flex h-5 min-w-0 items-center gap-1.5">
+            <ProjectMonogram
+              text={projectIdentity.monogram}
+              color={projectIdentity.color}
+              className="size-4 shrink-0"
+            />
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-secondary-label text-xs",
+                recede ? "font-normal" : "font-medium",
+              )}
+            >
+              {props.projectDisplayName}
+            </span>
+            <span
+              className={cn(
+                "ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-medium",
+                status.className,
+              )}
+            >
+              {status.icon}
+              <span role="status">{status.label}</span>
+            </span>
+          </div>
+          <div
+            aria-hidden
+            className={cn(
+              "mt-1 truncate text-sm",
+              recede ? "font-normal text-secondary-label" : "font-medium text-foreground/95",
+            )}
+          >
+            {pending.view.title}
+          </div>
+        </div>
+      </div>
+    </li>
+  );
+});

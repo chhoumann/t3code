@@ -36,6 +36,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentCatalog } from "../connection/catalog";
 import { assetEnvironment } from "../state/assets";
 import { attachmentEnvironment } from "../state/attachments";
+import { sandboxSleeps } from "../state/sandboxes";
 import { readEnvironmentScope, readPreparedConnection } from "../state/session";
 import type { AttachmentUploadState, ReadyAttachmentUpload } from "./attachmentUploadState";
 import { m } from "../i18n/messages";
@@ -355,6 +356,8 @@ export function startAttachmentUpload(input: {
   readonly force?: boolean;
 }): void {
   if (!canOperate(input.environmentId)) return;
+  // A sandbox that sleeps takes no uploads: sending wakes it first, then uploads.
+  if (sandboxSleeps(input.environmentId)) return;
   const existingHold = heldUploads.get(input.image.id);
   if (existingHold?.job.environmentId === input.environmentId) {
     return;

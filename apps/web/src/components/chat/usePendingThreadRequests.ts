@@ -3,7 +3,6 @@ import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
-  AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ProviderApprovalDecision,
   type RuntimeRequestId,
@@ -59,12 +58,11 @@ import {
   derivePendingUserInputs,
   type PendingUserInput,
 } from "../../session-logic";
-import { readEnvironmentScope } from "../../state/session";
+import { readCanSendWork } from "../../state/sandboxes";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { useWorkCommand } from "../../state/use-orchestration-command";
 import { toastManager } from "../ui/toast";
-
 import type { ChatComposerHandle } from "./ChatComposer";
 
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
@@ -294,10 +292,10 @@ export function usePendingThreadRequests(input: {
     composerRef,
     setThreadError,
   } = input;
-  const respondToThreadApproval = useOrchestrationCommand(threadEnvironment.respondToApproval, {
+  const respondToThreadApproval = useWorkCommand(threadEnvironment.respondToApproval, {
     reportFailure: false,
   });
-  const respondToThreadUserInput = useOrchestrationCommand(threadEnvironment.respondToUserInput, {
+  const respondToThreadUserInput = useWorkCommand(threadEnvironment.respondToUserInput, {
     reportFailure: false,
   });
   const dismissThreadUserInput = useAtomCommand(threadEnvironment.dismissUserInput, {
@@ -356,8 +354,7 @@ export function usePendingThreadRequests(input: {
     decision: ProviderApprovalDecision,
     feedback?: string,
   ) => {
-    if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
-      return;
+    if (!activeThreadId || !readCanSendWork(environmentId)) return;
     if (
       pendingApprovals.find((approval) => approval.requestId === requestId)?.responseCapability !==
       "live"
@@ -392,8 +389,7 @@ export function usePendingThreadRequests(input: {
     requestId: RuntimeRequestId,
     answers: Record<string, unknown>,
   ) => {
-    if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
-      return;
+    if (!activeThreadId || !readCanSendWork(environmentId)) return;
     const pendingInput = pendingUserInputs.find((input) => input.requestId === requestId);
     if (!pendingInput || pendingInput.responseCapability === "not_resumable") return;
     const responseKey = JSON.stringify([environmentId, activeThreadId, requestId]);

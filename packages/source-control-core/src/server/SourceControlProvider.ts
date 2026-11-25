@@ -103,20 +103,7 @@ export function sourceControlRefFromInput(input: {
   return input.source ?? parseSourceControlOwnerRef(input.headSelector);
 }
 
-export function repositoryPathFromRemoteUrl(url: string | null): string | null {
-  const remote = url?.trim() ?? "";
-  const trimmed = /^(?:ssh|https?|git):\/\//iu.test(remote) ? remote.split(/[?#]/u, 1)[0]! : remote;
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  const match =
-    /^(?:[^@/\s]+@[^:/\s]+:|[^@:/\\\s]{2,}:(?!:)|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
-      trimmed,
-    );
-  const path = match?.[1]?.trim() ?? "";
-  return path.length > 0 ? path : null;
-}
+export { repositoryPathFromRemoteUrl } from "@t3tools/shared/git";
 
 export class SourceControlProvider extends Context.Service<
   SourceControlProvider,

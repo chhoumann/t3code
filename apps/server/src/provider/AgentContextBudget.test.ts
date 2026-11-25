@@ -42,6 +42,7 @@ import { ProjectSetupScriptRunner } from "../project/ProjectSetupScriptRunner.ts
 import { IssueService } from "../issue/IssueService.ts";
 import { PullRequestReviewGuideService } from "../pullRequest/PullRequestReviewGuideService.ts";
 import { PullRequestService } from "../pullRequest/PullRequestService.ts";
+import { SandboxService } from "../sandbox/SandboxService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import { SecretRequests } from "../secrets/SecretRequests.ts";
 import { FeedbackStore } from "../feedback/FeedbackStore.ts";
@@ -86,6 +87,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(PullRequestService)({}),
   Layer.mock(GitManager)({}),
   Layer.mock(RemoteDelegation)({}),
+  Layer.mock(SandboxService)({}),
   Layer.mock(ScheduledTaskService)({}),
   Layer.mock(SecretRequests)({}),
   Layer.mock(FeedbackStore)({}),

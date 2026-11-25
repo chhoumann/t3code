@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   runAtomCommand: vi.fn(),
   readEnvironmentScope: vi.fn(),
   readPreparedConnection: vi.fn(),
+  sandboxSleeps: vi.fn(),
   // Verification and minting run as Effects; tests steer them with the settled results above.
   settledEffect: (
     Effect: typeof import("effect/Effect"),
@@ -73,6 +74,8 @@ vi.mock("../state/attachments", async () => {
     },
   };
 });
+
+vi.mock("../state/sandboxes", () => ({ sandboxSleeps: mocks.sandboxSleeps }));
 
 vi.mock("../state/session", () => ({
   readEnvironmentScope: mocks.readEnvironmentScope,
@@ -202,6 +205,7 @@ describe("attachmentUploadQueue", () => {
     mocks.executeAtomQuery.mockResolvedValue({ _tag: "Success", value: {} });
     mocks.runAtomCommand.mockReset();
     mocks.readEnvironmentScope.mockReset().mockReturnValue(true);
+    mocks.sandboxSleeps.mockReset().mockReturnValue(false);
     mocks.readPreparedConnection.mockReset();
     mocks.readPreparedConnection.mockReturnValue({ httpBaseUrl: "https://environment.test/" });
     mocks.runAtomCommand.mockImplementation(
@@ -235,6 +239,24 @@ describe("attachmentUploadQueue", () => {
       releaseAttachmentUpload(imageId);
     }
     vi.unstubAllGlobals();
+  });
+
+  it("sends nothing to a sandbox that sleeps until it is awake", async () => {
+    const image = makeFile("asleep");
+    mocks.sandboxSleeps.mockImplementation((environmentId) => environmentId === firstEnvironment);
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+    expect(TestXmlHttpRequest.requests).toHaveLength(0);
+    expect(readAttachmentUpload(image.id)).toBeUndefined();
+
+    mocks.sandboxSleeps.mockReturnValue(false);
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+    const settled = awaitAttachmentUploads([image.id]);
+    TestXmlHttpRequest.requests[0]!.complete();
+    await settled;
+    expect(TestXmlHttpRequest.requests).toHaveLength(1);
+    expect(readAttachmentUpload(image.id)?.status).toBe("ready");
   });
 
   it("reuploads an expired image while retaining other ready images", async () => {

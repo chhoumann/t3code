@@ -55,6 +55,9 @@ const EMPTY_THREAD_REFS_ATOM = Atom.make(EMPTY_THREAD_REFS).pipe(
 const EMPTY_THREAD_SHELLS_ATOM = Atom.make<ReadonlyArray<EnvironmentThreadShell>>(
   Object.freeze([]),
 ).pipe(Atom.withLabel("web-thread-shells:empty"));
+const EMPTY_ENVIRONMENT_THREADS_ATOM = Atom.make<ReadonlyArray<OrchestrationV2ThreadShell>>(
+  Object.freeze([]),
+).pipe(Atom.withLabel("web-environment-threads:empty"));
 const EMPTY_THREAD_SHELL_ATOM = Atom.make<EnvironmentThreadShell | null>(null).pipe(
   Atom.withLabel("web-thread-shell:empty"),
 );
@@ -97,6 +100,17 @@ export function useEnvironmentThreadRefs(
     environmentId === null
       ? EMPTY_THREAD_REFS_ATOM
       : environmentThreadShells.environmentThreadRefsAtom(environmentId),
+  );
+}
+
+/** One environment's thread shells as its server lists them. */
+export function useEnvironmentThreads(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<OrchestrationV2ThreadShell> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_ENVIRONMENT_THREADS_ATOM
+      : environmentThreadShells.environmentThreadsAtom(environmentId),
   );
 }
 
@@ -355,6 +369,16 @@ export function waitForThreadShell(ref: ScopedThreadRef, timeoutMs = 5_000): Pro
   return waitForAtomValue({
     registry: appAtomRegistry,
     atom: environmentThreadShells.threadShellAtom(ref),
+    predicate: (thread) => thread !== null,
+    timeoutMs,
+  });
+}
+
+/** Resolves whether the thread's detail reached this client within `timeoutMs`. */
+export function waitForThreadDetail(ref: ScopedThreadRef, timeoutMs: number): Promise<boolean> {
+  return waitForAtomValue({
+    registry: appAtomRegistry,
+    atom: environmentThreadDetails.threadAtom(ref),
     predicate: (thread) => thread !== null,
     timeoutMs,
   });

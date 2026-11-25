@@ -117,6 +117,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as ProjectProvisioning from "./project/ProjectProvisioning.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import * as AcpRegistrySessions from "./provider/AcpRegistrySessions.ts";
@@ -130,6 +131,9 @@ import * as IssueService from "./issue/IssueService.ts";
 import * as ThreadIssueService from "./orchestration-v2/ThreadIssueService.ts";
 import * as IssueTrackerConnections from "./issue/IssueTrackerConnections.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
+import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
+import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
+import * as SandboxService from "./sandbox/SandboxService.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -873,6 +877,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({}),
   Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({}),
   Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+  Layer.mock(ProjectProvisioning.ProjectProvisioning)({}),
   Layer.mock(ProjectService.ProjectService)({}),
   Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
@@ -884,6 +889,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
   Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({}),
   Layer.mock(PullRequestService.PullRequestService)({}),
+  Layer.mock(SandboxAccounts.SandboxAccounts)({}),
+  Layer.mock(SandboxService.SandboxService)({}),
+  Layer.mock(GitHubAppConnection.GitHubAppConnectionSetup)({}),
   Layer.mock(IssueService.IssueService)({}),
   Layer.mock(ThreadIssueService.ThreadIssueService)({}),
   Layer.mock(IssueTrackerConnections.IssueTrackerConnections)({}),

@@ -2,6 +2,7 @@ import {
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
+  setConnectionDormantInCatalog,
   setConnectionEnabledInCatalog,
   setRoutesInCatalog,
   removeCatalogValue,
@@ -29,10 +30,12 @@ function targetPersistenceError(
   operation:
     | "list-targets"
     | "list-disabled-targets"
+    | "list-dormant-targets"
     | "register-connection"
     | "set-connection-routes"
     | "remove-connection"
-    | "set-connection-enabled",
+    | "set-connection-enabled"
+    | "set-connection-dormant",
   error: ConnectionTransientError,
 ) {
   return new Persistence.ConnectionPersistenceError({
@@ -58,6 +61,10 @@ export const layer = Layer.effectContext(
       listDisabled: catalog.read.pipe(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((error) => targetPersistenceError("list-disabled-targets", error)),
+      ),
+      listDormant: catalog.read.pipe(
+        Effect.map((document) => document.dormantEnvironmentIds),
+        Effect.mapError((error) => targetPersistenceError("list-dormant-targets", error)),
       ),
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
@@ -86,6 +93,14 @@ export const layer = Layer.effectContext(
             .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
             .pipe(
               Effect.mapError((error) => targetPersistenceError("set-connection-enabled", error)),
+            ),
+      ),
+      setDormant: Effect.fn("Persistence.ConnectionRegistrationStore.setDormant")(
+        (environmentId, dormant) =>
+          catalog
+            .update((document) => setConnectionDormantInCatalog(document, environmentId, dormant))
+            .pipe(
+              Effect.mapError((error) => targetPersistenceError("set-connection-dormant", error)),
             ),
       ),
     });

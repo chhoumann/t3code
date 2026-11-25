@@ -1,5 +1,8 @@
 import type {
   BranchNamingOptions,
+  GitRemote,
+  RepositoryIdentity,
+  SourceControlProviderInfo,
   VcsRef,
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
@@ -348,6 +351,101 @@ export function dedupeRemoteBranchesWithLocalMatches(
   });
 }
 
+/**
+ * How a source control registry reads remotes. Its `repositoryKeyFromRemote` is the persisted
+ * spelling of a repository, so helpers here that key repositories take one.
+ */
+export interface RemoteRecognizer {
+  readonly recognizeRemote: (remoteUrl: string) => SourceControlProviderInfo | null;
+  readonly repositoryKeyFromRemote: (remoteUrl: string) => string;
+}
+
+/** Each remote and its fetch URL, from `git remote -v`. */
+export function parseRemoteFetchUrls(stdout: string): GitRemote[] {
+  const remotes: GitRemote[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    // Git uses a tab before the URL and one space before the direction; both can occur in URLs.
+    // Partial clones append the promisor filter, e.g. `(fetch) [blob:none]`.
+    const match =
+      /^(\S+)\t(.+) \(fetch\)(?:\s+\[[^\]]+\])?$/.exec(line) ??
+      /^(\S+)\s+(\S+)\s+\(fetch\)(?:\s+\[[^\]]+\])?$/.exec(line.trim());
+    const name = match?.[1];
+    const url = match?.[2];
+    if (name && url) remotes.push({ name, url });
+  }
+  return remotes;
+}
+
+/** The `owner/name` path in a remote URL, as the URL spells it. */
+export function repositoryPathFromRemoteUrl(url: string | null): string | null {
+  const remote = url?.trim() ?? "";
+  const trimmed = /^(?:ssh|https?|git):\/\//iu.test(remote) ? remote.split(/[?#]/u, 1)[0]! : remote;
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const match =
+    /^(?:[^@/\s]+@[^:/\s]+:|[^@:/\\\s]{2,}:(?!:)|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
+      trimmed,
+    );
+  const path = match?.[1]?.trim() ?? "";
+  return path.length > 0 ? path : null;
+}
+
+/** The remote a checkout's repository identity names: `upstream`, then `origin`, then the first by name. */
+export function pickPrimaryRemote<R extends GitRemote>(remotes: Arr.NonEmptyReadonlyArray<R>): R {
+  return (
+    remotes.find((remote) => remote.name === "upstream") ??
+    remotes.find((remote) => remote.name === "origin") ??
+    remotes.reduce((first, remote) => (remote.name.localeCompare(first.name) < 0 ? remote : first))
+  );
+}
+
+function repositoryPathOf(canonicalKey: string, remoteUrl: string): string {
+  const canonicalPath = canonicalKey.split("/").slice(1).join("/");
+  const displayPath = repositoryPathFromRemoteUrl(remoteUrl);
+  return displayPath?.toLowerCase() === canonicalPath ? displayPath : canonicalPath;
+}
+
+/**
+ * A checkout's repository identity, read from its remotes: the one
+ * `pickPrimaryRemote` names, and `origin` when that is another repository.
+ */
+export function repositoryIdentityFromRemotes(
+  remotes: Arr.NonEmptyReadonlyArray<GitRemote>,
+  recognizer: RemoteRecognizer,
+): RepositoryIdentity {
+  const primary = pickPrimaryRemote(remotes);
+  const canonicalKey = recognizer.repositoryKeyFromRemote(primary.url);
+  const sourceControlProvider = recognizer.recognizeRemote(primary.url);
+  const repositoryPath = repositoryPathOf(canonicalKey, primary.url);
+  const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
+  const [owner] = repositoryPathSegments;
+  const repositoryName = repositoryPathSegments.at(-1);
+  const originUrl = remotes.find((remote) => remote.name === "origin")?.url;
+  const originKey =
+    originUrl === undefined ? canonicalKey : recognizer.repositoryKeyFromRemote(originUrl);
+  const originPath = originUrl === undefined ? "" : repositoryPathOf(originKey, originUrl);
+
+  return {
+    canonicalKey,
+    locator: { source: "git-remote", remoteName: primary.name, remoteUrl: primary.url },
+    ...(repositoryPath ? { displayName: repositoryPath } : {}),
+    ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
+    ...(owner ? { owner } : {}),
+    ...(repositoryName ? { name: repositoryName } : {}),
+    ...(originUrl === undefined || originKey === canonicalKey
+      ? {}
+      : {
+          origin: {
+            canonicalKey: originKey,
+            remoteUrl: originUrl,
+            ...(originPath ? { displayName: originPath } : {}),
+          },
+        }),
+  };
+}
+
 const EMPTY_GIT_STATUS_REMOTE: VcsStatusRemoteResult = {
   hasUpstream: false,
   aheadCount: 0,
@@ -385,9 +483,15 @@ function toLocalStatusPart(status: VcsStatusResult): VcsStatusLocalResult {
       ? { sourceControlProvider: status.sourceControlProvider }
       : {}),
     hasPrimaryRemote: status.hasPrimaryRemote,
+    ...(status.remotes === undefined ? {} : { remotes: status.remotes }),
+    ...(status.trackedRemote === undefined ? {} : { trackedRemote: status.trackedRemote }),
     isDefaultRef: status.isDefaultRef,
     refName: status.refName,
+    ...(status.headCommit === undefined ? {} : { headCommit: status.headCommit }),
     hasWorkingTreeChanges: status.hasWorkingTreeChanges,
+    ...(status.hasTrackedChanges === undefined
+      ? {}
+      : { hasTrackedChanges: status.hasTrackedChanges }),
     workingTree: status.workingTree,
     ...(status.branchChanges ? { branchChanges: status.branchChanges } : {}),
   };

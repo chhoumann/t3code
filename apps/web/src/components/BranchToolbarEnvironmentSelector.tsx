@@ -5,11 +5,15 @@ import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { PlusIcon, ScaleIcon } from "lucide-react";
+import { BoxIcon, PlusIcon, ScaleIcon } from "lucide-react";
 import { memo } from "react";
 import { T, useGT } from "gt-react";
 
-import { ADD_TO_MACHINE_LABEL_CLASS, type EnvironmentOption } from "./BranchToolbar.logic";
+import {
+  ADD_TO_MACHINE_LABEL_CLASS,
+  type EnvironmentOption,
+  type SandboxRunChoice,
+} from "./BranchToolbar.logic";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
@@ -18,6 +22,7 @@ import {
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
+  SelectSeparator,
   SelectValue,
 } from "./ui/select";
 
@@ -29,7 +34,13 @@ interface BranchToolbarEnvironmentSelectorProps {
   availableEnvironments: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   onAddToMachine?: (() => void) | undefined;
+  sandboxChoices?: readonly SandboxRunChoice[] | undefined;
+  /** The chosen sandbox entry's value, replacing the environment as the selection. */
+  activeSandboxValue?: string | null | undefined;
+  onSandboxChoose?: ((choice: SandboxRunChoice) => void) | undefined;
 }
+
+const EMPTY_SANDBOX_CHOICES: readonly SandboxRunChoice[] = [];
 
 // Action values cannot collide with server-minted environment IDs.
 const AUTO_VALUE = "action:auto";
@@ -44,6 +55,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   availableEnvironments,
   onEnvironmentChange,
   onAddToMachine,
+  sandboxChoices = EMPTY_SANDBOX_CHOICES,
+  activeSandboxValue = null,
+  onSandboxChoose,
 }: BranchToolbarEnvironmentSelectorProps) {
   const gt = useGT();
   const composerFloatingLayerProps = useComposerMenuProps();
@@ -53,6 +67,8 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   );
   const activeEnvironment =
     availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
+  const activeSandbox =
+    sandboxChoices.find((choice) => choice.value === activeSandboxValue) ?? null;
 
   const environmentItems = [
     ...(onAutoEnvironment
@@ -63,6 +79,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       label: env.label,
     })),
     ...(onAddToMachine ? [{ value: ADD_MACHINE_VALUE, label: gt("Add to another machine") }] : []),
+    ...sandboxChoices.map((choice) => ({ value: choice.value, label: choice.label })),
   ];
 
   // Match the xs control's height and padding: the composer strip has no min-height,
@@ -91,9 +108,15 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   return (
     <Select
       modal={false}
-      value={autoEnvironmentLabel ? AUTO_VALUE : environmentValue(environmentId)}
+      value={
+        activeSandbox?.value ??
+        (autoEnvironmentLabel ? AUTO_VALUE : environmentValue(environmentId))
+      }
       onValueChange={(value) => {
-        if (value === ADD_MACHINE_VALUE) {
+        const sandbox = sandboxChoices.find((choice) => choice.value === value);
+        if (sandbox) {
+          onSandboxChoose?.(sandbox);
+        } else if (value === ADD_MACHINE_VALUE) {
           onAddToMachine?.();
         } else if (value === AUTO_VALUE) {
           onAutoEnvironment?.();
@@ -115,7 +138,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             />
           }
         >
-          {autoEnvironmentLabel ? (
+          {activeSandbox ? (
+            <BoxIcon className="size-3 shrink-0" aria-hidden="true" />
+          ) : autoEnvironmentLabel ? (
             <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
           ) : (
             <EnvironmentMachineIcon
@@ -128,7 +153,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           </ComposerContextLabel>
         </TooltipTrigger>
         <TooltipPopup>
-          {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+          {activeSandbox?.label ?? autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
           {shortcutLabel ? ` · ${shortcutLabel}` : null}
         </TooltipPopup>
       </Tooltip>
@@ -171,6 +196,21 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             </SelectItem>
           ) : null}
         </SelectGroup>
+        {sandboxChoices.length > 0 ? (
+          <>
+            <SelectSeparator />
+            <SelectGroup>
+              {sandboxChoices.map((choice) => (
+                <SelectItem key={choice.value} value={choice.value}>
+                  <span className="inline-flex items-center gap-1.5">
+                    <BoxIcon className="size-3" aria-hidden="true" />
+                    {choice.label}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </>
+        ) : null}
       </SelectPopup>
     </Select>
   );

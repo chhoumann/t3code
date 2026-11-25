@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- rmdir(2) has no Effect counterpart. `remove` takes a directory only recursively.
+import * as NodeFSP from "node:fs/promises";
+
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -12,6 +15,9 @@ import {
   SourceControlProviderError,
   SourceControlRepositoryError,
   type GitCommandFailureReason,
+  type ProjectCloneBase,
+  type ProjectCloneCheckout,
+  type SandboxBase,
   type SourceControlCloneRepositoryInput,
   type SourceControlCloneRepositoryResult,
   type SourceControlCloneProtocol,
@@ -35,6 +41,7 @@ import {
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+import { sourceControlDefinitions } from "./sourceControlDefinitions.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { cloneUrlForProtocol, cloneUrlProtocol } from "@t3tools/shared/cloneUrl";
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
@@ -49,11 +56,17 @@ export class SourceControlRepositoryService extends Context.Service<
     ) => Effect.Effect<SourceControlRepositoryInfo, SourceControlRepositoryError>;
     readonly prepareClone: (
       input: SourceControlCloneRepositoryInput,
+      options?: SourceControlCloneCheckoutOptions,
     ) => Effect.Effect<SourceControlPreparedClone, SourceControlRepositoryError>;
+    /**
+     * Clones into a staging directory and renames it into place when complete,
+     * or adopts an existing clone of the same repository and optionally pins a base.
+     */
     readonly cloneRepository: (
       input: SourceControlCloneRepositoryInput,
       options?: SourceControlCloneOptions,
-    ) => Effect.Effect<SourceControlCloneRepositoryResult, SourceControlRepositoryError>;
+    ) => Effect.Effect<SourceControlCloneResult, SourceControlRepositoryError>;
+    /** Removes the staging clone of `destinationPath`; a published destination is never touched. */
     readonly discardClone: (
       destinationPath: string,
     ) => Effect.Effect<void, SourceControlRepositoryError>;
@@ -68,12 +81,36 @@ export interface SourceControlPreparedClone {
   readonly remoteUrl: string;
   readonly cloneUrl: string;
   readonly repository: SourceControlRepositoryInfo | null;
+  /** The origin of the clone of this repository already at the destination, which `adopt` takes; null to clone. */
+  readonly adoptedOrigin: string | null;
 }
 
-export interface SourceControlCloneOptions {
+export interface SourceControlCloneCheckoutOptions {
+  readonly checkout?: ProjectCloneCheckout;
+  /**
+   * Takes a clone of the same repository at the destination rather than refuse
+   * a non-empty one. A retry keeps the origin of the clone it published, which
+   * is the URL git could reach; a template's clone is retargeted to the request.
+   */
+  readonly adopt?: "keep-origin" | "retarget-origin";
+}
+
+export type SourceControlCloneAdoption = NonNullable<SourceControlCloneCheckoutOptions["adopt"]>;
+
+export interface SourceControlCloneOptions extends SourceControlCloneCheckoutOptions {
   readonly onProgress?: (line: GitCloneProgressLine) => Effect.Effect<void>;
   /** Overrides the default clone budget; `null` disables the deadline. */
   readonly timeoutMs?: number | null;
+}
+
+export interface SourceControlCloneResult extends SourceControlCloneRepositoryResult {
+  /** Present when a `checkout` was asked for. */
+  readonly base?: ProjectCloneBase;
+}
+
+/** Where a clone of `destinationPath` is made before it is moved into place. */
+function cloneStagingPath(path: Path.Path, destinationPath: string): string {
+  return path.join(path.dirname(destinationPath), `.${path.basename(destinationPath)}.t3-clone`);
 }
 
 // Older/mobile synchronous RPCs need deadlines; tracked clones use progress and Cancel instead.
@@ -257,50 +294,78 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
+  const cloneError = (detail: string, cause?: unknown) =>
+    new SourceControlRepositoryError({
+      operation: "cloneRepository",
+      provider: SourceControlProviderKind.make("unknown"),
+      detail,
+      ...(cause === undefined ? {} : { cause }),
+    });
+
+  const inspectDestination = Effect.fn("SourceControlRepositoryService.inspectDestination")(
     function* (destinationPath: string) {
       const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
+      const parentPath = path.dirname(normalizedDestination);
       if (yield* fileSystem.exists(normalizedDestination)) {
         const entries = yield* fileSystem
           .readDirectory(normalizedDestination, { recursive: false })
           .pipe(
-            Effect.mapError(
-              (cause) =>
-                new SourceControlRepositoryError({
-                  operation: "cloneRepository",
-                  provider: SourceControlProviderKind.make("unknown"),
-                  detail: "Destination path already exists and is not a directory.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cloneError("Destination path already exists and is not a directory.", cause),
             ),
           );
-        if (entries.length > 0) {
-          return yield* new SourceControlRepositoryError({
-            operation: "cloneRepository",
-            provider: SourceControlProviderKind.make("unknown"),
-            detail: "Destination path already exists and is not empty.",
-          });
-        }
-      } else {
-        // Skip existing parents: recursive mkdir on a Windows drive root fails with EPERM.
-        const parentPath = path.dirname(normalizedDestination);
-        if (!(yield* fileSystem.exists(parentPath))) {
-          yield* fileSystem.makeDirectory(parentPath, { recursive: true });
-        }
+        return { destinationPath: normalizedDestination, parentPath, entries };
       }
-
+      // Skip existing parents: recursive mkdir on a Windows drive root fails with EPERM.
+      if (!(yield* fileSystem.exists(parentPath))) {
+        yield* fileSystem.makeDirectory(parentPath, { recursive: true });
+      }
       return {
         destinationPath: normalizedDestination,
-        parentPath: path.dirname(normalizedDestination),
-        directoryName: path.basename(normalizedDestination),
+        parentPath,
+        entries: [] as ReadonlyArray<string>,
       };
+    },
+  );
+
+  /**
+   * Whether a non-empty destination is a clone of `remoteUrl` to adopt. Only a
+   * caller that asked to reuse one may; a clone of another repository is
+   * refused and left as it is.
+   */
+  const adoptsDestination = Effect.fn("SourceControlRepositoryService.adoptsDestination")(
+    function* (
+      destination: { readonly destinationPath: string; readonly entries: ReadonlyArray<string> },
+      remoteUrl: string,
+      adopt: boolean,
+    ) {
+      if (destination.entries.length === 0) return null;
+      if (!adopt || !destination.entries.includes(".git")) {
+        return yield* cloneError("Destination path already exists and is not empty.");
+      }
+      const origin = yield* git
+        .execute({
+          operation: "SourceControlRepositoryService.adoptsDestination",
+          cwd: destination.destinationPath,
+          args: ["remote", "get-url", "origin"],
+          allowNonZeroExit: true,
+        })
+        .pipe(
+          Effect.mapError((cause) => cloneError("The existing clone could not be read.", cause)),
+        );
+      const key = sourceControlDefinitions.repositoryKeyFromRemote;
+      if (origin.exitCode !== 0 || key(origin.stdout.trim()) !== key(remoteUrl)) {
+        return yield* cloneError("Destination path holds a clone of another repository.");
+      }
+      return redactRemoteUrl(origin.stdout.trim());
     },
   );
 
   const prepareClone = Effect.fn("SourceControlRepositoryService.prepareClone")(function* (
     input: SourceControlCloneRepositoryInput,
+    options?: SourceControlCloneCheckoutOptions,
   ) {
-    const preparedDestination = yield* prepareDestination(input.destinationPath);
+    const destination = yield* inspectDestination(input.destinationPath);
     let repository: SourceControlRepositoryInfo | null = null;
     let remoteUrl = input.remoteUrl?.trim() ?? null;
     let provider: SourceControlProviderKind =
@@ -310,7 +375,7 @@ export const make = Effect.gen(function* () {
       repository = yield* lookupRepository({
         provider: input.provider,
         repository: input.repository,
-        cwd: preparedDestination.parentPath,
+        cwd: destination.parentPath,
       });
       remoteUrl = selectRemoteUrl(repository, input.protocol);
       provider = input.provider;
@@ -324,11 +389,17 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const redactedUrl = redactRemoteUrl(remoteUrl);
     return {
-      destinationPath: preparedDestination.destinationPath,
-      remoteUrl: redactRemoteUrl(remoteUrl),
+      destinationPath: destination.destinationPath,
+      remoteUrl: redactedUrl,
       cloneUrl: remoteUrl,
       repository,
+      adoptedOrigin: yield* adoptsDestination(
+        destination,
+        redactedUrl,
+        options?.adopt !== undefined,
+      ),
     } satisfies SourceControlPreparedClone;
   });
 
@@ -442,37 +513,171 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const removeStaging = (stagingPath: string) =>
+    fileSystem.remove(stagingPath, { recursive: true, force: true }).pipe(
+      // An interrupted git may still be closing files, so removal retries briefly.
+      Effect.retry({ schedule: Schedule.spaced("200 millis"), times: 5 }),
+      Effect.mapError((cause) => cloneError("The partial clone could not be removed.", cause)),
+    );
+
+  /**
+   * Moves the staged clone to the destination, removing an empty placeholder dir first
+   * because rename(2) does not replace one on Windows; rmdir refuses non-empty dirs.
+   */
+  const publishClone = Effect.fn("SourceControlRepositoryService.publishClone")(function* (
+    stagingPath: string,
+    destinationPath: string,
+  ) {
+    yield* Effect.tryPromise({
+      try: () => NodeFSP.rmdir(destinationPath),
+      catch: (cause) => ({ code: (cause as NodeJS.ErrnoException | null)?.code, cause }),
+    }).pipe(
+      Effect.catch(({ code, cause }) =>
+        code === "ENOENT"
+          ? Effect.void
+          : Effect.fail(
+              code === "ENOTEMPTY" || code === "EEXIST"
+                ? cloneError("Destination path already exists and is not empty.")
+                : cloneError("The clone could not be moved into place.", cause),
+            ),
+      ),
+    );
+    yield* fileSystem
+      .rename(stagingPath, destinationPath)
+      .pipe(
+        Effect.mapError((cause) => cloneError("The clone could not be moved into place.", cause)),
+      );
+  });
+
+  const gitStep = (
+    operation: string,
+    cwd: string,
+    args: ReadonlyArray<string>,
+    options?: { readonly timeoutMs?: number | null },
+  ) =>
+    git
+      .execute({
+        operation: `SourceControlRepositoryService.${operation}`,
+        cwd,
+        args,
+        env: CLONE_ENV,
+        allowNonZeroExit: true,
+        ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      })
+      .pipe(Effect.mapError((cause) => cloneError("The repository could not be prepared.", cause)));
+
+  /** The branch the remote's HEAD names, read live rather than from the clone's `origin/HEAD`. */
+  const remoteDefaultBranch = Effect.fn("SourceControlRepositoryService.remoteDefaultBranch")(
+    function* (cwd: string) {
+      const result = yield* gitStep("remoteDefaultBranch", cwd, [
+        "ls-remote",
+        "--symref",
+        "origin",
+        "HEAD",
+      ]);
+      const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(result.stdout)?.[1];
+      if (result.exitCode !== 0 || branch === undefined) {
+        return yield* cloneError(
+          result.exitCode === 0
+            ? "The remote has no default branch."
+            : redactUrlCredentials(result.stderr.trim()) || "The remote could not be reached.",
+        );
+      }
+      return branch;
+    },
+  );
+
+  /** Fetches the base branch once into `origin/<branch>` and pins its commit. */
+  const resolveBase = Effect.fn("SourceControlRepositoryService.resolveBase")(function* (
+    cwd: string,
+    base: SandboxBase,
+    options?: SourceControlCloneOptions,
+  ) {
+    const branch = base._tag === "branch" ? base.name : yield* remoteDefaultBranch(cwd);
+    const fetched = yield* gitStep(
+      "fetchBase",
+      cwd,
+      [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--",
+        "origin",
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ],
+      { timeoutMs: options?.timeoutMs === undefined ? CLONE_TIMEOUT_MS : options.timeoutMs },
+    );
+    if (fetched.exitCode !== 0) {
+      return yield* cloneError(
+        /couldn't find remote ref/i.test(fetched.stderr)
+          ? `The remote has no branch "${branch}".`
+          : redactUrlCredentials(fetched.stderr.trim()) ||
+              `Branch "${branch}" could not be fetched.`,
+      );
+    }
+    const resolved = yield* gitStep("resolveBase", cwd, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `refs/remotes/origin/${branch}^{commit}`,
+    ]);
+    if (resolved.exitCode !== 0) {
+      return yield* cloneError(`Branch "${branch}" has no commit.`);
+    }
+    return { branch, commit: resolved.stdout.trim() } satisfies ProjectCloneBase;
+  });
+
   const cloneRepository = Effect.fn("SourceControlRepositoryService.cloneRepository")(function* (
     input: SourceControlCloneRepositoryInput,
     options?: SourceControlCloneOptions,
   ) {
-    const prepared = yield* prepareClone(input);
-    const httpsUrl = httpsFallbackUrl(input, prepared);
-    const remoteUrl = yield* runClone(
-      input,
-      prepared.destinationPath,
-      prepared.cloneUrl,
-      options,
-    ).pipe(
-      Effect.as(prepared.remoteUrl),
-      // @effect-diagnostics-next-line catchConditionalRefailToCatchIf:off - The condition also narrows httpsUrl for the fallback closure.
-      Effect.catch((sshError) =>
-        httpsUrl === null || !isSshRejection(sshError)
-          ? Effect.fail(sshError)
-          : runClone(input, prepared.destinationPath, httpsUrl, options).pipe(
-              Effect.as(redactRemoteUrl(httpsUrl)),
-              Effect.mapError(
-                (httpsError) =>
-                  new SourceControlRepositoryError({
-                    operation: "cloneRepository",
-                    provider: sshError.provider,
-                    detail: `${sshError.detail} Cloning over HTTPS instead also failed: ${httpsError.detail}`,
-                    cause: httpsError.cause,
-                  }),
+    const prepared = yield* prepareClone(input, options);
+    let remoteUrl = prepared.remoteUrl;
+    if (prepared.adoptedOrigin !== null && options?.adopt === "keep-origin") {
+      remoteUrl = prepared.adoptedOrigin;
+    } else if (prepared.adoptedOrigin !== null) {
+      const set = yield* gitStep("adoptClone", prepared.destinationPath, [
+        "remote",
+        "set-url",
+        "origin",
+        prepared.cloneUrl,
+      ]);
+      if (set.exitCode !== 0) {
+        return yield* cloneError("The existing clone's remote could not be updated.");
+      }
+    } else {
+      const stagingPath = cloneStagingPath(path, prepared.destinationPath);
+      const httpsUrl = httpsFallbackUrl(input, prepared);
+      const cloneInto = (cloneUrl: string) =>
+        removeStaging(stagingPath).pipe(
+          Effect.andThen(runClone(input, stagingPath, cloneUrl, options)),
+        );
+      remoteUrl = yield* cloneInto(prepared.cloneUrl).pipe(
+        Effect.as(prepared.remoteUrl),
+        // @effect-diagnostics-next-line catchConditionalRefailToCatchIf:off - The condition also narrows httpsUrl for the fallback closure.
+        Effect.catch((sshError) =>
+          httpsUrl === null || !isSshRejection(sshError)
+            ? Effect.fail(sshError)
+            : cloneInto(httpsUrl).pipe(
+                Effect.as(redactRemoteUrl(httpsUrl)),
+                Effect.mapError(
+                  (httpsError) =>
+                    new SourceControlRepositoryError({
+                      operation: "cloneRepository",
+                      provider: sshError.provider,
+                      detail: `${sshError.detail} Cloning over HTTPS instead also failed: ${httpsError.detail}`,
+                      cause: httpsError.cause,
+                    }),
+                ),
               ),
-            ),
-      ),
-    );
+        ),
+      );
+      yield* publishClone(stagingPath, prepared.destinationPath);
+    }
+    const base =
+      options?.checkout === undefined
+        ? undefined
+        : yield* resolveBase(prepared.destinationPath, options.checkout.base, options);
 
     // A ref list read while the clone ran saw an unborn HEAD and no refs.
     yield* git.invalidateRefs(prepared.destinationPath);
@@ -480,51 +685,15 @@ export const make = Effect.gen(function* () {
       cwd: prepared.destinationPath,
       remoteUrl,
       repository: prepared.repository,
-    };
+      ...(base === undefined ? {} : { base }),
+    } satisfies SourceControlCloneResult;
   });
 
   const discardClone = Effect.fn("SourceControlRepositoryService.discardClone")(function* (
     destinationPath: string,
   ) {
     const normalized = yield* normalizeDestinationPath(destinationPath);
-    // Only .git-bearing partial clones may be deleted; other files arrived after the empty-directory check.
-    // Missing destinations are already discarded; other read failures must refuse removal.
-    const entries = yield* fileSystem.readDirectory(normalized).pipe(
-      Effect.catchIf(
-        (cause) => cause.reason._tag === "NotFound",
-        () => Effect.succeed<ReadonlyArray<string>>([]),
-      ),
-      Effect.mapError(
-        (cause) =>
-          new SourceControlRepositoryError({
-            operation: "discardClone",
-            provider: SourceControlProviderKind.make("unknown"),
-            detail: "The clone destination could not be inspected.",
-            cause,
-          }),
-      ),
-    );
-    if (entries.length > 0 && !entries.includes(".git")) {
-      return yield* new SourceControlRepositoryError({
-        operation: "discardClone",
-        provider: SourceControlProviderKind.make("unknown"),
-        detail: "Destination path contains files that are not from the clone.",
-      });
-    }
-    // Preserve the workspace directory after removing partial contents; retry while interrupted git closes files.
-    yield* fileSystem.remove(normalized, { recursive: true, force: true }).pipe(
-      Effect.andThen(fileSystem.makeDirectory(normalized, { recursive: true })),
-      Effect.retry({ schedule: Schedule.spaced("200 millis"), times: 5 }),
-      Effect.mapError(
-        (cause) =>
-          new SourceControlRepositoryError({
-            operation: "discardClone",
-            provider: SourceControlProviderKind.make("unknown"),
-            detail: "The partial clone could not be removed.",
-            cause,
-          }),
-      ),
-    );
+    yield* removeStaging(cloneStagingPath(path, normalized));
   });
 
   const publishRepository = Effect.fn("SourceControlRepositoryService.publishRepository")(
@@ -624,8 +793,8 @@ export const make = Effect.gen(function* () {
         mapRepositoryError("lookupRepository", input.provider),
       );
     }),
-    prepareClone: Effect.fnUntraced(function* (input) {
-      return yield* prepareClone(input).pipe(
+    prepareClone: Effect.fnUntraced(function* (input, options) {
+      return yield* prepareClone(input, options).pipe(
         mapRepositoryError(
           "cloneRepository",
           input.provider ?? SourceControlProviderKind.make("unknown"),

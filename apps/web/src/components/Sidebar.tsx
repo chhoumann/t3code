@@ -1,3 +1,4 @@
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m } from "../i18n/messages";
@@ -11,6 +12,7 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
+import { sandboxProjectTitle, sandboxRepositoryIdentity } from "@t3tools/shared/sandboxProject";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
@@ -37,7 +39,15 @@ import {
   createInboxReturnTracker,
   isThreadWorking,
 } from "@t3tools/client-runtime/state/thread-inbox";
-import { activeThreadSortKey, sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  activeThreadAnchorTimestampMs,
+  activeThreadSortKey,
+  sortSettledThreads,
+} from "@t3tools/client-runtime/state/thread-sort";
+import {
+  type PendingSandboxThread,
+  pendingSandboxThreads,
+} from "@t3tools/client-runtime/state/sandboxes";
 import {
   nextShownOrder,
   threadSearchMatchKey,
@@ -87,7 +97,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { type AnyRouter, useRouter } from "@tanstack/react-router";
+import { type AnyRouter, useParams, useRouter } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -116,6 +126,7 @@ import {
 import {
   buildSidebarProjectPickerEntries,
   projectGroupsSpanEnvironments,
+  resolveSandboxProjectGroup,
   resolveSidebarProjectScopeKeys,
   getSidebarProjectSettingsKey,
   type SidebarProjectSnapshot,
@@ -130,6 +141,8 @@ import {
   useAcknowledgeThreadWoke,
   useThreadActions,
 } from "../hooks/useThreadActions";
+import { useSandboxActions } from "../hooks/useSandboxActions";
+import { sandboxShellsAtom, sandboxes } from "../state/sandboxes";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -177,6 +190,7 @@ import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { ProjectRowActions } from "./ProjectComboboxRow";
 import {
   buildDraftActionMenuItems,
+  buildPendingSandboxMenuItems,
   buildThreadActionMenuItems,
   isThreadTriageAction,
   threadActionRequiresOperate,
@@ -208,7 +222,9 @@ import {
   resolveScopedNewThreadProjectRef,
   shouldNavigateAfterThreadPark,
   sidebarListItemId,
+  sidebarPendingSandboxKey,
   sidebarThreadKeyAtY,
+  slotPendingSandboxRows,
   sortInboxThreadsByReturn,
   sortPinnedThreadsForSidebar,
   sortThreadsForSidebar,
@@ -280,6 +296,7 @@ import {
   useDraftTerminalLabels,
   useSidebarDrafts,
 } from "./sidebar/SidebarDraftBlock";
+import { SidebarPendingSandboxRow } from "./sidebar/SidebarPendingSandboxRow";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -342,6 +359,14 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 const EMPTY_DRAFT_IDS: readonly DraftId[] = [];
+
+interface PendingSandboxRowData {
+  readonly pending: PendingSandboxThread;
+  readonly projectTitle: string;
+  readonly projectDisplayName: string;
+}
+
+const EMPTY_PENDING_SANDBOX_ROWS: ReadonlyMap<string, PendingSandboxRowData> = new Map();
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -945,6 +970,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
+  const { confirmAndDelete: confirmAndDeleteSandbox, setDesired: setSandboxDesired } =
+    useSandboxActions();
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -1021,6 +1048,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const acknowledgeWoke = useAcknowledgeThreadWoke();
   // A Settings or Usage modal keeps the thread behind it current.
   const routeTarget = useShownThreadRouteTarget().shownTarget;
+  const routeSandboxKey = useParams({
+    strict: false,
+    select: (params) =>
+      params.environmentId && params.sandboxId
+        ? sidebarPendingSandboxKey(params.environmentId, params.sandboxId)
+        : null,
+  });
   const routeDraftThread = useComposerDraftStore((store) =>
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
   );
@@ -1388,6 +1422,44 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
+  // Sandboxes stand in for their threads until this device lists those, under
+  // the project group and label their threads will show.
+  const sandboxOwners = useAtomValue(sandboxes.ownersAtom);
+  const sandboxShells = useAtomValue(sandboxShellsAtom);
+  const pendingSandboxRows = (() => {
+    const pending = pendingSandboxThreads(
+      sandboxOwners,
+      (environmentId) =>
+        threads
+          .filter((thread) => thread.environmentId === environmentId)
+          .map((thread) => thread.source),
+      (environmentId) => sandboxShells.get(environmentId) ?? null,
+    );
+    if (pending.length === 0) return EMPTY_PENDING_SANDBOX_ROWS;
+    const rows = new Map<string, PendingSandboxRowData>();
+    for (const entry of pending) {
+      const repositoryIdentity = sandboxRepositoryIdentity(entry.view.source, sourceControlClients);
+      const project = { title: sandboxProjectTitle(repositoryIdentity), repositoryIdentity };
+      const { group, label } = resolveSandboxProjectGroup({
+        groups: projectGroups,
+        mode: projectGroupingSettings.sidebarProjectGroupingMode,
+        project,
+      });
+      if (
+        scopedProjectGroups.length > 0 &&
+        (group === null ||
+          !scopedProjectGroups.some((scoped) => scoped.projectKey === group.projectKey))
+      ) {
+        continue;
+      }
+      rows.set(sidebarPendingSandboxKey(entry.ownerEnvironmentId, entry.view.id), {
+        pending: entry,
+        projectTitle: project.title,
+        projectDisplayName: label,
+      });
+    }
+    return rows;
+  })();
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
@@ -2006,7 +2078,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         activeThreads.length +
         workingThreads.length +
         snoozedThreads.length +
-        settledCount ===
+        settledCount +
+        pendingSandboxRows.size ===
         0
     ) {
       return [];
@@ -2015,7 +2088,24 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
     items.push(...pinnedRows);
     items.push({ kind: "marker", marker: "pinned-divider" });
-    const activeRows = rowsOf(activeThreads, "active");
+    // The Working beta orders the inbox by time and ignores arranged keys.
+    const activeRows = slotPendingSandboxRows(
+      activeThreads.map((thread) => ({
+        item: {
+          kind: "thread",
+          key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          section: "active",
+        },
+        anchorMs:
+          workingShelfEnabled || thread.activeOrderKey == null
+            ? activeThreadAnchorTimestampMs(thread)
+            : null,
+      })),
+      Array.from(pendingSandboxRows, ([key, row]) => ({
+        key,
+        createdAtMs: Date.parse(row.pending.view.createdAt),
+      })),
+    );
     items.push({ kind: "marker", marker: "active-placeholder" });
     items.push(...activeRows);
     if (workingThreads.length > 0) {
@@ -2034,7 +2124,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   })();
   // Preserve the list while streamed updates leave order unchanged to retain row memoization.
   const sidebarListItemsKey = sidebarListItemsFresh
-    .map((item) => (item.kind === "thread" ? item.section + ":" + item.key : item.marker))
+    .map((item) => (item.kind === "marker" ? item.marker : item.section + ":" + item.key))
     .join("\n");
   const [sidebarListItemsState, setSidebarListItems] = useState(sidebarListItemsFresh);
   const [sidebarListItemsKeyState, setSidebarListItemsKeyState] = useState(sidebarListItemsKey);
@@ -2613,6 +2703,42 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     },
   );
 
+  const navigateToPendingSandbox = useStableCallback((pending: PendingSandboxThread) => {
+    clearSelection();
+    if (isMobile) {
+      setOpenMobile(false);
+    }
+    void router.navigate({
+      to: "/sandbox/$environmentId/$sandboxId",
+      params: { environmentId: pending.ownerEnvironmentId, sandboxId: pending.view.id },
+    });
+  });
+  const handlePendingSandboxContextMenu = useStableCallback(
+    (pending: PendingSandboxThread, position: { x: number; y: number }) => {
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const { status } = pending.view;
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            buildPendingSandboxMenuItems({
+              retryable: status._tag === "failed" && status.retryable,
+            }),
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+        switch (clicked.value) {
+          case "retry":
+            await setSandboxDesired(pending, pending.view.desired);
+            return;
+          case "delete-sandbox":
+            await confirmAndDeleteSandbox(pending);
+            return;
+        }
+      })();
+    },
+  );
   const handleDraftContextMenu = useStableCallback(
     (draftId: DraftId, position: { x: number; y: number }, source: ContextMenuSource) => {
       void (async () => {
@@ -2708,6 +2834,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           timestampFormat,
           thread.environmentId,
         );
+        const sandbox = appAtomRegistry.get(sandboxes.indexAtom).get(threadRef.environmentId);
         const threadProjectGroup =
           projectGroupsRef.current.find((project) =>
             project.memberProjectRefs.some(
@@ -2740,6 +2867,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
+              isSandbox: sandbox !== undefined,
               hasCompletedRun: thread.latestRun?.completedAt != null,
               canShareWithGuest: appAtomRegistry.get(
                 canShareWithGuestAtom(threadRef.environmentId),
@@ -2943,6 +3071,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
+          case "delete-sandbox":
+            if (sandbox === undefined) return;
+            await confirmAndDeleteSandbox(sandbox);
+            return;
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -3429,6 +3561,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           {!isSearchingThreads &&
           !hasProjectFolders &&
           visibleDraftSessionCount === 0 &&
+          pendingSandboxRows.size === 0 &&
           pinnedThreads.length +
             activeThreads.length +
             workingThreads.length +
@@ -3650,6 +3783,22 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           // Folders draw active rows in their own place below.
                           if (projectFolders !== null && item.section === "active") continue;
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          continue;
+                        }
+                        if (item.kind === "sandbox") {
+                          const row = pendingSandboxRows.get(item.key)!;
+                          items.push(
+                            <SidebarPendingSandboxRow
+                              key={item.key}
+                              sortableId={item.key}
+                              pending={row.pending}
+                              projectTitle={row.projectTitle}
+                              projectDisplayName={row.projectDisplayName}
+                              isActive={routeSandboxKey === item.key}
+                              onNavigate={navigateToPendingSandbox}
+                              onContextMenu={handlePendingSandboxContextMenu}
+                            />,
+                          );
                           continue;
                         }
                         if (projectFolders !== null && item.marker === "active-placeholder") {

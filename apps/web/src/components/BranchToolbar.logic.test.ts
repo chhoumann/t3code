@@ -1,15 +1,28 @@
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import {
   EnvironmentId,
   GitCommandError,
   ProviderInstanceId,
   RunId,
+  SandboxAccountId,
+  type SandboxAccountConfig,
+  SandboxBranchName,
+  SandboxRemoteUrl,
   type VcsRef,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
+import {
+  dedupeRemoteBranchesWithLocalMatches,
+  repositoryIdentityFromRemotes,
+} from "@t3tools/shared/git";
 import {
   deriveLocalBranchNameFromRemoteRef,
+  deriveSandboxRunChoices,
   isWorktreeChangeBlocked,
+  resolveSandboxDraftSend,
+  resolveSandboxDraftSource,
+  sandboxBaseSuggestions,
+  sandboxRepositoryChoice,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
@@ -448,6 +461,206 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+const localEnvironmentId = EnvironmentId.make("environment-local");
+const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+
+describe("deriveSandboxRunChoices", () => {
+  const account = (label: string): SandboxAccountConfig => ({
+    label,
+    provider: "boat",
+    providerEnvironment: null,
+    size: "small",
+    stopAfterHours: 8,
+    machineSetupScript: null,
+    env: [],
+  });
+  const owner = (
+    environmentId: EnvironmentId,
+    label: string,
+    accounts: Record<string, SandboxAccountConfig>,
+    sandboxes = true,
+  ) => ({
+    environmentId,
+    label,
+    serverConfig: {
+      environment: { capabilities: { sandboxes } },
+      settings: { sandboxAccounts: accounts },
+    },
+  });
+
+  it("offers one entry per account, without naming a sole owner", () => {
+    expect(
+      deriveSandboxRunChoices([
+        owner(localEnvironmentId, "This device", {
+          work: account("Work"),
+          personal: account("Personal"),
+        }),
+        owner(remoteEnvironmentId, "Build box", {}),
+      ]).map((choice) => choice.label),
+    ).toEqual(["New sandbox · Personal", "New sandbox · Work"]);
+  });
+
+  it("names the owner when several environments offer accounts", () => {
+    const choices = deriveSandboxRunChoices([
+      owner(localEnvironmentId, "This device", { work: account("Work") }),
+      owner(remoteEnvironmentId, "Build box", { work: account("Work") }),
+    ]);
+    expect(choices.map((choice) => choice.label)).toEqual([
+      "New sandbox · Work on This device",
+      "New sandbox · Work on Build box",
+    ]);
+    expect(new Set(choices.map((choice) => choice.value)).size).toBe(2);
+    expect(choices[1]).toMatchObject({
+      ownerEnvironmentId: remoteEnvironmentId,
+      accountId: SandboxAccountId.make("work"),
+    });
+  });
+
+  it("skips environments that do not serve sandboxes", () => {
+    expect(
+      deriveSandboxRunChoices([
+        owner(localEnvironmentId, "This device", { work: account("Work") }, false),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("resolveSandboxDraftSend", () => {
+  const owner = EnvironmentId.make("environment-owner");
+  const work = SandboxAccountId.make("work");
+  const choice = {
+    value: `sandbox:${owner}:${work}`,
+    ownerEnvironmentId: owner,
+    accountId: work,
+    label: "New sandbox · Work",
+  };
+
+  it("launches the picked sandbox while its owner offers the account", () => {
+    expect(
+      resolveSandboxDraftSend({ ownerEnvironmentId: owner, accountId: work }, [choice]),
+    ).toEqual({ _tag: "Sandbox", choice });
+  });
+
+  it("refuses rather than runs locally while the picked owner is unavailable", () => {
+    expect(resolveSandboxDraftSend({ ownerEnvironmentId: owner, accountId: work }, [])).toEqual({
+      _tag: "Unavailable",
+    });
+  });
+
+  it("sends a draft that picked no sandbox in its own environment", () => {
+    expect(resolveSandboxDraftSend(null, [choice])).toEqual({ _tag: "Environment" });
+  });
+});
+
+describe("resolveSandboxDraftSource", () => {
+  const checkout = repositoryIdentityFromRemotes(
+    [{ name: "origin", url: "https://github.com/Example/App.git" }],
+    sourceControlClients,
+  );
+  const other = SandboxRemoteUrl.make("https://github.com/Example/Other.git");
+  const release = { _tag: "branch" as const, name: SandboxBranchName.make("release") };
+
+  it("clones the project's remote from the default branch", () => {
+    expect(resolveSandboxDraftSource({}, checkout)).toEqual({
+      remoteUrl: "https://github.com/Example/App.git",
+      base: { _tag: "default" },
+    });
+  });
+
+  it("clones the repository the draft names instead of its project's, from its base", () => {
+    expect(resolveSandboxDraftSource({ remoteUrl: other, base: release }, checkout)).toEqual({
+      remoteUrl: other,
+      base: release,
+    });
+  });
+
+  it("has no source for a project without a remote until the draft names a repository", () => {
+    expect(resolveSandboxDraftSource({ base: release }, null)).toBeNull();
+    expect(resolveSandboxDraftSource({ remoteUrl: other }, null)).toEqual({
+      remoteUrl: other,
+      base: { _tag: "default" },
+    });
+  });
+});
+
+describe("sandboxRepositoryChoice", () => {
+  const project = SandboxRemoteUrl.make("https://github.com/Example/App.git");
+
+  it("offers the project's repository while nothing is typed, and nothing without one", () => {
+    expect(sandboxRepositoryChoice("", project)).toEqual({ _tag: "project", remoteUrl: project });
+    expect(sandboxRepositoryChoice("  ", project)).toEqual({ _tag: "project", remoteUrl: project });
+    expect(sandboxRepositoryChoice("", null)).toBeNull();
+  });
+
+  it("offers only the typed repository once something is typed, as its HTTPS clone URL", () => {
+    expect(sandboxRepositoryChoice("Example/Other", project)).toEqual({
+      _tag: "typed",
+      remoteUrl: "https://github.com/Example/Other.git",
+    });
+    expect(sandboxRepositoryChoice("git@github.com:Example/Other.git", null)).toEqual({
+      _tag: "typed",
+      remoteUrl: "https://github.com/Example/Other.git",
+    });
+    expect(sandboxRepositoryChoice("~/code/other", project)).toBeNull();
+  });
+
+  it("follows the project when its own repository is typed, in any spelling", () => {
+    expect(sandboxRepositoryChoice("Example/App", project)).toEqual({
+      _tag: "project",
+      remoteUrl: project,
+    });
+    expect(sandboxRepositoryChoice("git@github.com:example/app.git", project)).toEqual({
+      _tag: "project",
+      remoteUrl: project,
+    });
+  });
+});
+
+describe("sandboxBaseSuggestions", () => {
+  const ref = (name: string, remoteName?: string): VcsRef => ({
+    name,
+    current: false,
+    isDefault: false,
+    worktreePath: null,
+    isRemote: remoteName !== undefined,
+    ...(remoteName === undefined ? {} : { remoteName }),
+  });
+  const refs = [
+    ref("main"),
+    ref("local-only"),
+    ref("origin/main", "origin"),
+    ref("origin/feature/login", "origin"),
+    ref("upstream/release", "upstream"),
+  ];
+
+  it("offers the branches of the remote the sandbox clones, by name", () => {
+    const plain = repositoryIdentityFromRemotes(
+      [{ name: "origin", url: "https://github.com/Example/App.git" }],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, plain)).toEqual(["main", "feature/login"]);
+  });
+
+  it("offers a fork's own branches, not its upstream's", () => {
+    const fork = repositoryIdentityFromRemotes(
+      [
+        { name: "upstream", url: "https://github.com/Example/App.git" },
+        { name: "origin", url: "https://github.com/Me/App.git" },
+      ],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, fork)).toEqual(["main", "feature/login"]);
+  });
+
+  it("offers the sole remote's branches whatever it is named", () => {
+    const upstreamOnly = repositoryIdentityFromRemotes(
+      [{ name: "upstream", url: "https://github.com/Example/App.git" }],
+      sourceControlClients,
+    );
+    expect(sandboxBaseSuggestions(refs, upstreamOnly)).toEqual(["release"]);
   });
 });
 

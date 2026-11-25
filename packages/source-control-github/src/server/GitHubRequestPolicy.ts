@@ -239,6 +239,8 @@ export class GitHubRequestPolicy extends Context.Service<
   }
 >()("@t3tools/source-control-github/server/GitHubRequestPolicy") {}
 
+const isRefusedCredential = Schema.is(GitHubApiAuthenticationError);
+
 export interface GitHubHeldCredential {
   readonly source?: GitHubCredentials.GitHubCredentialSource;
   readonly token: Redacted.Redacted<string>;
@@ -454,11 +456,28 @@ export const make = Effect.gen(function* () {
           Effect.provideService(SourceControlRateLimit.CredentialScope, scope || held.fingerprint),
         );
 
-    // Only an app credential is handed on, so this runs at most twice.
+    // An app credential may hand on to personal, and a 401 may retry once with a rotated token.
     let held = yield* choose(host, false);
+    let personal = false;
+    let retriedUnauthorized = false;
     while (true) {
-      const outcome = yield* attempt(held);
+      const outcome = yield* attempt(held).pipe(
+        // A rotated token is revoked at once, and the refusal dropped the cached one, so the
+        // source may now hold its successor: send once more with that, never with the same token.
+        Effect.catchIf(
+          (error) => !retriedUnauthorized && isRefusedCredential(error),
+          (refused) =>
+            choose(host, personal).pipe(
+              Effect.flatMap((fresh) => {
+                if (fresh.fingerprint === held.fingerprint) return Effect.fail(refused);
+                retriedUnauthorized = true;
+                return Effect.succeed({ _tag: "Retry" as const, with: fresh });
+              }),
+            ),
+        ),
+      );
       if (outcome._tag === "Done") return outcome.value;
+      if (!outcome.with.fromApp && held.fromApp) personal = true;
       held = outcome.with;
     }
   });

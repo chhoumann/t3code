@@ -51,6 +51,7 @@ import {
   FolderGit2Icon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
+  MoonIcon,
   PinIcon,
   PinOffIcon,
   ShieldQuestionIcon,
@@ -137,6 +138,7 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { ActivityShimmerOverlay } from "../chat/TimelineRowParts";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
+import { sandboxes } from "../../state/sandboxes";
 import { ThreadDetailsIssueRows } from "../chat/ThreadDetailsIssueRows";
 import { IssueGlyph, issueStatePresentation } from "../issue/issuePresentation";
 import { useThreadIntentPrefetch } from "./useThreadIntentPrefetch";
@@ -1236,6 +1238,25 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </TooltipPopup>
     </Tooltip>
   ) : null;
+  const asleepIndicator =
+    useAtomValue(sandboxes.presenceAtom(thread.environmentId)) === "asleep" ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              role="img"
+              aria-label={gt("Asleep")}
+              className="inline-flex shrink-0 items-center text-muted-foreground"
+            />
+          }
+        >
+          <MoonIcon aria-hidden className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <T>Asleep</T>
+        </TooltipPopup>
+      </Tooltip>
+    ) : null;
   const showPin =
     props.isPinned && (!sortable?.isDragging || (props.dragOverPinned && props.dropVerb === null));
   const pinIndicator = showPin ? (
@@ -1277,6 +1298,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   // Only the trailing icons would remain, so the row moves them to the title line instead.
   const metaLineEmpty =
     props.environmentLabel === null &&
+    asleepIndicator === null &&
     prBadge === null &&
     issueBadge === null &&
     diff === null &&
@@ -1295,6 +1317,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ) : (
         <span className="flex-1" />
       )}
+      {asleepIndicator}
       {terminalStatusIcon}
       {prBadge}
       {issueBadge}
@@ -1388,6 +1411,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {title}
               {multiline ? titleLineIcons : null}
               {pinIndicator}
+              {multiline ? null : asleepIndicator}
               {multiline ? null : terminalStatusIcon}
               {multiline ? null : issueBadge}
               {isRegeneratingTitle ? (

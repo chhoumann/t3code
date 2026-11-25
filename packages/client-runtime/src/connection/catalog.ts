@@ -25,6 +25,12 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
     learned: Schema.optionalKey(Schema.Literal(true)),
     authorization: Schema.optionalKey(Schema.Literal("t3-connect")),
     /**
+     * The environment that contributed this route, such as the owner of a
+     * sandbox. The route goes when that environment withdraws it or is itself
+     * removed; routes the user paired to the same environment stay.
+     */
+    managedBy: Schema.optionalKey(EnvironmentId),
+    /**
      * "tailscale" on a learned route the server found on its Tailscale
      * interface. A bare 100.64.0.0/10 address could belong to any VPN.
      */
@@ -53,6 +59,13 @@ export interface ConnectionCatalogEntry {
   readonly profile: Option.Option<ConnectionProfile>;
   readonly alternateRoutes?: ReadonlyArray<ConnectionRoute>;
   readonly enabled: boolean;
+  /**
+   * Set while the environment cannot answer for a known reason, such as a
+   * sandbox whose machine sleeps: it stays in the workspace from its cache,
+   * but nothing dials it. Persisted, so a relaunch does not dial it either
+   * before whoever knows the reason says otherwise.
+   */
+  readonly dormant?: true;
   readonly unsupportedReason?: string;
   readonly serverUpdateRequired?: boolean;
 }

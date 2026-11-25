@@ -33,6 +33,7 @@ import {
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthGrantScope,
   AuthOrchestrationOperateScope,
   AuthTerminalOperateScope,
   AuthProvidersManageScope,
@@ -109,7 +110,10 @@ import {
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
   WS_METHODS,
+  WsCoreRpcGroup,
   WsRpcGroup,
+  WsSandboxRpcGroup,
+  isSandboxManagedByOwnerError,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -138,6 +142,11 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as Workflows from "./workflows/Workflows.ts";
 import * as WorkflowRuntime from "./workflows/WorkflowRuntime.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
+import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
+import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
+import { toSandboxError } from "./sandbox/sandboxErrors.ts";
+import * as SandboxService from "./sandbox/SandboxService.ts";
 import * as FeedbackStore from "./feedback/FeedbackStore.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -246,6 +255,7 @@ import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
 import { mutateProjectWithClone } from "./project/ProjectMutation.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as ProjectProvisioning from "./project/ProjectProvisioning.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
@@ -733,12 +743,14 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
+const ServerWsSandboxRpcGroup = WsSandboxRpcGroup.middleware(RpcInstrumentation);
 
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
 // `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
+type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsCoreRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = [
   "server",
   "pullRequests",
@@ -755,7 +767,7 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
+const serverWsRpcs = Array.from(ServerWsCoreRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
 function toAuthAccessStreamEvent(
@@ -1455,7 +1467,44 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
-export const layerWsRpc = (
+/** The sandbox RPCs this environment's owner side serves. */
+const layerWsSandboxRpc = (currentSession: EnvironmentAuth.AuthenticatedSession) =>
+  ServerWsSandboxRpcGroup.toLayer(
+    Effect.gen(function* () {
+      const sandboxes = yield* SandboxService.SandboxService;
+      const sandboxAccounts = yield* SandboxAccounts.SandboxAccounts;
+      const githubApp = yield* GitHubAppConnection.GitHubAppConnectionSetup;
+      return ServerWsSandboxRpcGroup.of({
+        [WS_METHODS.sandboxesSubscribe]: (_input) =>
+          sandboxes.subscribe().pipe(Stream.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesListTemplates]: (input) =>
+          sandboxes.listTemplates(input.accountId).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesLaunch]: (input) =>
+          sandboxes.launch(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesUpdate]: (input) =>
+          sandboxes.update(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesConnect]: (input) =>
+          sandboxes
+            .connect({
+              id: input.id,
+              scopes: currentSession.scopes.filter(Schema.is(AuthGrantScope)),
+            })
+            .pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesSaveAccount]: (input) =>
+          sandboxAccounts.save(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesRemoveAccount]: (input) =>
+          sandboxAccounts.remove(input.id).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubBegin]: (input) =>
+          githubApp.begin(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubComplete]: (input) =>
+          githubApp.complete(input).pipe(Effect.mapError(toSandboxError)),
+        [WS_METHODS.sandboxesGitHubDisconnect]: (input) =>
+          githubApp.disconnect(input).pipe(Effect.mapError(toSandboxError)),
+      });
+    }),
+  );
+
+const layerWsCoreRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
@@ -1551,9 +1600,9 @@ export const layerWsRpc = (
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      const projectProvisioning = yield* ProjectProvisioning.ProjectProvisioning;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
-      const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -2036,11 +2085,18 @@ export const layerWsRpc = (
         },
       );
 
-      const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
+      // Lets a sandbox tell its owner's admin session apart from every other caller.
+      const withCommandCaller = Effect.provideService(ManagedSandbox.CommandCaller, {
+        subject: currentSession.subject,
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
+        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation).pipe(
+          withCommandCaller,
+        );
+      });
+
+      const handlers = ServerWsCoreRpcGroup.of({
         [WS_METHODS.issuesList]: (input) => issues.list(input),
         [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
         [WS_METHODS.issuesComments]: (input) => issues.comments(input),
@@ -2089,7 +2145,7 @@ export const layerWsRpc = (
                             currentSession.scopes.includes(AuthProvidersManageScope),
                         },
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(Effect.provide(intakeContext), withCommandCaller),
                 )
                 .pipe(
                   Effect.tap((result) =>
@@ -2097,6 +2153,7 @@ export const layerWsRpc = (
                   ),
                   Effect.map((result) => ({ sequence: result.sequence })),
                   Effect.mapError((cause) => {
+                    if (isSandboxManagedByOwnerError(cause)) return cause;
                     if (cause._tag === "EnvironmentAuthorizationError") return cause;
                     const detail = userFacingDispatchErrorMessage(cause);
                     return new OrchestrationV2DispatchCommandError({
@@ -3024,44 +3081,7 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlAppAccess]: (input) => sourceControlSignIn.access(input),
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
-        [WS_METHODS.projectCloneStart]: (input) =>
-          projectCloneTracker.start(input, {
-            createProject: (project) =>
-              projectService
-                .create({
-                  commandId: CommandId.make(`project-clone-create:${project.projectId}`),
-                  projectId: project.projectId,
-                  title: project.title,
-                  workspaceRoot: project.workspaceRoot,
-                  createWorkspaceRootIfMissing: true,
-                })
-                .pipe(
-                  Effect.asVoid,
-                  Effect.mapError((cause) =>
-                    cause._tag === "ProjectConflictError"
-                      ? cause
-                      : new OrchestrationDispatchCommandError({
-                          message: "Failed to create clone project.",
-                          cause,
-                        }),
-                  ),
-                ),
-            onCloned: (project) =>
-              repositoryIdentityResolver.resolve(project.workspaceRoot, { refresh: true }).pipe(
-                Effect.andThen(
-                  projectService.update({
-                    commandId: CommandId.make(`project-clone-done:${project.projectId}`),
-                    projectId: project.projectId,
-                  }),
-                ),
-                Effect.andThen(refreshGitStatus(project.workspaceRoot)),
-                // The folder was empty when the project was created, so the cached
-                // enrichment says "no repository" and clients cannot group it yet.
-                Effect.andThen(projectEnrichment.invalidate([project.workspaceRoot])),
-                Effect.andThen(projectEnrichment.request(project.workspaceRoot)),
-                Effect.ignoreCause({ log: true }),
-              ),
-          }),
+        [WS_METHODS.projectCloneStart]: (input) => projectProvisioning.clone(input),
         [WS_METHODS.projectsEnsureScratch]: () =>
           managedFolders.ensureScratchProject.pipe(
             Effect.mapError(
@@ -3171,16 +3191,17 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
           startup.enqueueCommand(mutateProject(mutation)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectMutationError({
-                  commandId: mutation.commandId,
-                  message:
-                    cause._tag === "ProjectNotEmptyError" || cause._tag === "ProjectInvalidError"
-                      ? cause.message
-                      : "Failed to mutate project.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              isSandboxManagedByOwnerError(cause)
+                ? cause
+                : new ProjectMutationError({
+                    commandId: mutation.commandId,
+                    message:
+                      cause._tag === "ProjectNotEmptyError" || cause._tag === "ProjectInvalidError"
+                        ? cause.message
+                        : "Failed to mutate project.",
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
@@ -3791,6 +3812,24 @@ export const layerWsRpc = (
         yield* OtherWsRpcGroup.toHandlers(otherHandlers),
       );
     }),
+  );
+
+export const layerWsRpc = (
+  currentSession: EnvironmentAuth.AuthenticatedSession,
+  clientAnalyticsProps: Readonly<Record<string, unknown>>,
+  serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  reportProfiles: ServerBrowser.ProfileReporter,
+  settingsClient: { readonly secretReferences: boolean },
+) =>
+  Layer.merge(
+    layerWsCoreRpc(
+      currentSession,
+      clientAnalyticsProps,
+      serverBrowser,
+      reportProfiles,
+      settingsClient,
+    ),
+    layerWsSandboxRpc(currentSession),
   );
 
 // Default socket-level Defect frames end every pending client request.

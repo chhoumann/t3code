@@ -1,16 +1,29 @@
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import {
   GitCommandError,
   type EnvironmentId,
   type EnvironmentMachineKind,
+  type RepositoryIdentity,
+  type SandboxAccountId,
+  type SandboxBranchName,
+  type SandboxRemoteUrl,
+  type SandboxSource,
   type VcsRef,
   type ProjectId,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
+import {
+  parseSandboxBase,
+  sandboxAccountChoices,
+  sandboxLaunchLabel,
+  sandboxRemoteUrlFromInput,
+} from "@t3tools/client-runtime/state/sandboxes";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import type { ThreadStructureRuntime } from "@t3tools/client-runtime/state/shell";
 import * as Schema from "effect/Schema";
 import { msg } from "gt-react";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
+import { sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { workspaceRelativeFilePath } from "@t3tools/shared/path";
 import { toSortableTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import { m, type MessageResolver } from "../i18n/messages";
@@ -34,6 +47,125 @@ export interface EnvironmentOption {
   label: string;
   isPrimary: boolean;
   machine: EnvironmentMachineKind;
+}
+
+/** A picker entry that starts a new sandbox under one owner's account. */
+export interface SandboxRunChoice {
+  /** The picker value; never collides with an environment id. */
+  readonly value: string;
+  readonly ownerEnvironmentId: EnvironmentId;
+  readonly accountId: SandboxAccountId;
+  readonly label: string;
+}
+
+/**
+ * One entry per account on every environment that launches sandboxes. The
+ * owner is named only when more than one environment offers accounts.
+ */
+export function deriveSandboxRunChoices(
+  owners: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly serverConfig: Parameters<typeof sandboxAccountChoices>[1];
+  }>,
+): ReadonlyArray<SandboxRunChoice> {
+  const perOwner = owners
+    .map((owner) => ({
+      owner,
+      accounts: sandboxAccountChoices(owner.environmentId, owner.serverConfig),
+    }))
+    .filter(({ accounts }) => accounts.length > 0);
+  return perOwner.flatMap(({ owner, accounts }) =>
+    accounts.map((account) => ({
+      value: `sandbox:${owner.environmentId}:${account.accountId}`,
+      ownerEnvironmentId: owner.environmentId,
+      accountId: account.accountId,
+      label:
+        perOwner.length > 1
+          ? `${sandboxLaunchLabel(account.label)} on ${owner.label}`
+          : sandboxLaunchLabel(account.label),
+    })),
+  );
+}
+
+/**
+ * Where sending a draft goes once it picked a new sandbox. The pick is kept
+ * with the draft, so while its owner is offline or no longer has the account
+ * the send is refused rather than run in the draft's own environment.
+ */
+export function resolveSandboxDraftSend(
+  target: {
+    readonly ownerEnvironmentId: EnvironmentId;
+    readonly accountId: SandboxAccountId;
+  } | null,
+  choices: ReadonlyArray<SandboxRunChoice>,
+):
+  | { readonly _tag: "Environment" }
+  | { readonly _tag: "Sandbox"; readonly choice: SandboxRunChoice }
+  | { readonly _tag: "Unavailable" } {
+  if (target === null) return { _tag: "Environment" };
+  const choice = choices.find(
+    (candidate) =>
+      candidate.ownerEnvironmentId === target.ownerEnvironmentId &&
+      candidate.accountId === target.accountId,
+  );
+  return choice === undefined ? { _tag: "Unavailable" } : { _tag: "Sandbox", choice };
+}
+
+/**
+ * What a sandbox draft clones: the repository it names, else its project's
+ * remote, from the base it picked. Null when neither names a repository.
+ */
+export function resolveSandboxDraftSource(
+  target: Partial<SandboxSource>,
+  projectIdentity: RepositoryIdentity | null,
+): SandboxSource | null {
+  const remoteUrl = target.remoteUrl ?? sandboxSourceForProject(projectIdentity)?.remoteUrl;
+  return remoteUrl === undefined ? null : { remoteUrl, base: target.base ?? { _tag: "default" } };
+}
+
+/** The one repository a draft's picker offers: the project's own, or the one typed into it. */
+export type SandboxRepositoryChoice =
+  | { readonly _tag: "project"; readonly remoteUrl: SandboxRemoteUrl }
+  | { readonly _tag: "typed"; readonly remoteUrl: SandboxRemoteUrl };
+
+/**
+ * What the repository picker offers for `query`: the project's repository
+ * while nothing is typed, else what was typed once it names a repository.
+ * Null offers nothing.
+ */
+export function sandboxRepositoryChoice(
+  query: string,
+  projectRemoteUrl: SandboxRemoteUrl | null,
+): SandboxRepositoryChoice | null {
+  if (query.trim().length === 0) {
+    return projectRemoteUrl === null ? null : { _tag: "project", remoteUrl: projectRemoteUrl };
+  }
+  const typed = sandboxRemoteUrlFromInput(query);
+  if (typed === null) return null;
+  // Typing the project's own repository follows the project rather than pinning its URL.
+  return projectRemoteUrl !== null &&
+    normalizeGitRemoteUrl(typed) === normalizeGitRemoteUrl(projectRemoteUrl)
+    ? { _tag: "project", remoteUrl: projectRemoteUrl }
+    : { _tag: "typed", remoteUrl: typed };
+}
+
+/**
+ * Branches a project's checkout knows on the remote its sandbox clones,
+ * offered as bases by name. The sandbox fetches the branch itself, so
+ * nothing about the local checkout travels.
+ */
+export function sandboxBaseSuggestions(
+  refs: ReadonlyArray<VcsRef>,
+  identity: RepositoryIdentity,
+): SandboxBranchName[] {
+  // The remote `sandboxSourceForProject` clones.
+  const remoteName = identity.origin === undefined ? identity.locator.remoteName : "origin";
+  return refs.flatMap((ref) => {
+    if (!ref.isRemote || ref.remoteName !== remoteName) return [];
+    const base = parseSandboxBase(ref.name.slice(remoteName.length + 1));
+    return base?._tag === "branch" ? [base.name] : [];
+  });
 }
 
 /** "Add to another machine" stays muted until hovered: easy to find, quieter than the machines. */

@@ -74,7 +74,7 @@ export const mutateProjectWithClone = Effect.fn("mutateProjectWithClone")(functi
   if (mutation.type !== "project.delete")
     return yield* projectMutationOperation(projects, mutation);
   return yield* projectMutationOperation(projects, mutation).pipe(
-    Effect.tap(() => clones.discard(mutation.projectId)),
+    Effect.tap((deleted) => clones.discard(mutation.projectId, deleted.workspaceRoot)),
     Effect.uninterruptible,
   );
 });

@@ -30,6 +30,7 @@ import {
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
+import { useSandboxDraftStore } from "../../sandboxDraftStore";
 import { type EnvironmentPresentation, useEnvironmentProviders } from "../../state/environments";
 import { currentClientMetadata } from "../../connection/platform";
 import { useProjects } from "../../state/entities";
@@ -232,6 +233,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   ]);
   const onAutoEnvironment = () => {
     if (envLocked || !draftId || sendInFlightRef.current) return;
+    useSandboxDraftStore.getState().clear(draftId);
     if (composerHasAttachments) {
       toastManager.add({
         type: "warning",
@@ -301,6 +303,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
 
   const onEnvironmentChange = (nextEnvironmentId: EnvironmentId) => {
     if (envLocked || !draftId || sendInFlightRef.current) return;
+    useSandboxDraftStore.getState().clear(draftId);
     const originalDraft = getDraftSession(draftId);
     if (!originalDraft || originalDraft.promotedTo) return;
     const target = logicalProjectEnvironments.find(

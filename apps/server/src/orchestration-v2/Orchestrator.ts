@@ -78,6 +78,7 @@ import {
   type ProviderSessionId,
   RunId,
   RuntimeMode,
+  SandboxManagedByOwnerError,
   ThreadLinkedPullRequest,
   ThreadId,
   TurnItemId,
@@ -399,6 +400,8 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
   OrchestratorThreadAboveModeLimitError,
+  // Raised before dispatch by ThreadManagementService, for a sandbox's seed thread.
+  SandboxManagedByOwnerError,
   OrchestratorProviderSelectionBusyError,
   OrchestratorRuntimeModeAboveCeilingError,
 ]);

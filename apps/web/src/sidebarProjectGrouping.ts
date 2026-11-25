@@ -1,11 +1,13 @@
-import type {
-  EnvironmentId,
-  ScopedProjectRef,
-  SidebarProjectGroupingMode,
+import {
+  repositoryGroupingKeyOf,
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import {
   buildProjectGroups,
   derivePhysicalProjectKey,
+  deriveProjectGroupLabel,
   isPickableProjectMember,
   resolveScratchProjectScopeKey,
   selectGroupDefaultProject,
@@ -255,4 +257,33 @@ export function buildSidebarProjectPickerEntries(input: {
   const preferred = entries.find((entry) => entry.isPreferred);
   if (!preferred) return entries;
   return [preferred, ...entries.filter((entry) => entry !== preferred)];
+}
+
+/**
+ * The group a launching sandbox's project will join and the label that group
+ * will then show, read off the groups before it joins. The project is new to
+ * every client, so no per-project grouping override applies to it.
+ */
+export function resolveSandboxProjectGroup(input: {
+  readonly groups: ReadonlyArray<SidebarProjectSnapshot>;
+  readonly mode: SidebarProjectGroupingMode;
+  readonly project: Pick<Project, "title" | "repositoryIdentity">;
+}): { readonly group: SidebarProjectSnapshot | null; readonly label: string } {
+  const { project } = input;
+  const key =
+    input.mode === "separate" || project.repositoryIdentity == null
+      ? null
+      : repositoryGroupingKeyOf(project.repositoryIdentity);
+  const group = key === null ? null : (input.groups.find((g) => g.projectKey === key) ?? null);
+  return {
+    group,
+    label:
+      group === null
+        ? project.title
+        : deriveProjectGroupLabel({
+            groupKey: group.projectKey,
+            representative: group,
+            members: [...group.memberProjects, project],
+          }),
+  };
 }

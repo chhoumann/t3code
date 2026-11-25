@@ -32,6 +32,7 @@ export type SettingsPath =
   | "/settings/browser"
   | "/settings/devices"
   | "/settings/scheduled-tasks"
+  | "/settings/sandboxes"
   | "/settings/source-control"
   | "/settings/worktrees"
   | "/settings/connections"
@@ -110,6 +111,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/browser": msg("Browser"),
   "/settings/devices": msg("Devices"),
   "/settings/scheduled-tasks": msg("Scheduled tasks"),
+  "/settings/sandboxes": msg("Sandboxes"),
   "/settings/source-control": msg("Source control & issues"),
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
@@ -168,7 +170,12 @@ const ALL_SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
   },
   {
     heading: msg("Connections"),
-    paths: ["/settings/connections", "/settings/access", "/settings/secrets"],
+    paths: [
+      "/settings/connections",
+      "/settings/sandboxes",
+      "/settings/access",
+      "/settings/secrets",
+    ],
   },
   {
     heading: msg("More"),
@@ -1505,6 +1512,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "sandboxes",
+    title: msg("Sandbox accounts"),
+    to: "/settings/sandboxes",
+    searchTerms: [
+      msg(
+        "new sandbox boat cloud vm machine api key remote setup script github app connect repositories",
+      ),
+    ],
+  },
+  {
     id: "secret-providers",
     title: msg("Secret providers"),
     to: "/settings/secrets",
@@ -1551,6 +1568,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/access": "connections",
   "/settings/secrets": null,
   "/settings/scheduled-tasks": null,
+  "/settings/sandboxes": null,
   "/settings/maintenance": null,
   "/settings/labs": null,
   "/settings/about": null,

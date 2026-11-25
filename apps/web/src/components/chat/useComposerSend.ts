@@ -21,7 +21,6 @@ import {
 } from "../ChatView.logic";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
-  AuthOrchestrationOperateScope,
   DEFAULT_MODEL,
   type EnvironmentId,
   type ModelSelection,
@@ -122,10 +121,11 @@ import {
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { countPreparingComposerImages, holdComposerSend } from "./preparingComposerImages";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
+import { readCanSendWork } from "../../state/sandboxes";
+import type { SandboxWorkGate } from "./useHeldSandboxWork";
 import { useLinkedEnvironments } from "../../state/peerLinks";
-import { readEnvironmentScope } from "../../state/session";
 import { ensureWorktreeLayoutApproved } from "../../worktreeLayoutApproval";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { useOrchestrationCommand, useWorkCommand } from "../../state/use-orchestration-command";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   threadContextsOutsideEnvironment,
@@ -236,8 +236,11 @@ interface ComposerSendInput {
   readonly feedbackUploadsInFlightRef: { readonly current: Set<string> };
   readonly queuedRunEdit: ReturnType<typeof useQueuedRunEdit>;
   readonly isRevertingCheckpoint: boolean;
-  readonly threadDetailLoading: boolean;
-  readonly activeEnvironmentUnavailable: boolean;
+  /** Whether the thread is still loading in a way a send must wait for. */
+  readonly threadLoadBlocksSend: boolean;
+  readonly sandboxWork: SandboxWorkGate;
+  /** Launches the draft into the new sandbox it picked; null when it picked none. */
+  readonly launchSandboxDraft: (() => Promise<void>) | null;
   readonly isSendBusy: boolean;
   readonly sendQueuesBehindSetup: boolean;
   readonly isDraftHeroState: boolean;
@@ -335,8 +338,9 @@ export function useComposerSend(input: ComposerSendInput) {
     feedbackUploadsInFlightRef,
     queuedRunEdit,
     isRevertingCheckpoint,
-    threadDetailLoading,
-    activeEnvironmentUnavailable,
+    threadLoadBlocksSend,
+    sandboxWork,
+    launchSandboxDraft,
     isSendBusy,
     sendQueuesBehindSetup,
     isDraftHeroState,
@@ -381,7 +385,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const handleNewThread = useNewThreadHandler();
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
+  const startThreadTurn = useWorkCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
@@ -414,6 +418,18 @@ export function useComposerSend(input: ComposerSendInput) {
     pendingApprovalsRef.current = pendingApprovals;
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
+
+  /** Whether a send can't start now, so `onSend` does nothing. */
+  const sendBlocked = () =>
+    !readCanSendWork(environmentId) ||
+    (isSendBusy && !sendQueuesBehindSetup) ||
+    isRevertingCheckpoint ||
+    !clientSettingsHydrated ||
+    threadLoadBlocksSend ||
+    readPendingEnvironmentChange() !== null ||
+    sendInFlightRef.current ||
+    feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+    sandboxWork.isHolding();
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -467,7 +483,7 @@ export function useComposerSend(input: ComposerSendInput) {
     // An answer responds to the open request rather than starting a turn, so the new-message
     // guards below (loading, busy, provider) must not swallow it.
     if (answeringQuestion && !startsSideChat && !directAnnotation) {
-      if (readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) && activeThread) {
+      if (readCanSendWork(environmentId) && activeThread) {
         onAdvanceActivePendingUserInput();
       }
       return;
@@ -486,15 +502,25 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     };
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      !readCanSendWork(environmentId) ||
       !activeThread ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
-      threadDetailLoading ||
+      threadLoadBlocksSend ||
       readPendingEnvironmentChange() !== null ||
-      feedbackUploadsInFlightRef.current.has(routeThreadKey)
+      feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+      sandboxWork.isHolding()
     ) {
       notifyDirectAnnotationAttached();
+      return;
+    }
+    // A draft that picked a sandbox never falls back to running here.
+    if (launchSandboxDraft !== null) {
+      if (directAnnotation) {
+        notifyDirectAnnotationAttached();
+        return;
+      }
+      await launchSandboxDraft();
       return;
     }
     if ((isSendBusy && !sendQueuesBehindSetup) || sendInFlightRef.current) {
@@ -525,7 +551,7 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       return;
     }
-    if (activeEnvironmentUnavailable) {
+    if (sandboxWork.delivery === "offline") {
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -842,6 +868,10 @@ export function useComposerSend(input: ComposerSendInput) {
         );
         return;
       }
+      if (sandboxWork.delivery === "after-wake" && queuedRunEdit.editingRunId !== null) {
+        sandboxWork.hold({ kind: "edit-queued", runId: queuedRunEdit.editingRunId });
+        return;
+      }
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
       await queuedRunEdit.saveEdit(
@@ -1127,6 +1157,10 @@ export function useComposerSend(input: ComposerSendInput) {
       multipleTargets.push(resolved);
     }
 
+    if (sandboxWork.delivery === "after-wake") {
+      sandboxWork.hold({ kind: "send", dispatchMode, submissionIntent, directAnnotation });
+      return;
+    }
     const draftBeforePreparation = useComposerDraftStore
       .getState()
       .getComposerDraft(composerDraftTarget);
@@ -1184,7 +1218,7 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      !readCanSendWork(environmentId) ||
       attachmentCapabilitiesBeforeDispatch.fileBlockReason !== null
     ) {
       sendInFlightRef.current = false;
@@ -1816,5 +1850,5 @@ export function useComposerSend(input: ComposerSendInput) {
   // No load-balancing refresh: it bails once the draft is no longer displayed, which is the
   // only time a detached send runs, so the draft keeps the environment it was dictated for.
   const captureDetachedSend = useStableCallback(() => onSend);
-  return { onSend: onSendWithRouting, captureDetachedSend };
+  return { onSend: onSendWithRouting, captureDetachedSend, sendBlocked };
 }

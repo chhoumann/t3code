@@ -15,8 +15,62 @@ import {
   resolveAddProjectEntry,
   createCommandPaletteSearchState,
   reduceCommandPaletteSearchState,
+  resolveSandboxDraftProject,
+  sandboxBaseStepMessage,
   type CommandPaletteUiState,
 } from "./CommandPalette.logic";
+
+describe("resolveSandboxDraftProject", () => {
+  const owner = EnvironmentId.make("owner");
+  const elsewhere = EnvironmentId.make("elsewhere");
+  const ref = (environmentId: EnvironmentId, id: string) => ({
+    environmentId,
+    projectId: ProjectId.make(id),
+  });
+  const projects = [
+    { environmentId: elsewhere, id: ProjectId.make("far") },
+    { environmentId: owner, id: ProjectId.make("owned-1") },
+    { environmentId: owner, id: ProjectId.make("owned-2") },
+  ];
+
+  it("prefers the current project on the owner, then the owner's default", () => {
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(owner, "current"),
+        defaultProject: ref(owner, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "current"));
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(elsewhere, "current"),
+        defaultProject: ref(owner, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "default"));
+  });
+
+  it("falls back to any project on the owner before giving up", () => {
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: ref(elsewhere, "current"),
+        defaultProject: ref(elsewhere, "default"),
+        projects,
+      }),
+    ).toEqual(ref(owner, "owned-1"));
+    expect(
+      resolveSandboxDraftProject({
+        owner,
+        current: null,
+        defaultProject: null,
+        projects: projects.filter((project) => project.environmentId !== owner),
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {
@@ -944,6 +998,20 @@ describe("returning from file and content search", () => {
     expect(closed).toEqual({ open: false, mode: "files", openIntent: null, session: 0 });
     expect(reduceCommandPaletteUiState(closed, { _tag: "BackToCommand" })).toEqual(closed);
     expect(reduceCommandPaletteUiState(closed, { _tag: "SetOpen", open: true })).toEqual(root);
+  });
+});
+
+describe("sandboxBaseStepMessage", () => {
+  it("starts from the default branch until a branch is typed", () => {
+    expect(sandboxBaseStepMessage("")).toMatch(/default branch/);
+  });
+
+  it("names the typed branch it will start from", () => {
+    expect(sandboxBaseStepMessage(" release/2.0 ")).toMatch(/release\/2\.0/);
+  });
+
+  it("says a typed name cannot be a branch", () => {
+    expect(sandboxBaseStepMessage("main~1")).toMatch(/not a valid branch name/);
   });
 });
 

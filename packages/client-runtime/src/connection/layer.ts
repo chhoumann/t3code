@@ -15,6 +15,7 @@ import * as PlatformConnectionSource from "../platform/source.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
+import * as SandboxRegistrations from "../sandbox/sandboxRegistrations.ts";
 
 export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscoveredCompatibility")(
   function* () {
@@ -77,10 +78,14 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
   );
   const layerRegistry = EnvironmentRegistry.layer.pipe(Layer.provide(layerDriver));
   const layerOnboarding = ConnectionOnboarding.layer.pipe(Layer.provide(layerRegistry));
+  const layerSandboxRegistrations = SandboxRegistrations.layer.pipe(
+    Layer.provide(Layer.merge(layerRegistry, layerOnboarding)),
+  );
   const layerConnectionServices = Layer.mergeAll(
     layerRegistry,
     RelayEnvironmentDiscovery.layer,
     layerOnboarding,
+    layerSandboxRegistrations,
     ConnectionResolver.layer,
   );
   const layerConnectionStartup = Layer.effectDiscard(
@@ -93,6 +98,7 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
         Stream.runForEach(registry.reconcilePlatform),
         Effect.forkScoped,
       );
+      yield* (yield* SandboxRegistrations.SandboxRegistrations).start;
     }).pipe(Effect.withSpan("clientRuntime.connection.application.start")),
   );
   return layerConnectionStartup.pipe(

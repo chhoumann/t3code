@@ -93,6 +93,13 @@ export const VcsRef = Schema.Struct({
 });
 export type VcsRef = typeof VcsRef.Type;
 
+/** A git remote and the URL it fetches from. */
+export const GitRemote = Schema.Struct({
+  name: TrimmedNonEmptyStringSchema,
+  url: TrimmedNonEmptyStringSchema,
+});
+export type GitRemote = typeof GitRemote.Type;
+
 const VcsWorktree = Schema.Struct({
   path: TrimmedNonEmptyStringSchema,
   refName: GitRefName,
@@ -225,9 +232,17 @@ const VcsStatusLocalShape = {
   isRepo: Schema.Boolean,
   sourceControlProvider: Schema.optional(SourceControlProviderInfo),
   hasPrimaryRemote: Schema.Boolean,
+  /** Every remote, as `git remote -v` lists it. Absent on older servers. */
+  remotes: Schema.optional(Schema.Array(GitRemote)),
+  /** The remote the checked-out branch tracks, by name; one of `remotes`. Absent without one. */
+  trackedRemote: Schema.optional(TrimmedNonEmptyStringSchema),
   isDefaultRef: Schema.Boolean,
   refName: Schema.NullOr(GitRefName),
+  /** The checked-out commit. Absent before the first commit and on older servers. */
+  headCommit: Schema.optional(TrimmedNonEmptyStringSchema),
   hasWorkingTreeChanges: Schema.Boolean,
+  /** Like `hasWorkingTreeChanges`, but untracked files do not count. Absent on older servers. */
+  hasTrackedChanges: Schema.optional(Schema.Boolean),
   workingTree: Schema.Struct({
     // Absolute worktree root on the environment that every files[].path is
     // relative to. Absent when the server could not resolve it.

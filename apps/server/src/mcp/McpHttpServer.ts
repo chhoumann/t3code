@@ -39,6 +39,7 @@ import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as MilestoneEvents from "../milestones/MilestoneEvents.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as PullRequestWatchService from "../pullRequest/PullRequestWatchService.ts";
@@ -67,6 +68,8 @@ import * as FeedbackHandlers from "./toolkits/feedback/handlers.ts";
 import { FeedbackToolkit } from "./toolkits/feedback/tools.ts";
 import * as Feedback from "../feedback/FeedbackService.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { SandboxToolkit } from "./toolkits/sandbox/tools.ts";
+import * as SandboxHandlers from "./toolkits/sandbox/handlers.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ThemeToolkit } from "./toolkits/theme/tools.ts";
 import * as ThemeHandlers from "./toolkits/theme/handlers.ts";
@@ -1450,6 +1453,15 @@ const layerFeedbackToolkit = toolkitRegistration(FeedbackToolkit, FeedbackHandle
   ),
 );
 
+/** A sandbox has no accounts to launch sandboxes of its own with, so its agents get no sandbox tools. */
+export const layerSandboxToolkit = Layer.unwrap(
+  Effect.gen(function* () {
+    return (yield* ManagedSandbox.ManagedSandbox) === null
+      ? toolkitRegistration(SandboxToolkit, SandboxHandlers.layer)
+      : Layer.empty;
+  }),
+);
+
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
   AttachmentHandlers.layer,
@@ -1516,6 +1528,7 @@ export const layerTools = Layer.mergeAll(
   layerProjectRegistration,
   layerFeedbackToolkit,
   layerEnvironmentToolkit,
+  layerSandboxToolkit,
   layerThemeToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,

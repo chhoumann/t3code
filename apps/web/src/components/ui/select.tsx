@@ -205,6 +205,16 @@ function SelectGroupLabel(props: SelectPrimitive.GroupLabel.Props) {
   );
 }
 
+function SelectSeparator({ className, ...props }: SelectPrimitive.Separator.Props) {
+  return (
+    <SelectPrimitive.Separator
+      className={cn("mx-2 my-1 h-px bg-border", className)}
+      data-slot="select-separator"
+      {...props}
+    />
+  );
+}
+
 export {
   Select,
   SelectTrigger,
@@ -215,4 +225,5 @@ export {
   SelectItem,
   SelectGroup,
   SelectGroupLabel,
+  SelectSeparator,
 };

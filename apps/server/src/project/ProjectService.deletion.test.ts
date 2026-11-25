@@ -2,10 +2,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   type OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  SandboxId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -28,6 +30,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ProjectSettingsOverrideSweep from "../provider/ProjectSettingsOverrideSweep.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -505,6 +508,77 @@ it.effect("deletes a project without force once its imported threads were delete
       });
       assert.isNotNull(deleted.deletedAt);
       assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+const sandboxGuest = () =>
+  ManagedSandbox.makeManagedSandboxGuest({
+    ownerEnvironmentId: EnvironmentId.make("environment:owner"),
+    sandboxId: SandboxId.make("sbx-seed"),
+  });
+
+it.effect(
+  "a sandbox deletes its seed project for anyone while another project has an active thread",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:sandbox-seed");
+      const threadId = ThreadId.make("thread:sandbox-seed");
+      const otherProjectId = ProjectId.make("project:other");
+      yield* seedProject(projectId);
+      yield* seedProject(otherProjectId);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        yield* eventSink.write({
+          events: [
+            nativeThreadCreated(projectId, threadId),
+            nativeThreadCreated(otherProjectId, ThreadId.make("thread:other")),
+          ],
+        });
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest()),
+        );
+        const deleted = yield* service
+          .delete({ commandId: CommandId.make("command:seed-delete"), projectId, force: true })
+          .pipe(Effect.provideService(ManagedSandbox.CommandCaller, { subject: "mcp-client" }));
+        assert.isNotNull(deleted.deletedAt);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("a sandbox deletes a project holding its last active thread only for its owner", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:sandbox-seed");
+    const threadId = ThreadId.make("thread:sandbox-seed");
+    yield* seedProject(projectId);
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      yield* eventSink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(ManagedSandbox.ManagedSandbox, sandboxGuest()),
+      );
+      const input = { commandId: CommandId.make("command:seed-delete"), projectId, force: true };
+
+      for (const caller of [null, { subject: "mcp-client" }]) {
+        const refused = yield* service
+          .delete(input)
+          .pipe(Effect.provideService(ManagedSandbox.CommandCaller, caller), Effect.flip);
+        assert.equal(refused._tag, "SandboxManagedByOwnerError");
+        if (refused._tag !== "SandboxManagedByOwnerError") return;
+        assert.equal(refused.ownerEnvironmentId, "environment:owner");
+        assert.equal(refused.sandboxId, "sbx-seed");
+        // Refused before the cascade, so the seed thread is untouched.
+        assert.isNull((yield* projections.getThreadProjection(threadId)).thread.deletedAt);
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+      }
+
+      const deleted = yield* service.delete(input).pipe(
+        Effect.provideService(ManagedSandbox.CommandCaller, {
+          subject: ManagedSandbox.SANDBOX_OWNER_SUBJECT,
+        }),
+      );
+      assert.isNotNull(deleted.deletedAt);
     }).pipe(Effect.provide(layerServices));
   }).pipe(Effect.provide(layerDatabase)),
 );

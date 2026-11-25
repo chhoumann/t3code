@@ -12,7 +12,11 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 
 import type { ComposerThreadTarget, DraftId } from "../../composerDraftStore";
 import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
-import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
+import {
+  type EnvMode,
+  type EnvironmentOption,
+  type SandboxRunChoice,
+} from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
 import GitActionsControl from "../GitActionsControl";
 import ProjectScriptsControl, {
@@ -78,6 +82,9 @@ interface ThreadDetailsPanelProps extends Pick<
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  sandboxChoices?: readonly SandboxRunChoice[] | undefined;
+  activeSandboxValue?: string | null | undefined;
+  onSandboxChoose?: ((choice: SandboxRunChoice) => void) | undefined;
   onEnvModeChange: (mode: EnvMode) => void;
   envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
@@ -131,6 +138,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
     !isScratchProject(project, serverConfig.scratchWorkspaceRoot);
   const branchToolbarProps = {
     showGitControls: folderIsRepo,
+    activeSandboxValue: props.activeSandboxValue,
     environmentId: props.environmentId,
     threadId: props.threadId,
     projectId: props.projectId,
@@ -221,6 +229,8 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                           : {})}
                         autoEnvironmentLabel={props.autoEnvironmentLabel}
                         onAutoEnvironment={props.onAutoEnvironment}
+                        sandboxChoices={props.sandboxChoices}
+                        onSandboxChoose={props.onSandboxChoose}
                         {...branchToolbarProps}
                         // Workspace modes follow the composer's rule, not this folder's own status.
                         showGitControls={props.offersWorkspaceModes}

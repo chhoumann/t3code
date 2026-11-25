@@ -1,4 +1,6 @@
-import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { sandboxProjectTitle, sandboxRepositoryIdentity } from "@t3tools/shared/sandboxProject";
+import { EnvironmentId, ProjectId, ProviderInstanceId, SandboxRemoteUrl } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -8,6 +10,7 @@ import {
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
+  resolveSandboxProjectGroup,
   resolveSidebarProjectScopeKey,
   getSidebarProjectSettingsKey,
 } from "./sidebarProjectGrouping";
@@ -340,5 +343,55 @@ describe("environment grouping", () => {
       preferredProjectRef: { environmentId: current.environmentId, projectId: current.id },
     });
     expect(entries.map((entry) => entry.group.displayName)).toEqual(["current", "pinned", "other"]);
+  });
+});
+
+describe("resolveSandboxProjectGroup", () => {
+  const sandboxEnvironmentId = EnvironmentId.make("env-sandbox");
+  const clonedIdentity = sandboxRepositoryIdentity(
+    {
+      remoteUrl: SandboxRemoteUrl.make("https://github.com/Example/Shared-Repo.git"),
+      base: { _tag: "default" },
+    },
+    sourceControlClients,
+  );
+  const cloned = { title: sandboxProjectTitle(clonedIdentity), repositoryIdentity: clonedIdentity };
+  const snapshots = (projects: Project[], mode: "repository" | "separate") =>
+    buildSidebarProjectSnapshots({
+      projects,
+      settings: { sidebarProjectGroupingMode: mode, sidebarProjectGroupingOverrides: {} },
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: () => null,
+    });
+  // What the sidebar shows once the sandbox's environment lists its project.
+  const joined = (projects: Project[], mode: "repository" | "separate") => {
+    const sandbox = makeProject({
+      id: ProjectId.make("project-sandbox"),
+      environmentId: sandboxEnvironmentId,
+      workspaceRoot: "/home/user/projects/Shared-Repo",
+      ...cloned,
+    });
+    return snapshots([...projects, sandbox], mode).find((group) =>
+      group.memberProjects.some((member) => member.environmentId === sandboxEnvironmentId),
+    )!;
+  };
+
+  it.each([
+    ["a renamed local checkout", [makeProject({ title: "Shared Repo", repositoryIdentity })]],
+    ["a local checkout", [makeProject({ repositoryIdentity })]],
+    ["no checkout of the repository", [makeProject({ title: "other" })]],
+  ])("labels the sandbox as its thread will be labeled, beside %s", (_, projects) => {
+    for (const mode of ["repository", "separate"] as const) {
+      const resolved = resolveSandboxProjectGroup({
+        groups: snapshots(projects, mode),
+        mode,
+        project: cloned,
+      });
+      const after = joined(projects, mode);
+      expect(resolved.label).toBe(after.displayName);
+      expect(resolved.group?.projectKey ?? null).toBe(
+        after.groupedProjectCount > 1 ? after.projectKey : null,
+      );
+    }
   });
 });

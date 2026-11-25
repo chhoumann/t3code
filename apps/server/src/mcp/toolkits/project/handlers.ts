@@ -6,6 +6,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
+  type SandboxManagedByOwnerError,
   type TaskFolderError,
   type Project as ProjectRecord,
   type ServerProvider,
@@ -47,16 +48,18 @@ import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
 
-function projectFailure(error: Project.ProjectServiceError) {
+function projectFailure(error: Project.ProjectServiceError | SandboxManagedByOwnerError) {
   if (error._tag === "ProjectOperationError") return unavailable();
   const message =
-    error._tag === "ProjectInvalidError"
-      ? error.detail
-      : error._tag === "ProjectNotFoundError"
-        ? "The project was not found."
-        : error._tag === "ProjectConflictError"
-          ? "The workspace is already registered to a project."
-          : "The project is not empty; force=true is required to delete it.";
+    error._tag === "SandboxManagedByOwnerError"
+      ? error.message
+      : error._tag === "ProjectInvalidError"
+        ? error.detail
+        : error._tag === "ProjectNotFoundError"
+          ? "The project was not found."
+          : error._tag === "ProjectConflictError"
+            ? "The workspace is already registered to a project."
+            : "The project is not empty; force=true is required to delete it.";
   return new OrchestratorMcpFailure({ code: "invalid_request", message });
 }
 

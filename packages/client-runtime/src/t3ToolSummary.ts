@@ -1372,6 +1372,57 @@ export function summarizeT3ToolCalls(
       }
       break;
     }
+    case "sandbox-launch": {
+      const count = countEntities(entityIds("id"));
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Launched {count} sandbox} other {Launched {count} sandboxes}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to launch {count} sandbox} other {Tried to launch {count} sandboxes}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "sandbox-update": {
+      const count = countEntities(entityIds("id"));
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Updated {count} sandbox} other {Updated {count} sandboxes}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to update {count} sandbox} other {Tried to update {count} sandboxes}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "sandbox-list": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Listed sandboxes {count} time} other {Listed sandboxes {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to list sandboxes {count} time} other {Tried to list sandboxes {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
     case "attachment-send": {
       const messages = new Map<string, (typeof selected)[number]>();
       selected.forEach((call, index) =>

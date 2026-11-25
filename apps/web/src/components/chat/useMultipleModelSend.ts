@@ -25,7 +25,7 @@ import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
 import type { buildMessageContext } from "../../lib/composerContextRecords";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { threadEnvironment } from "../../state/threads";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { useWorkCommand } from "../../state/use-orchestration-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -81,7 +81,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     setThreadError,
   } = input;
   const navigate = useNavigate();
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
+  const startThreadTurn = useWorkCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);

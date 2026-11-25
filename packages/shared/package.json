@@ -615,6 +615,10 @@
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
     },
+    "./sandboxProject": {
+      "types": "./src/sandboxProject.ts",
+      "import": "./src/sandboxProject.ts"
+    },
     "./markdownMath": {
       "types": "./src/markdownMath.ts",
       "import": "./src/markdownMath.ts"

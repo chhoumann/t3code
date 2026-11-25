@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { EnvironmentId, ORCHESTRATION_PROTOCOL_VERSION, SandboxId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
@@ -20,6 +20,7 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const layerServerEnvironment = (baseDir: string) =>
@@ -363,6 +364,31 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
         const disabled = yield* serverEnvironment.getDescriptor;
         expect(disabled.capabilities.agentActivityPublishing).toBe(false);
       }).pipe(Effect.provide(layerTest));
+    }),
+  );
+
+  it.effect("offers sandboxes only outside a sandbox", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-test-",
+      });
+      const describe = ServerEnvironment.ServerEnvironment.pipe(
+        Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),
+        Effect.provide(layerServerEnvironment(baseDir)),
+      );
+
+      expect((yield* describe).capabilities.sandboxes).toBe(true);
+      const inSandbox = yield* describe.pipe(
+        Effect.provideService(
+          ManagedSandbox.ManagedSandbox,
+          ManagedSandbox.makeManagedSandboxGuest({
+            ownerEnvironmentId: EnvironmentId.make("environment-owner"),
+            sandboxId: SandboxId.make("sbx-1"),
+          }),
+        ),
+      );
+      expect(inSandbox.capabilities.sandboxes).toBeUndefined();
     }),
   );
 });

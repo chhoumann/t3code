@@ -14,6 +14,7 @@ import { msg } from "gt-react";
 
 import { m } from "../i18n/messages";
 
+import { readCanSendWork } from "./sandboxes";
 import { readEnvironmentScope, readEnvironmentScopeDenied } from "./session";
 import { useAtomCommand } from "./use-atom-command";
 
@@ -34,15 +35,14 @@ export function threadTriagePermitted(environmentId: EnvironmentId): boolean {
   return !readEnvironmentScopeDenied(environmentId, AuthOrchestrationOperateScope);
 }
 
-/** `permitted` runs on every call, like the default operate check it replaces. */
-export function useOrchestrationCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
+function useGuardedCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
   command: AtomCommand<W, A, E>,
-  options?: string | AtomCommandOptions,
-  permitted: (environmentId: EnvironmentId) => boolean = hasLiveOperateGrant,
+  options: string | AtomCommandOptions | undefined,
+  allowed: (environmentId: EnvironmentId) => boolean,
 ): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
   const run = useAtomCommand(command, options);
   return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> => {
-    if (!permitted(value.environmentId)) {
+    if (!allowed(value.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
           new EnvironmentAuthorizationError({
@@ -54,4 +54,25 @@ export function useOrchestrationCommand<W extends { readonly environmentId: Envi
     }
     return run(value);
   };
+}
+
+/** Recheck the target grant for every step of a thread or project mutation. */
+export function useOrchestrationCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
+  command: AtomCommand<W, A, E>,
+  options?: string | AtomCommandOptions,
+  permitted: (environmentId: EnvironmentId) => boolean = hasLiveOperateGrant,
+): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
+  return useGuardedCommand(command, options, permitted);
+}
+
+/**
+ * `useOrchestrationCommand` for work sent to a thread, which wakes its
+ * sandbox first when it sleeps. While it sleeps, its owner's grant is
+ * checked instead (`canSendWorkAtom`).
+ */
+export function useWorkCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
+  command: AtomCommand<W, A, E>,
+  options?: string | AtomCommandOptions,
+): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
+  return useGuardedCommand(command, options, readCanSendWork);
 }

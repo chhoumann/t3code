@@ -30,6 +30,7 @@ export type ThreadActionMenuId =
   | "copy-thread"
   | "copy-thread-id"
   | "archive"
+  | "delete-sandbox"
   | "delete";
 
 export type DraftActionMenuId =
@@ -38,6 +39,29 @@ export type DraftActionMenuId =
   | "copy-branch"
   | "project-settings"
   | "discard";
+
+export type PendingSandboxMenuId = "retry" | "delete-sandbox";
+
+/** Right-click menu for a launching sandbox's row in the sidebar. */
+export function buildPendingSandboxMenuItems(
+  options: {
+    readonly retryable: boolean;
+  },
+  resolve: MessageResolver = m,
+): ReadonlyArray<ContextMenuItem<PendingSandboxMenuId>> {
+  return [
+    ...(options.retryable
+      ? [{ id: "retry" as const, label: resolve(msg("Retry")), icon: "refresh-cw" }]
+      : []),
+    {
+      id: "delete-sandbox",
+      label: resolve(msg("Delete sandbox")),
+      icon: "trash",
+      destructive: true,
+      separatorBefore: options.retryable,
+    },
+  ];
+}
 
 export function buildDraftActionMenuItems(
   options: {
@@ -113,6 +137,8 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects attached providers, so disable it while running. */
   readonly isRunning: boolean;
+  /** The thread lives in a sandbox, which its owner can delete outright. */
+  readonly isSandbox: boolean;
   /** The server marks unread against the latest run's completion, so in-flight runs cannot be. */
   readonly hasCompletedRun: boolean;
   readonly supports: {
@@ -317,6 +343,16 @@ export function buildThreadActionMenuItems(
       disabled: state.isRunning,
       separatorBefore: true,
     },
+    ...(state.isSandbox
+      ? [
+          {
+            id: "delete-sandbox" as const,
+            label: resolve(msg("Delete sandbox")),
+            destructive: true,
+            icon: "trash",
+          },
+        ]
+      : []),
     {
       id: "delete",
       label: resolve(msg("Delete", { $context: "verb, delete the thread" })),

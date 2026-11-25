@@ -29,6 +29,11 @@ export const ConnectionCatalogDocument = Schema.Struct({
   disabledEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
+  // Saved environments last known not to answer, such as sandboxes whose
+  // machines sleep (`ConnectionCatalogEntry.dormant`).
+  dormantEnvironmentIds: Schema.Array(EnvironmentId).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
+  ),
 });
 export type ConnectionCatalogDocument = typeof ConnectionCatalogDocument.Type;
 
@@ -39,6 +44,7 @@ export const EMPTY_CONNECTION_CATALOG_DOCUMENT: ConnectionCatalogDocument = Obje
   credentials: [],
   remoteDpopTokens: [],
   disabledEnvironmentIds: [],
+  dormantEnvironmentIds: [],
 });
 
 export function replaceCatalogValue<A>(
@@ -168,6 +174,11 @@ export function removeConnectionFromCatalog(
       (value) => value,
       environmentId,
     ),
+    dormantEnvironmentIds: removeCatalogValue(
+      next.dormantEnvironmentIds,
+      (value) => value,
+      environmentId,
+    ),
     ...(next.githubRoutingPermissions === undefined
       ? {}
       : {
@@ -192,6 +203,24 @@ export function setConnectionEnabledInCatalog(
   return {
     ...document,
     disabledEnvironmentIds: registered && !enabled ? [...without, environmentId] : without,
+  };
+}
+
+/** Flips the dormant flag for a saved environment; unknown ids are ignored. */
+export function setConnectionDormantInCatalog(
+  document: ConnectionCatalogDocument,
+  environmentId: EnvironmentId,
+  dormant: boolean,
+): ConnectionCatalogDocument {
+  const registered = document.targets.some((target) => target.environmentId === environmentId);
+  const without = removeCatalogValue(
+    document.dormantEnvironmentIds,
+    (value) => value,
+    environmentId,
+  );
+  return {
+    ...document,
+    dormantEnvironmentIds: registered && dormant ? [...without, environmentId] : without,
   };
 }
 

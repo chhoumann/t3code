@@ -1,7 +1,11 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { parseT3ProjectFile, T3ProjectFileFromJson } from "./t3ProjectFile.ts";
+import {
+  parseT3ProjectFile,
+  projectScriptsFromT3ProjectFile,
+  T3ProjectFileFromJson,
+} from "./t3ProjectFile.ts";
 
 const decodeJson = Schema.decodeUnknownSync(T3ProjectFileFromJson);
 
@@ -28,5 +32,45 @@ describe("parseT3ProjectFile", () => {
         "defaultThreadEnvMode": "worktree"
       }`),
     ).toEqual({ defaultThreadEnvMode: "worktree" });
+  });
+});
+
+describe("projectScriptsFromT3ProjectFile", () => {
+  it("imports scripts with stable ids and the defaults the scripts menu assumes", () => {
+    expect(
+      projectScriptsFromT3ProjectFile({
+        scripts: [
+          { name: "Dev", command: "pnpm dev", previewUrl: "http://localhost:3000" },
+          {
+            name: "Install",
+            command: "pnpm i",
+            icon: "build",
+            runOnWorktreeCreate: true,
+            async: false,
+            runOnSettle: true,
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        id: "t3json-1",
+        name: "Dev",
+        command: "pnpm dev",
+        icon: "play",
+        runOnWorktreeCreate: false,
+        previewUrl: "http://localhost:3000",
+        autoOpenPreview: false,
+      },
+      {
+        id: "t3json-2",
+        name: "Install",
+        command: "pnpm i",
+        icon: "build",
+        runOnWorktreeCreate: true,
+        runOnSettle: true,
+        async: false,
+      },
+    ]);
+    expect(projectScriptsFromT3ProjectFile({})).toEqual([]);
   });
 });

@@ -62,6 +62,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -647,6 +648,7 @@ const make = Effect.gen(function* () {
   const layerScope = yield* Effect.scope;
   const agentScope = yield* AgentScope;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+  const managedSandbox = yield* ManagedSandbox.ManagedSandbox;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   const worktreeRestore = yield* ThreadWorktreeRestore;
@@ -789,6 +791,14 @@ const make = Effect.gen(function* () {
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
     );
 
+  const activeTopLevelThreads = orchestrator
+    .getShellSnapshot({ location: "active" })
+    .pipe(
+      Effect.map((snapshot) =>
+        snapshot.threads.filter((thread) => thread.lineage.parentThreadId === null),
+      ),
+    );
+
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
       case "thread.metadata.update":
@@ -844,11 +854,27 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) => {
+    const run = ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );
+    switch (command.type) {
+      case "thread.archive":
+      case "thread.delete":
+        return ManagedSandbox.guardLastActiveThread(
+          managedSandbox,
+          {
+            operation: command.type === "thread.archive" ? "archive-thread" : "delete-thread",
+            activeTopLevelThreads,
+            removes: (thread) => thread.id === command.threadId,
+          },
+          run,
+        );
+      default:
+        return run;
+    }
+  };
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
     input,

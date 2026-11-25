@@ -1,0 +1,98 @@
+import { useAtomValue } from "@effect/atom-react";
+import { SANDBOX_STATUS_LABEL, sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
+import type { EnvironmentId, SandboxView } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
+import { BoxIcon, PlayIcon } from "lucide-react";
+
+import { useSandboxActions } from "../../hooks/useSandboxActions";
+import { readLocalApi } from "../../localApi";
+import { sandboxes } from "../../state/sandboxes";
+import { Button } from "../ui/button";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
+
+/**
+ * Sandboxes put away by archiving their last thread or by Stop. They leave
+ * the sidebar, so the sandbox stands in for its threads here: Resume brings
+ * the machine and its threads back. A sandbox that only sleeps keeps its
+ * threads in the sidebar instead.
+ */
+export function StoppedSandboxesSection(props: {
+  readonly ownerEnvironmentIds: ReadonlyArray<EnvironmentId>;
+}) {
+  const gt = useGT();
+  const owners = useAtomValue(sandboxes.ownersAtom);
+  const stopped = props.ownerEnvironmentIds.flatMap((ownerEnvironmentId) =>
+    (owners.get(ownerEnvironmentId) ?? [])
+      .filter((sandbox) => sandboxPresence(sandbox) === "put-away")
+      .map((sandbox) => ({ ownerEnvironmentId, sandbox })),
+  );
+  if (stopped.length === 0) return null;
+  return (
+    <SettingsSection title={gt("Stopped sandboxes")} icon={<BoxIcon className="size-3.5" />}>
+      {stopped.map(({ ownerEnvironmentId, sandbox }) => (
+        <StoppedSandboxRow
+          key={sandbox.id}
+          ownerEnvironmentId={ownerEnvironmentId}
+          sandbox={sandbox}
+        />
+      ))}
+    </SettingsSection>
+  );
+}
+
+function StoppedSandboxRow(props: {
+  readonly ownerEnvironmentId: EnvironmentId;
+  readonly sandbox: SandboxView;
+}) {
+  const gt = useGT();
+  const { sandbox } = props;
+  const navigate = useNavigate();
+  const { setDesired, confirmAndDelete } = useSandboxActions();
+  const ref = { ownerEnvironmentId: props.ownerEnvironmentId, view: sandbox };
+  // Archiving a sandbox's last thread stops the sandbox and leaves the thread
+  // active, so resuming needs only the owner. The launch view opens the thread.
+  const resume = async () => {
+    if (!(await setDesired(ref, "running"))) return;
+    await navigate({
+      to: "/sandbox/$environmentId/$sandboxId",
+      params: { environmentId: props.ownerEnvironmentId, sandboxId: sandbox.id },
+    });
+  };
+  return (
+    <SettingsRow
+      title={sandbox.title}
+      description={SANDBOX_STATUS_LABEL[sandbox.status._tag]}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        void readLocalApi()
+          ?.contextMenu.show(
+            [
+              { id: "resume", label: gt("Resume") },
+              { id: "delete-sandbox", label: gt("Delete sandbox"), destructive: true },
+            ],
+            { x: event.clientX, y: event.clientY },
+          )
+          .then((clicked) => {
+            if (clicked === "resume") void resume();
+            if (clicked === "delete-sandbox") void confirmAndDelete(ref);
+          });
+      }}
+      control={
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          className="shrink-0"
+          disabled={sandbox.status._tag === "stopping"}
+          onClick={() => void resume()}
+        >
+          <PlayIcon className="size-3.5" />
+          <span>
+            <T>Resume</T>
+          </span>
+        </Button>
+      }
+    />
+  );
+}

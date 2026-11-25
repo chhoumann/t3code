@@ -1,5 +1,10 @@
 import { isLoopbackHost } from "./preview.ts";
 
+const SETTINGS_KEYS = ["machine", "project", "checkout", "environmentId", "instanceId"];
+/** GitHub sends the browser back here after creating, installing, or authorizing the sandbox App. */
+const GITHUB_CALLBACK_PATH_PREFIX = "/settings/sandboxes/github/callback/";
+const GITHUB_CALLBACK_KEYS = ["code", "state", "installation_id", "setup_action"];
+
 export function providerAuthReturnUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
@@ -17,11 +22,11 @@ export function providerAuthReturnUrl(value: string | undefined): string | undef
         !url.pathname.startsWith("/settings/"))
     )
       return undefined;
+    const allowedKeys = url.pathname.startsWith(GITHUB_CALLBACK_PATH_PREFIX)
+      ? GITHUB_CALLBACK_KEYS
+      : SETTINGS_KEYS;
     for (const key of Array.from(url.searchParams.keys())) {
-      if (
-        url.pathname === "/welcome" ||
-        !["machine", "project", "checkout", "environmentId", "instanceId"].includes(key)
-      ) {
+      if (url.pathname === "/welcome" || !allowedKeys.includes(key)) {
         url.searchParams.delete(key);
       }
     }

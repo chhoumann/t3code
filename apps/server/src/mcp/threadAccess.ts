@@ -109,6 +109,7 @@ export const dispatchFailure = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
 ) =>
   error._tag === "ThreadManagementProviderInstanceDisabledError" ||
+  error._tag === "SandboxManagedByOwnerError" ||
   error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
   error._tag === "OrchestratorProviderSelectionBusyError"
     ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })

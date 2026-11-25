@@ -594,6 +594,15 @@ export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(
   return yield* simpleThreadCommand("thread.unarchive", input);
 });
 
+/** Unarchives the thread unless it is already active; none when it was. */
+export const unarchiveThreadIfArchived = Effect.fn("EnvironmentCommands.unarchiveThreadIfArchived")(
+  function* (input: UnarchiveThreadInput) {
+    const projection = yield* getProjection(input.threadId);
+    if (projection.thread.archivedAt === null) return Option.none();
+    return Option.some(yield* simpleThreadCommand("thread.unarchive", input));
+  },
+);
+
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (
   input: SettleThreadInput,
 ) {

@@ -70,6 +70,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import {
   threadTriagePermitted,
   useOrchestrationCommand,
+  useWorkCommand,
 } from "../../state/use-orchestration-command";
 import {
   backgroundWorkNowItem,
@@ -204,7 +205,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   const regenerateThreadTitle = useOrchestrationCommand(threadEnvironment.regenerateTitle, {
     reportFailure: false,
   });
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
+  const startThreadTurn = useWorkCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const interruptThreadTurn = useOrchestrationCommand(threadEnvironment.interruptTurn, {

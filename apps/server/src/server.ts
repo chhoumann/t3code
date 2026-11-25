@@ -159,6 +159,7 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as ProjectProvisioning from "./project/ProjectProvisioning.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
@@ -257,6 +258,13 @@ import {
   readTailscaleStatus,
 } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as BoatSandboxProvider from "./sandbox/BoatSandboxProvider.ts";
+import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
+import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
+import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
+import * as SandboxGuest from "./sandbox/SandboxGuest.ts";
+import * as SandboxService from "./sandbox/SandboxService.ts";
 
 // Escaped MCP handoff provenance can exceed find-my-way's 100-character segment default.
 const HTTP_ROUTER_CONFIG = {
@@ -720,6 +728,17 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
+// Sandbox machines this environment owns. Building the service plans every
+// unsettled sandbox again, so a restart picks up each one where it stopped.
+const layerSandboxes = SandboxService.layer.pipe(
+  Layer.provide(SandboxService.layerT3BuildFromConfig),
+  Layer.provideMerge(SandboxAccounts.layer),
+  Layer.provideMerge(GitHubAppConnection.layer),
+  Layer.provide(SandboxGuest.layer),
+  Layer.provide(BoatSandboxProvider.layer),
+  Layer.provide(NodeSocket.layerWebSocketConstructor),
+);
+
 // The desktop app and the background service start the server again after it exits.
 const layerServerRestart = Layer.effect(
   DatabaseStorage.ServerRestart,
@@ -784,43 +803,49 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ProviderInstallation.layer,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
-).pipe(
-  Layer.provideMerge(layerOrchestrationApplication),
-  // One hub, which the feeders above and the workflow store inside the runtime publish to.
-  Layer.provideMerge(MilestoneHub.layer),
-  Layer.provideMerge(Layer.merge(layerTaskFolders, LayoutCommandApprovalWrites.layer)),
-  Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
-  Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
-  Layer.provideMerge(SecretCheck.layer),
-  Layer.provideMerge(SecretResolver.layer),
-  // Above the settings it writes when a theme is applied.
-  Layer.provideMerge(EnvironmentTheme.layer),
-  Layer.provideMerge(layerServerSettings),
-  Layer.provideMerge(layerSourceControlProviderRegistry),
-  Layer.provideMerge(layerGit),
-  Layer.provideMerge(layerVcs),
-  Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
-  Layer.provideMerge(layerPersistence),
-  Layer.provideMerge(Layer.mergeAll(Keybindings.layer, UsageLimitSources.layer)),
-  Layer.provideMerge(ProviderRegistry.layer),
-  Layer.provideMerge(
-    ProviderInstanceRegistryHydration.layer.pipe(Layer.provide(SqlitePersistence.layerConfig)),
-  ),
-  // One gate for the server, below hydration so the Claude adapter sees it: layers memoize by
-  // reference, so the runtime layer shares it.
-  Layer.provideMerge(ProviderInstallationGate.layer),
-  // Provider hydration builds the Claude runner, which reports agents to the same scanner the
-  // terminal and preview layers share.
-  Layer.provideMerge(layerPortScanner),
-  Layer.provideMerge(
-    Layer.mergeAll(
-      AntigravityInstallation.AntigravityInstallation.layer.pipe(
-        Layer.provide(layerServerSettings),
-      ),
-      CodexInstallation.CodexInstallation.layer,
+)
+  .pipe(
+    Layer.provideMerge(layerSandboxes),
+    // Needs the project service below and the clone tracker, which thread launch guards with.
+    Layer.provideMerge(ProjectProvisioning.layer),
+    Layer.provideMerge(layerOrchestrationApplication),
+    // One hub, which the feeders above and the workflow store inside the runtime publish to.
+    Layer.provideMerge(MilestoneHub.layer),
+    Layer.provideMerge(Layer.merge(layerTaskFolders, LayoutCommandApprovalWrites.layer)),
+    Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
+    Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
+    Layer.provideMerge(SecretCheck.layer),
+    Layer.provideMerge(SecretResolver.layer),
+    // Above the settings it writes when a theme is applied.
+    Layer.provideMerge(EnvironmentTheme.layer),
+    Layer.provideMerge(layerServerSettings),
+    Layer.provideMerge(layerSourceControlProviderRegistry),
+    Layer.provideMerge(layerGit),
+    Layer.provideMerge(layerVcs),
+    Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
+    Layer.provideMerge(layerPersistence),
+    Layer.provideMerge(Layer.mergeAll(Keybindings.layer, UsageLimitSources.layer)),
+    Layer.provideMerge(ProviderRegistry.layer),
+    Layer.provideMerge(
+      ProviderInstanceRegistryHydration.layer.pipe(Layer.provide(SqlitePersistence.layerConfig)),
     ),
-  ),
-);
+    // One gate for the server, below hydration so the Claude adapter sees it: layers memoize by
+    // reference, so the runtime layer shares it.
+    Layer.provideMerge(ProviderInstallationGate.layer),
+  )
+  .pipe(
+    // Provider hydration builds the Claude runner, which reports agents to the same scanner the
+    // terminal and preview layers share.
+    Layer.provideMerge(layerPortScanner),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AntigravityInstallation.AntigravityInstallation.layer.pipe(
+          Layer.provide(layerServerSettings),
+        ),
+        CodexInstallation.CodexInstallation.layer,
+      ),
+    ),
+  );
 
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerPtyAdapter),
@@ -1439,6 +1464,8 @@ const layerMakeServer = Layer.unwrap(
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(VcsProcess.layer),
+      // Read once at startup, before the services and MCP tools that depend on it are built.
+      Layer.provideMerge(ManagedSandbox.layer),
       Layer.provideMerge(AgentScopeLive.layer),
       Layer.provideMerge(layerPlatformServices),
       Layer.provideMerge(FeatureFlags.layer),

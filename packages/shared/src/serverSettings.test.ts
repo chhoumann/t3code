@@ -91,6 +91,27 @@ describe("fallbackTextGenerationModelSelection", () => {
 });
 
 describe("serverSettings helpers", () => {
+  it("replaces or clears one sandbox binding without losing another project's defaults", () => {
+    const initial = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      sandboxProjectDefaults: {
+        quickadd: { template: "quickadd", size: "large", stopAfterHours: null },
+        website: { template: "node" },
+      },
+    });
+    const changed = applyServerSettingsPatch(initial, {
+      sandboxProjectDefaults: { quickadd: { template: "quickadd-v2" } },
+    });
+    expect(changed.sandboxProjectDefaults).toEqual({
+      quickadd: { template: "quickadd-v2" },
+      website: { template: "node" },
+    });
+    expect(
+      applyServerSettingsPatch(changed, {
+        sandboxProjectDefaults: { quickadd: null },
+      }).sandboxProjectDefaults,
+    ).toEqual({ website: { template: "node" } });
+  });
+
   it("translates a shipped client's idle compaction switch into a mode", () => {
     const off = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { idleCompaction: "off" });
     expect([off.idleCompaction, off.compactIdleThreads]).toEqual(["off", false]);

@@ -11,6 +11,7 @@ import {
   type ThreadSearchSubject,
 } from "@t3tools/shared/paletteSearch";
 import { threadSearchSubject } from "@t3tools/client-runtime/state/thread-search";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
 import {
   addProjectRemoteSourceLabel,
@@ -22,16 +23,20 @@ import {
 import {
   type ScopedThreadRef,
   type EnvironmentId,
-  type ProjectId,
   type EnvironmentMachineKind,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type ProjectId,
+  type SandboxRemoteUrl,
+  type ScopedProjectRef,
   type SourceControlDiscoveryResult,
   type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
+import { parseSandboxBase } from "@t3tools/client-runtime/state/sandboxes";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
+import type { SandboxRunChoice } from "./BranchToolbar.logic";
 import { type ReactNode } from "react";
 import { msg } from "gt-react";
 import { m, type MessageResolver } from "../i18n/messages";
@@ -872,6 +877,8 @@ export type AddProjectCloneFlow =
       readonly step: "repository";
       readonly environmentId: EnvironmentId;
       readonly source: AddProjectRemoteSource;
+      /** Opens a new sandbox's draft for the repository instead of cloning it here. */
+      readonly sandbox?: SandboxRunChoice;
     }
   | {
       readonly step: "confirm";
@@ -880,7 +887,45 @@ export type AddProjectCloneFlow =
       readonly repositoryInput: string;
       readonly repository: SourceControlRepositoryInfo | null;
       readonly remoteUrl: string;
+    }
+  | {
+      readonly step: "base";
+      readonly environmentId: EnvironmentId;
+      readonly source: AddProjectRemoteSource;
+      readonly sandbox: SandboxRunChoice;
+      readonly repositoryTitle: string;
+      readonly remoteUrl: SandboxRemoteUrl;
     };
+
+/**
+ * The project a sandbox draft opens in on its owner, when the owner offers no
+ * scratch threads: the current project when it is the owner's, else the
+ * owner's default, else any project of the owner's. Null when it has none.
+ */
+export function resolveSandboxDraftProject(input: {
+  readonly owner: EnvironmentId;
+  readonly current: ScopedProjectRef | null;
+  readonly defaultProject: ScopedProjectRef | null;
+  readonly projects: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: ProjectId;
+  }>;
+}): ScopedProjectRef | null {
+  if (input.current?.environmentId === input.owner) return input.current;
+  if (input.defaultProject?.environmentId === input.owner) return input.defaultProject;
+  const owned = input.projects.find((project) => project.environmentId === input.owner);
+  return owned === undefined ? null : scopeProjectRef(owned.environmentId, owned.id);
+}
+
+/** What Enter does with the typed base of a sandbox, or why it cannot. */
+export function sandboxBaseStepMessage(query: string, resolve: MessageResolver = m): string {
+  const base = parseSandboxBase(query);
+  if (base === null)
+    return resolve(msg('"{name}" is not a valid branch name.', { name: query.trim() }));
+  return base._tag === "default"
+    ? resolve(msg("Press Enter to start from the default branch."))
+    : resolve(msg("Press Enter to start from {branch}.", { branch: base.name }));
+}
 
 export function remoteProjectInputPlaceholder(
   flow: AddProjectCloneFlow | null,
@@ -888,6 +933,9 @@ export function remoteProjectInputPlaceholder(
 ): string | null {
   if (!flow) return null;
   if (flow.step === "confirm") return null;
+  if (flow.step === "base") {
+    return resolve(msg("Branch to start from, or empty for the default branch"));
+  }
   if (flow.source === "url") {
     return resolve(msg("Enter Git clone URL"));
   }

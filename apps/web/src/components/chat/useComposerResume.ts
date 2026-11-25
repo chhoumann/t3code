@@ -18,10 +18,11 @@ import { newMessageId } from "~/lib/utils";
 import type { ComposerHandleRef } from "../../composerHandleContext";
 import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { threadEnvironment } from "../../state/threads";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { useWorkCommand } from "../../state/use-orchestration-command";
 import type { makeThreadErrorSetter } from "../ChatView.logic";
 import { draftSendState } from "./chatViewSend";
 import type { useTimelineFollow } from "./useTimelineFollow";
+import type { SandboxWorkGate } from "./useHeldSandboxWork";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 
 interface ComposerResumeInput {
@@ -35,7 +36,7 @@ interface ComposerResumeInput {
   readonly isSendBusy: boolean;
   readonly isRevertingCheckpoint: boolean;
   readonly threadDetailLoading: boolean;
-  readonly activeEnvironmentUnavailable: boolean;
+  readonly sandboxWork: SandboxWorkGate;
   readonly runtimeMode: RuntimeMode;
   readonly localCheckoutBranchMismatch: { readonly currentBranch: string } | null;
   readonly composerRef: ComposerHandleRef;
@@ -67,7 +68,7 @@ export function useComposerResume(input: ComposerResumeInput) {
     isSendBusy,
     isRevertingCheckpoint,
     threadDetailLoading,
-    activeEnvironmentUnavailable,
+    sandboxWork,
     runtimeMode,
     localCheckoutBranchMismatch,
     composerRef,
@@ -76,10 +77,10 @@ export function useComposerResume(input: ComposerResumeInput) {
     scrollToEnd,
     setThreadError,
   } = input;
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
+  const startThreadTurn = useWorkCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
-  const resumeThreadQueue = useOrchestrationCommand(threadEnvironment.resumeThreadQueue, {
+  const resumeThreadQueue = useWorkCommand(threadEnvironment.resumeThreadQueue, {
     reportFailure: false,
   });
   const [resumingThreadKeys, setResumingThreadKeys] = useState<ReadonlySet<string>>(
@@ -88,17 +89,21 @@ export function useComposerResume(input: ComposerResumeInput) {
   const isResuming = resumingThreadKeys.has(routeThreadKey);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
 
+  /** Whether a resume can't start now, so `onResume` does nothing. */
+  const resumeBlocked = () =>
+    !canResume ||
+    isSendBusy ||
+    isResuming ||
+    isRevertingCheckpoint ||
+    threadDetailLoading ||
+    sandboxWork.delivery === "offline" ||
+    sendInFlightRef.current ||
+    sandboxWork.isHolding();
+
   const onResume = async () => {
-    if (
-      !activeThread ||
-      !canResume ||
-      isSendBusy ||
-      isResuming ||
-      isRevertingCheckpoint ||
-      threadDetailLoading ||
-      activeEnvironmentUnavailable ||
-      sendInFlightRef.current
-    ) {
+    if (!activeThread || resumeBlocked()) return;
+    if (sandboxWork.delivery === "after-wake") {
+      sandboxWork.hold({ kind: "resume" });
       return;
     }
     const threadId = activeThread.id;
@@ -166,5 +171,5 @@ export function useComposerResume(input: ComposerResumeInput) {
     });
   };
 
-  return { onResume, isResuming };
+  return { onResume, resumeBlocked, isResuming };
 }

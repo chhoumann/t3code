@@ -17,6 +17,7 @@ import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as ApproveAgentRouteImport } from './routes/approve-agent'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as SettingsSandboxesRouteImport } from './routes/settings.sandboxes'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatWorkflowsRouteImport } from './routes/_chat.workflows'
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
@@ -54,6 +55,8 @@ import { Route as ChatSettingsAccessRouteImport } from './routes/_chat.settings.
 import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.about'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
+import { Route as ChatSandboxEnvironmentIdSandboxIdRouteImport } from './routes/_chat.sandbox.$environmentId.$sandboxId'
+import { Route as SettingsSandboxesGithubCallbackEnvironmentIdRouteImport } from './routes/settings.sandboxes_.github.callback.$environmentId'
 import { Route as ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRouteImport } from './routes/_chat.linked.$viaEnvironmentId.$linkedEnvironmentId.$linkedThreadId'
 
 const WelcomeRoute = WelcomeRouteImport.update({
@@ -94,6 +97,11 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => ChatRoute,
+} as any)
+const SettingsSandboxesRoute = SettingsSandboxesRouteImport.update({
+  id: '/settings/sandboxes',
+  path: '/settings/sandboxes',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const ProjectsProjectKeyRoute = ProjectsProjectKeyRouteImport.update({
   id: '/projects/$projectKey',
@@ -286,6 +294,18 @@ const ChatEnvironmentIdThreadIdRoute =
     path: '/$environmentId/$threadId',
     getParentRoute: () => ChatRoute,
   } as any)
+const ChatSandboxEnvironmentIdSandboxIdRoute =
+  ChatSandboxEnvironmentIdSandboxIdRouteImport.update({
+    id: '/sandbox/$environmentId/$sandboxId',
+    path: '/sandbox/$environmentId/$sandboxId',
+    getParentRoute: () => ChatRoute,
+  } as any)
+const SettingsSandboxesGithubCallbackEnvironmentIdRoute =
+  SettingsSandboxesGithubCallbackEnvironmentIdRouteImport.update({
+    id: '/settings/sandboxes_/github/callback/$environmentId',
+    path: '/settings/sandboxes/github/callback/$environmentId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute =
   ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRouteImport.update(
     {
@@ -310,6 +330,7 @@ export interface FileRoutesByFullPath {
   '/usage': typeof ChatUsageRoute
   '/workflows': typeof ChatWorkflowsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
+  '/settings/sandboxes': typeof SettingsSandboxesRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
@@ -340,7 +361,9 @@ export interface FileRoutesByFullPath {
   '/settings/voice': typeof ChatSettingsVoiceRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
   '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
+  '/settings/sandboxes/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRoutesByTo {
   '/approve-agent': typeof ApproveAgentRoute
@@ -356,6 +379,7 @@ export interface FileRoutesByTo {
   '/usage': typeof ChatUsageRoute
   '/workflows': typeof ChatWorkflowsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
+  '/settings/sandboxes': typeof SettingsSandboxesRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -387,7 +411,9 @@ export interface FileRoutesByTo {
   '/settings/voice': typeof ChatSettingsVoiceRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
   '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
+  '/settings/sandboxes/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -405,6 +431,7 @@ export interface FileRoutesById {
   '/_chat/usage': typeof ChatUsageRoute
   '/_chat/workflows': typeof ChatWorkflowsRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
+  '/settings/sandboxes': typeof SettingsSandboxesRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -436,7 +463,9 @@ export interface FileRoutesById {
   '/_chat/settings/voice': typeof ChatSettingsVoiceRoute
   '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/_chat/sandbox/$environmentId/$sandboxId': typeof ChatSandboxEnvironmentIdSandboxIdRoute
   '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
+  '/settings/sandboxes_/github/callback/$environmentId': typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -455,6 +484,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/workflows'
     | '/projects/$projectKey'
+    | '/settings/sandboxes'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/settings/about'
@@ -485,7 +515,9 @@ export interface FileRouteTypes {
     | '/settings/voice'
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/sandbox/$environmentId/$sandboxId'
     | '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+    | '/settings/sandboxes/github/callback/$environmentId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/approve-agent'
@@ -501,6 +533,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/workflows'
     | '/projects/$projectKey'
+    | '/settings/sandboxes'
     | '/'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -532,7 +565,9 @@ export interface FileRouteTypes {
     | '/settings/voice'
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/sandbox/$environmentId/$sandboxId'
     | '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+    | '/settings/sandboxes/github/callback/$environmentId'
   id:
     | '__root__'
     | '/_chat'
@@ -549,6 +584,7 @@ export interface FileRouteTypes {
     | '/_chat/usage'
     | '/_chat/workflows'
     | '/projects/$projectKey'
+    | '/settings/sandboxes'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
@@ -580,7 +616,9 @@ export interface FileRouteTypes {
     | '/_chat/settings/voice'
     | '/_chat/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/_chat/sandbox/$environmentId/$sandboxId'
     | '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+    | '/settings/sandboxes_/github/callback/$environmentId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -592,7 +630,9 @@ export interface RootRouteChildren {
   PairRoute: typeof PairRoute
   WelcomeRoute: typeof WelcomeRoute
   ProjectsProjectKeyRoute: typeof ProjectsProjectKeyRoute
+  SettingsSandboxesRoute: typeof SettingsSandboxesRoute
   ThreadsEnvironmentIdThreadIdRoute: typeof ThreadsEnvironmentIdThreadIdRoute
+  SettingsSandboxesGithubCallbackEnvironmentIdRoute: typeof SettingsSandboxesGithubCallbackEnvironmentIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -652,6 +692,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
+    }
+    '/settings/sandboxes': {
+      id: '/settings/sandboxes'
+      path: '/settings/sandboxes'
+      fullPath: '/settings/sandboxes'
+      preLoaderRoute: typeof SettingsSandboxesRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/projects/$projectKey': {
       id: '/projects/$projectKey'
@@ -912,6 +959,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatEnvironmentIdThreadIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/sandbox/$environmentId/$sandboxId': {
+      id: '/_chat/sandbox/$environmentId/$sandboxId'
+      path: '/sandbox/$environmentId/$sandboxId'
+      fullPath: '/sandbox/$environmentId/$sandboxId'
+      preLoaderRoute: typeof ChatSandboxEnvironmentIdSandboxIdRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/settings/sandboxes_/github/callback/$environmentId': {
+      id: '/settings/sandboxes_/github/callback/$environmentId'
+      path: '/settings/sandboxes/github/callback/$environmentId'
+      fullPath: '/settings/sandboxes/github/callback/$environmentId'
+      preLoaderRoute: typeof SettingsSandboxesGithubCallbackEnvironmentIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': {
       id: '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
       path: '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
@@ -996,6 +1057,7 @@ interface ChatRouteChildren {
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
+  ChatSandboxEnvironmentIdSandboxIdRoute: typeof ChatSandboxEnvironmentIdSandboxIdRoute
   ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute: typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
 
@@ -1009,6 +1071,8 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
+  ChatSandboxEnvironmentIdSandboxIdRoute:
+    ChatSandboxEnvironmentIdSandboxIdRoute,
   ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute:
     ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute,
 }
@@ -1024,7 +1088,10 @@ const rootRouteChildren: RootRouteChildren = {
   PairRoute: PairRoute,
   WelcomeRoute: WelcomeRoute,
   ProjectsProjectKeyRoute: ProjectsProjectKeyRoute,
+  SettingsSandboxesRoute: SettingsSandboxesRoute,
   ThreadsEnvironmentIdThreadIdRoute: ThreadsEnvironmentIdThreadIdRoute,
+  SettingsSandboxesGithubCallbackEnvironmentIdRoute:
+    SettingsSandboxesGithubCallbackEnvironmentIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock(import("../../state/use-orchestration-command"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useOrchestrationCommand: (() => async (value: { readonly input: unknown }) => {
+  useWorkCommand: (() => async (value: { readonly input: unknown }) => {
     state.startedTurn?.resolve(value.input);
     return AsyncResult.success(undefined);
   }) as never,
@@ -56,7 +56,11 @@ function ResumeButton(props: {
     isSendBusy: false,
     isRevertingCheckpoint: false,
     threadDetailLoading: false,
-    activeEnvironmentUnavailable: false,
+    sandboxWork: {
+      delivery: "now",
+      isHolding: () => false,
+      hold: () => undefined,
+    },
     runtimeMode: "full-access",
     localCheckoutBranchMismatch: null,
     composerRef: props.composerRef,

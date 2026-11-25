@@ -37,7 +37,7 @@ import {
   trimAsciiWhitespace,
   type VcsRef,
 } from "@t3tools/contracts";
-import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
+import { dedupeRemoteBranchesWithLocalMatches, parseRemoteFetchUrls } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
@@ -153,6 +153,7 @@ const NON_REPOSITORY_STATUS_DETAILS = Object.freeze<GitVcsDriver.GitStatusDetail
   branch: null,
   upstreamRef: null,
   hasWorkingTreeChanges: false,
+  hasTrackedChanges: false,
   workingTree: { files: [], insertions: 0, deletions: 0 },
   hasUpstream: false,
   aheadCount: 0,
@@ -410,22 +411,6 @@ function sanitizeRemoteName(value: string): string {
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return sanitized.length > 0 ? sanitized : "fork";
-}
-
-function parseRemoteFetchUrls(stdout: string): Map<string, string> {
-  const remotes = new Map<string, string>();
-  for (const line of stdout.split(/\r?\n/)) {
-    // Git uses a tab before the URL and one space before the direction; both can occur in URLs.
-    // Partial clones append the promisor filter, e.g. `(fetch) [blob:none]`.
-    const match = /^(\S+)\t(.+) \((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(line);
-    if (!match) continue;
-    const [, remoteName = "", remoteUrl = "", direction = ""] = match;
-    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
-      continue;
-    }
-    remotes.set(remoteName, remoteUrl);
-  }
-  return remotes;
 }
 
 function parseUpstreamRefWithRemoteNames(
@@ -2279,6 +2264,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null));
   });
 
+  const listRemoteFetchUrls: GitVcsDriver.GitVcsDriver["Service"]["listRemoteFetchUrls"] = (cwd) =>
+    runGitStdout("GitVcsDriver.listRemoteFetchUrls", cwd, ["remote", "-v"]).pipe(
+      Effect.map(parseRemoteFetchUrls),
+    );
+
   const remoteRefContainsHead = (cwd: string, remoteRef: string) =>
     executeGit(
       "GitVcsDriver.pushCurrentBranch.publishContainsHead",
@@ -2323,24 +2313,21 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   )(function* (input) {
     const preferredName = sanitizeRemoteName(input.preferredName);
     const normalizedTargetUrl = sourceControlDefinitions.repositoryKeyFromRemote(input.url);
-    const listRemoteFetchUrls = runGitStdout(
-      "GitVcsDriver.ensureRemote.listRemoteUrls",
-      input.cwd,
-      ["remote", "-v"],
-    ).pipe(Effect.map((stdout) => parseRemoteFetchUrls(stdout)));
-    const findMatchingRemote = (remoteFetchUrls: Map<string, string>) =>
-      Array.from(remoteFetchUrls.entries()).find(
-        ([, remoteUrl]) =>
-          sourceControlDefinitions.repositoryKeyFromRemote(remoteUrl) === normalizedTargetUrl,
-      )?.[0];
+    const findMatchingRemote = (
+      remotes: ReadonlyArray<{ readonly name: string; readonly url: string }>,
+    ) =>
+      remotes.find(
+        (remote) =>
+          sourceControlDefinitions.repositoryKeyFromRemote(remote.url) === normalizedTargetUrl,
+      )?.name;
 
-    const remoteFetchUrls = yield* listRemoteFetchUrls;
-    const existing = findMatchingRemote(remoteFetchUrls);
+    const remotes = yield* listRemoteFetchUrls(input.cwd);
+    const existing = findMatchingRemote(remotes);
     if (existing !== undefined) return existing;
 
     let remoteName = preferredName;
     let suffix = 1;
-    while (remoteFetchUrls.has(remoteName)) {
+    while (remotes.some((remote) => remote.name === remoteName)) {
       remoteName = `${preferredName}-${suffix}`;
       suffix += 1;
     }
@@ -2355,7 +2342,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.as(remoteName),
       // A parallel launch for the same fork may have added it since the listing above.
       Effect.catch((error) =>
-        listRemoteFetchUrls.pipe(
+        listRemoteFetchUrls(input.cwd).pipe(
           Effect.flatMap((current) => {
             const added = findMatchingRemote(current);
             return added === undefined ? Effect.fail(error) : Effect.succeed(added);
@@ -3009,6 +2996,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const statusStdout = statusResult.stdout;
 
     let refName: string | null = null;
+    let headCommit: string | null = null;
     let upstreamRef: string | null = null;
     // Git omits branch.ab when the upstream ref is gone, e.g. deleted after its PR merged,
     // and also for an unborn HEAD, which can still track a fetched upstream.
@@ -3019,6 +3007,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     let behindCount = 0;
     let aheadOfDefaultCount = 0;
     let hasWorkingTreeChanges = false;
+    let hasTrackedChanges = false;
     const changedFilesWithoutNumstat = new Set<string>();
     const untrackedRoots: string[] = [];
 
@@ -3027,10 +3016,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const line = statusRecords[index]!;
       if (line === "# branch.oid (initial)") {
         isUnbornHead = true;
+        headCommit = null;
         continue;
       }
       if (line.startsWith("# branch.oid ")) {
         headOid = line.slice("# branch.oid ".length).trim();
+        headCommit = headOid;
         continue;
       }
       if (line.startsWith("# branch.head ")) {
@@ -3055,6 +3046,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }
       if (line.length > 0 && !line.startsWith("#")) {
         hasWorkingTreeChanges = true;
+        if (!line.startsWith("? ")) hasTrackedChanges = true;
         const pathValue = parsePorcelainPath(line);
         if (pathValue) {
           changedFilesWithoutNumstat.add(pathValue);
@@ -3149,8 +3141,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       hasOriginRemote: hasPrimaryRemote,
       isDefaultBranch,
       branch: refName,
+      ...(headCommit === null ? {} : { headCommit }),
       upstreamRef,
       hasWorkingTreeChanges,
+      hasTrackedChanges,
       workingTree: {
         ...(repositoryPaths?.worktreeRoot ? { rootPath: repositoryPaths.worktreeRoot } : {}),
         files,
@@ -3203,7 +3197,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         hasPrimaryRemote: details.hasOriginRemote,
         isDefaultRef: details.isDefaultBranch,
         refName: details.branch,
+        ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
         hasWorkingTreeChanges: details.hasWorkingTreeChanges,
+        hasTrackedChanges: details.hasTrackedChanges,
         workingTree: details.workingTree,
         hasUpstream: details.hasUpstream,
         aheadCount: details.aheadCount,
@@ -7214,6 +7210,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     ensureRemote: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, ensureRemote(input));
     }),
+    listRemoteFetchUrls,
     resolvePrimaryRemoteName,
     resolveDefaultBranchName,
     fetchRemote: Effect.fnUntraced(function* (input) {

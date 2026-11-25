@@ -41,6 +41,24 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  SandboxAccountConfig,
+  SandboxAccountId,
+  SandboxAccountRemoveInput,
+  SandboxAccountSaveInput,
+  SandboxConnectInput,
+  SandboxConnectResult,
+  SandboxError,
+  SandboxGitHubBeginInput,
+  SandboxGitHubCompleteInput,
+  SandboxGitHubDisconnectInput,
+  SandboxGitHubFlowNext,
+  SandboxGitHubFlowStart,
+  SandboxLaunchInput,
+  SandboxManagedByOwnerError,
+  SandboxUpdateInput,
+  SandboxView,
+} from "./sandbox.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -659,6 +677,18 @@ export const WS_METHODS = {
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  // Sandboxes this environment owns
+  sandboxesSubscribe: "sandboxes.subscribe",
+  sandboxesListTemplates: "sandboxes.listTemplates",
+  sandboxesLaunch: "sandboxes.launch",
+  sandboxesUpdate: "sandboxes.update",
+  sandboxesConnect: "sandboxes.connect",
+  sandboxesSaveAccount: "sandboxes.saveAccount",
+  sandboxesRemoveAccount: "sandboxes.removeAccount",
+  sandboxesGitHubBegin: "sandboxes.github.begin",
+  sandboxesGitHubComplete: "sandboxes.github.complete",
+  sandboxesGitHubDisconnect: "sandboxes.github.disconnect",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -1667,7 +1697,11 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
 const WsProjectsMutateRpc = Rpc.make(WS_METHODS.projectsMutate, {
   payload: ProjectMutation,
   success: Project,
-  error: Schema.Union([ProjectMutationError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectMutationError,
+    SandboxManagedByOwnerError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsProjectsEnsureScratchRpc = Rpc.make(WS_METHODS.projectsEnsureScratch, {
@@ -2118,7 +2152,11 @@ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
-  error: Schema.Union([OrchestrationV2DispatchCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    OrchestrationV2DispatchCommandError,
+    SandboxManagedByOwnerError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsOrchestrationV2GetTurnDiffRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getTurnDiff, {
@@ -2422,6 +2460,72 @@ const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
   },
 );
 
+/** Every sandbox this environment owns, then the whole list again after each change. */
+const WsSandboxesSubscribeRpc = Rpc.make(WS_METHODS.sandboxesSubscribe, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(SandboxView),
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsSandboxesListTemplatesRpc = Rpc.make(WS_METHODS.sandboxesListTemplates, {
+  payload: Schema.Struct({ accountId: SandboxAccountId }),
+  success: Schema.Array(Schema.String),
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Idempotent on `id`. */
+const WsSandboxesLaunchRpc = Rpc.make(WS_METHODS.sandboxesLaunch, {
+  payload: SandboxLaunchInput,
+  success: SandboxView,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesUpdateRpc = Rpc.make(WS_METHODS.sandboxesUpdate, {
+  payload: SandboxUpdateInput,
+  success: SandboxView,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+const WsSandboxesConnectRpc = Rpc.make(WS_METHODS.sandboxesConnect, {
+  payload: SandboxConnectInput,
+  success: SandboxConnectResult,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Refused, naming the missing actions, when the API key cannot run sandboxes. */
+const WsSandboxesSaveAccountRpc = Rpc.make(WS_METHODS.sandboxesSaveAccount, {
+  payload: SandboxAccountSaveInput,
+  success: SandboxAccountConfig,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Refused while the account still owns a sandbox that is not destroyed. */
+const WsSandboxesRemoveAccountRpc = Rpc.make(WS_METHODS.sandboxesRemoveAccount, {
+  payload: SandboxAccountRemoveInput,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Starts a GitHub App flow the client finishes in a browser; the callback route relays its result. */
+const WsSandboxesGitHubBeginRpc = Rpc.make(WS_METHODS.sandboxesGitHubBegin, {
+  payload: SandboxGitHubBeginInput,
+  success: SandboxGitHubFlowStart,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Relays GitHub's callback. Refused for a state it did not issue, used already, or expired. */
+const WsSandboxesGitHubCompleteRpc = Rpc.make(WS_METHODS.sandboxesGitHubComplete, {
+  payload: SandboxGitHubCompleteInput,
+  success: SandboxGitHubFlowNext,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
+/** Revokes the App user's authorization on GitHub and forgets their tokens. */
+const WsSandboxesGitHubDisconnectRpc = Rpc.make(WS_METHODS.sandboxesGitHubDisconnect, {
+  payload: SandboxGitHubDisconnectInput,
+  error: Schema.Union([SandboxError, EnvironmentAuthorizationError]),
+});
+
 const WsGuestShareCreateRpc = Rpc.make(WS_METHODS.guestShareCreate, {
   payload: GuestShareCreateInput,
   success: GuestShareCreateResult,
@@ -2475,7 +2579,21 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
   { error: EnvironmentAuthorizationError },
 ) {}
 
-export const WsRpcGroup = RpcGroup.make(
+/** The sandbox RPCs, kept in their own group so the server implements them in their own layer. */
+export const WsSandboxRpcGroup = RpcGroup.make(
+  WsSandboxesSubscribeRpc,
+  WsSandboxesListTemplatesRpc,
+  WsSandboxesLaunchRpc,
+  WsSandboxesUpdateRpc,
+  WsSandboxesConnectRpc,
+  WsSandboxesSaveAccountRpc,
+  WsSandboxesRemoveAccountRpc,
+  WsSandboxesGitHubBeginRpc,
+  WsSandboxesGitHubCompleteRpc,
+  WsSandboxesGitHubDisconnectRpc,
+).middleware(RpcScopeAuthorization);
+
+export const WsCoreRpcGroup = RpcGroup.make(
   WsIssuesListRpc,
   WsIssuesDetailRpc,
   WsIssuesCommentsRpc,
@@ -2736,3 +2854,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeCommandOutputRpc,
   WsOrchestrationV2SubscribePromptSuggestionRpc,
 ).middleware(RpcScopeAuthorization);
+
+export const WsRpcGroup = WsCoreRpcGroup.merge(WsSandboxRpcGroup);

@@ -8,6 +8,7 @@ import {
   type ProjectTrackedFolder,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
+  type SandboxManagedByOwnerError,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -39,6 +40,7 @@ import {
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
+import * as ManagedSandbox from "../sandbox/ManagedSandbox.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { deletedProjectOverridePatch } from "../provider/ProjectSettingsOverrideSweep.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -155,7 +157,10 @@ export class ProjectService extends Context.Service<
       ProjectServiceError
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
-    readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    /** Refused in a sandbox for the project its owner launched it with. */
+    readonly delete: (
+      input: ProjectDeleteInput,
+    ) => Effect.Effect<Project, ProjectServiceError | SandboxManagedByOwnerError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -201,6 +206,7 @@ export const make = Effect.gen(function* () {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+  const managedSandbox = yield* ManagedSandbox.ManagedSandbox;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -815,22 +821,40 @@ export const make = Effect.gen(function* () {
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
       const { projectId } = input;
-      // Read deleted rows so retries replay receipts and other command ids fail as not found.
-      const existing = yield* readRow(projectId, { includeDeleted: true });
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId });
-      }
+      const remove = Effect.gen(function* () {
+        // Read deleted rows so retries replay receipts and other command ids fail as not found.
+        const existing = yield* readRow(projectId, { includeDeleted: true });
+        if (Option.isNone(existing)) {
+          return yield* new ProjectNotFoundError({ projectId });
+        }
 
-      const isFirstDelete = existing.value.deletedAt === null;
-      if (isFirstDelete) {
-        yield* deleteChildThreads(input);
-      }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-      if (isFirstDelete) {
-        yield* clearProjectSettingsOverrides(projectId);
-      }
-      yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
-      return yield* readCommitted(projectId);
+        const isFirstDelete = existing.value.deletedAt === null;
+        if (isFirstDelete) {
+          yield* deleteChildThreads(input);
+        }
+        yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+        if (isFirstDelete) {
+          yield* clearProjectSettingsOverrides(projectId);
+        }
+        yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
+        return yield* readCommitted(projectId);
+      });
+      return yield* ManagedSandbox.guardLastActiveThread(
+        managedSandbox,
+        {
+          operation: "delete-project",
+          activeTopLevelThreads: threadProjections.getShellSnapshot().pipe(
+            Effect.map((snapshot) =>
+              snapshot.threads.filter((thread) => thread.lineage.parentThreadId === null),
+            ),
+            Effect.mapError(
+              (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+            ),
+          ),
+          removes: (thread) => thread.projectId === projectId,
+        },
+        remove,
+      );
     },
   );
 

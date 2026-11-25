@@ -244,7 +244,6 @@ function buildRepositoryIdentity(input: {
     ...(origin ? { origin } : {}),
   };
 }
-
 class RepositoryIdentityCacheKey extends Data.Class<{
   readonly rootPath: string;
   readonly isBare: boolean;

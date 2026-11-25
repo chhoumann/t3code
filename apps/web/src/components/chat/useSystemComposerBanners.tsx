@@ -11,7 +11,8 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { WifiOffIcon } from "lucide-react";
+import { type SandboxWakeStatus } from "@t3tools/client-runtime/state/sandboxes";
+import { CircleAlertIcon, MoonIcon, SunriseIcon, WifiOffIcon } from "lucide-react";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectionDiagnosisHeadline } from "../settings/ConnectionDiagnosisDetails";
@@ -52,6 +53,9 @@ interface SystemComposerBannersInput {
   readonly hasMultipleRegisteredEnvironments: boolean;
   readonly automaticEnvironment: boolean;
   readonly autoUpdateEnvironments: ReadonlyArray<EnvironmentPresentation>;
+  /** Whether the active environment is a sandbox that does not run now. */
+  readonly sandboxNotRunning: boolean;
+  readonly sandboxWakeStatus: SandboxWakeStatus | null;
 }
 
 /**
@@ -68,6 +72,8 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     hasMultipleRegisteredEnvironments,
     automaticEnvironment,
     autoUpdateEnvironments,
+    sandboxNotRunning,
+    sandboxWakeStatus,
   } = input;
   const gt = useGT();
   const messages = useMessages();
@@ -186,15 +192,36 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
+    // A sandbox that does not run is not an outage, nor is one this device has
+    // yet to dial; their wake status shows instead.
     const awaitingApproval = unavailableConnection?.awaitingApproval === true;
     const suppressUnavailableBanner =
-      environmentReconnecting &&
-      !awaitingApproval &&
-      (updateRunning || !reconnectWarningGraceElapsed);
+      sandboxNotRunning ||
+      (sandboxWakeStatus !== null && unavailableConnection?.phase === "available") ||
+      (environmentReconnecting &&
+        !awaitingApproval &&
+        (updateRunning || !reconnectWarningGraceElapsed));
     const showUnavailableBanner =
       activeEnvironmentUnavailableState !== null &&
       unavailableConnection !== null &&
       !suppressUnavailableBanner;
+    if (!showUnavailableBanner && sandboxWakeStatus !== null) {
+      const { kind, label } = sandboxWakeStatus;
+      items.push({
+        id: "sandbox-wake",
+        variant: kind === "failed" ? "error" : "default",
+        ...(kind === "waking" || kind === "connecting" ? { priority: "activity" as const } : {}),
+        icon:
+          kind === "asleep" ? (
+            <MoonIcon />
+          ) : kind === "failed" ? (
+            <CircleAlertIcon />
+          ) : (
+            <SunriseIcon />
+          ),
+        title: label,
+      });
+    }
     if (showUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,

@@ -132,7 +132,7 @@ const requireInput = Effect.fn("requireInput")(function* (inputPath: string, hin
 });
 
 /** Installed runtimes cannot rely on pnpm's store layout surviving archival. */
-const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
+export const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
   readonly repoRoot: string;
   readonly stageDir: string;
   readonly platform: BuildPlatform;

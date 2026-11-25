@@ -5,7 +5,9 @@ import { m as resolveMessage } from "~/i18n/messages";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import { Spinner } from "~/components/ui/spinner";
 import { ArchiveIcon, ArchiveX, Trash2Icon } from "lucide-react";
+import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
 import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   type AtomCommandResult,
@@ -15,6 +17,10 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import { useSandboxActions } from "../../hooks/useSandboxActions";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { sandboxes } from "../../state/sandboxes";
+import { StoppedSandboxesSection } from "./StoppedSandboxesSection";
 import { readLocalApi } from "../../localApi";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { RelativeTime } from "../RelativeTime";
@@ -90,6 +96,14 @@ export function ArchivedThreadsPanel() {
   const m = useMessages();
   const { scope, groups: projectGroups, environments } = useSettingsScope();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
+  const { confirmAndDelete: confirmAndDeleteSandbox } = useSandboxActions();
+  const sandboxIndex = useAtomValue(sandboxes.indexAtom);
+  // Only a running sandbox can answer for its archive. A put-away one's row
+  // under Stopped sandboxes stands in for its threads.
+  const archiveEnvironmentIds = scope.environmentIds.filter((environmentId) => {
+    const sandbox = sandboxIndex.get(environmentId);
+    return sandbox === undefined || sandboxPresence(sandbox.view) === "running";
+  });
   const pendingActionsRef = useRef(new Set<string>());
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const {
@@ -97,7 +111,7 @@ export function ArchivedThreadsPanel() {
     error: archiveError,
     isLoading: isLoadingArchive,
     refresh: refreshArchivedThreads,
-  } = useArchivedThreadSnapshots(scope.environmentIds);
+  } = useArchivedThreadSnapshots(archiveEnvironmentIds);
 
   const { groups: archivedGroups, hasMultipleEnvironments } = (() => {
     const selectedProjectKeys =
@@ -245,16 +259,23 @@ export function ArchivedThreadsPanel() {
   ) => {
     const pending = pendingActionsRef.current;
     if (pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))) return;
+    const sandbox = appAtomRegistry.get(sandboxes.indexAtom).get(thread.environmentId);
     const result = await settlePromise(async () => {
       const clicked = await readLocalApi()?.contextMenu.show(
-        ARCHIVE_ACTIONS.map(({ action, label }) => ({
-          id: action,
-          label: m(label),
-          destructive: action === "delete",
-        })),
+        [
+          { id: "unarchive", label: m(ARCHIVE_ACTIONS[0].label), destructive: false },
+          ...(sandbox
+            ? [{ id: "delete-sandbox" as const, label: gt("Delete sandbox"), destructive: true }]
+            : []),
+          { id: "delete", label: m(ARCHIVE_ACTIONS[1].label), destructive: true },
+        ],
         position,
         source,
       );
+      if (clicked === "delete-sandbox" && sandbox) {
+        if (await confirmAndDeleteSandbox(sandbox)) refreshArchivedThreads();
+        return;
+      }
       if (clicked === "unarchive" || clicked === "delete")
         await handleThreadAction(clicked, thread);
     });
@@ -368,6 +389,7 @@ export function ArchivedThreadsPanel() {
           </SettingsSection>
         ))
       )}
+      <StoppedSandboxesSection ownerEnvironmentIds={scope.environmentIds} />
     </SettingsPageContainer>
   );
 }

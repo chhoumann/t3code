@@ -1166,6 +1166,13 @@ it.effect("an agent's clone is not cut off while git is still transferring", () 
           execute: (input) =>
             Deferred.succeed(started, undefined).pipe(
               Effect.andThen(Deferred.await(transferred)),
+              Effect.andThen(
+                input.args.includes("clone") && input.args.at(-1)
+                  ? fs
+                      .makeDirectory(path.join(input.cwd, input.args.at(-1)!), { recursive: true })
+                      .pipe(Effect.orDie)
+                  : Effect.void,
+              ),
               Effect.as({
                 exitCode: ChildProcessSpawner.ExitCode(0),
                 stdout: "",

@@ -7,6 +7,7 @@ import {
   RouteIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
+import { SANDBOX_STATUS_LABEL } from "@t3tools/client-runtime/state/sandboxes";
 import { useEffect, useEffectEvent, useState } from "react";
 import {
   AuthRelayWriteScope,
@@ -27,6 +28,8 @@ import { msg, T, useGT, useMessages } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useSandboxActions } from "../../hooks/useSandboxActions";
+import { sandboxes } from "../../state/sandboxes";
 import { cn } from "../../lib/utils";
 import { SettingsRow } from "./settingsLayout";
 import { useSearchableSetting } from "./settingsSearch";
@@ -232,10 +235,23 @@ export function SavedBackendListRow({
       (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
   );
   const routeCount = connectionRoutes(environment.entry).length;
+  // A sandbox's owner switches its route on and off and removes it, so the
+  // row offers the sandbox's own lifecycle instead.
+  const sandbox = useAtomValue(sandboxes.indexAtom).get(environmentId) ?? null;
+  const sandboxStatus = sandbox?.view.status._tag ?? null;
+  const { setDesired: setSandboxDesired, confirmAndDelete: confirmAndDeleteSandbox } =
+    useSandboxActions();
   const subtitleText = [
+    sandbox ? gt("Sandbox") : null,
     environmentTransportLabel(environment, connectedTarget, messages),
-    // The headline below names the failure in full.
-    diagnosis ? null : resumingServerUpdate ? gt("Restarting") : status.text,
+    // The headline below names a connection failure in full.
+    sandboxStatus !== null && sandboxStatus !== "ready"
+      ? SANDBOX_STATUS_LABEL[sandboxStatus]
+      : diagnosis
+        ? null
+        : resumingServerUpdate
+          ? gt("Restarting")
+          : status.text,
     enabled && versionMismatch ? serverVersion : null,
   ]
     .filter((value): value is string => value !== null)
@@ -411,26 +427,40 @@ export function SavedBackendListRow({
           appearance="icon"
         />
       ) : null}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Switch
-              size="sm"
-              checked={enabled}
-              disabled={isRemoving || blocked}
-              aria-label={
-                enabled
-                  ? gt("Switch off {label}", { label: environment.label })
-                  : gt("Switch on {label}", { label: environment.label })
-              }
-              onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
-            />
+      {sandbox !== null ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={sandboxStatus !== "ready" && sandboxStatus !== "stopped"}
+          onClick={() =>
+            void setSandboxDesired(sandbox, sandboxStatus === "stopped" ? "running" : "stopped")
           }
-        />
-        <TooltipPopup side="top">
-          {blocked ? gt("Client not supported") : enabled ? gt("Switch off") : gt("Switch on")}
-        </TooltipPopup>
-      </Tooltip>
+        >
+          {sandboxStatus === "stopped" ? gt("Resume") : gt("Stop")}
+        </Button>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Switch
+                size="sm"
+                checked={enabled}
+                disabled={isRemoving || blocked}
+                aria-label={
+                  enabled
+                    ? gt("Switch off {label}", { label: environment.label })
+                    : gt("Switch on {label}", { label: environment.label })
+                }
+                onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
+              />
+            }
+          />
+          <TooltipPopup side="top">
+            {blocked ? gt("Client not supported") : enabled ? gt("Switch off") : gt("Switch on")}
+          </TooltipPopup>
+        </Tooltip>
+      )}
       <Menu>
         <MenuTrigger
           render={
@@ -465,9 +495,15 @@ export function SavedBackendListRow({
             </MenuItem>
           ) : null}
           <MenuSeparator />
-          <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
-            {isRemoving ? gt("Removing…") : gt("Remove from this device…")}
-          </MenuItem>
+          {sandbox !== null ? (
+            <MenuItem variant="destructive" onClick={() => void confirmAndDeleteSandbox(sandbox)}>
+              {gt("Delete sandbox…")}
+            </MenuItem>
+          ) : (
+            <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
+              {isRemoving ? gt("Removing…") : gt("Remove from this device…")}
+            </MenuItem>
+          )}
         </MenuPopup>
       </Menu>
     </EnvironmentRow>

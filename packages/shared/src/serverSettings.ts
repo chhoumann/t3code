@@ -409,6 +409,7 @@ export function applyServerSettingsPatch(
     usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
+    sandboxProjectDefaults: sandboxProjectDefaultsPatch,
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
@@ -586,6 +587,14 @@ export function applyServerSettingsPatch(
               }),
             ),
           },
+        }
+      : {}),
+    ...(sandboxProjectDefaultsPatch !== undefined
+      ? {
+          sandboxProjectDefaults: mergeSettingsEntries(
+            current.sandboxProjectDefaults,
+            sandboxProjectDefaultsPatch,
+          ),
         }
       : {}),
     ...(projectSettingsOverridesPatch !== undefined

@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { SandboxBase } from "./sandbox.ts";
 import {
   SourceControlCloneProtocol,
   SourceControlProviderKind,
@@ -22,6 +23,31 @@ export type ProjectCloneStage = typeof ProjectCloneStage.Type;
 export const ProjectClonePhase = Schema.Literals(["running", "done", "failed", "cancelled"]);
 export type ProjectClonePhase = typeof ProjectClonePhase.Type;
 
+/** The remote branch a checkout was pinned to, and its commit at that time. */
+export const ProjectCloneBase = Schema.Struct({
+  branch: TrimmedNonEmptyString,
+  commit: TrimmedNonEmptyString,
+});
+export type ProjectCloneBase = typeof ProjectCloneBase.Type;
+
+/**
+ * Preparation past the plain clone, which sandboxes ask for: the base is
+ * fetched and pinned, a template's existing clone of the repository is
+ * adopted, and the clone's `t3.json` scripts are imported. Adding a project
+ * never asks for it, so its scripts stay an explicit import.
+ */
+export const ProjectCloneCheckout = Schema.Struct({
+  base: SandboxBase,
+  /**
+   * Adopt a published clone of the same repository at the destination
+   * instead of refusing a non-empty one. A clone of another repository is
+   * refused, never reset.
+   */
+  reuseMatching: Schema.Boolean,
+  importProjectScripts: Schema.Boolean,
+});
+export type ProjectCloneCheckout = typeof ProjectCloneCheckout.Type;
+
 export const ProjectCloneSnapshot = Schema.Struct({
   projectId: ProjectId,
   remoteUrl: TrimmedNonEmptyString,
@@ -37,6 +63,8 @@ export const ProjectCloneSnapshot = Schema.Struct({
   startedAt: IsoDateTime,
   endedAt: Schema.NullOr(IsoDateTime),
   sequence: NonNegativeInt,
+  /** Set once a clone with a `checkout` is done. */
+  base: Schema.optionalKey(ProjectCloneBase),
 });
 export type ProjectCloneSnapshot = typeof ProjectCloneSnapshot.Type;
 
@@ -55,6 +83,7 @@ export const ProjectCloneStartInput = Schema.Struct({
   remoteUrl: Schema.optional(TrimmedNonEmptyString),
   destinationPath: TrimmedNonEmptyString,
   protocol: Schema.optional(SourceControlCloneProtocol),
+  checkout: Schema.optional(ProjectCloneCheckout),
 });
 export type ProjectCloneStartInput = typeof ProjectCloneStartInput.Type;
 

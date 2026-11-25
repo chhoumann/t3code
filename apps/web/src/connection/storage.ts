@@ -10,6 +10,7 @@ import {
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
+  setConnectionDormantInCatalog,
   setConnectionEnabledInCatalog,
   setRoutesInCatalog,
   replaceCatalogValue,
@@ -121,10 +122,12 @@ function catalogError(operation: keyof typeof CATALOG_FAILURE, cause: unknown) {
 const PERSISTENCE_FAILURE = {
   "list-targets": msg("Could not list targets: {cause}"),
   "list-disabled-targets": msg("Could not list disabled targets: {cause}"),
+  "list-dormant-targets": msg("Could not list dormant targets: {cause}"),
   "register-connection": msg("Could not register connection: {cause}"),
   "set-connection-routes": msg("Could not set connection routes: {cause}"),
   "remove-connection": msg("Could not remove connection: {cause}"),
   "set-connection-enabled": msg("Could not set connection enabled: {cause}"),
+  "set-connection-dormant": msg("Could not set connection dormant: {cause}"),
   "load-shell": msg("Could not load shell: {cause}"),
   "save-shell": msg("Could not save shell: {cause}"),
   "load-thread": msg("Could not load thread: {cause}"),
@@ -770,6 +773,10 @@ export const layer = Layer.effectContext(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
       ),
+      listDormant: catalog.read.pipe(
+        Effect.map((document) => document.dormantEnvironmentIds),
+        Effect.mapError((cause) => persistenceError("list-dormant-targets", cause)),
+      ),
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: Effect.fn("Persistence.ConnectionRegistrationStore.register")(
@@ -796,6 +803,13 @@ export const layer = Layer.effectContext(
           return catalog
             .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
             .pipe(Effect.mapError((cause) => persistenceError("set-connection-enabled", cause)));
+        },
+      ),
+      setDormant: Effect.fn("Persistence.ConnectionRegistrationStore.setDormant")(
+        function (environmentId, dormant) {
+          return catalog
+            .update((document) => setConnectionDormantInCatalog(document, environmentId, dormant))
+            .pipe(Effect.mapError((cause) => persistenceError("set-connection-dormant", cause)));
         },
       ),
     });

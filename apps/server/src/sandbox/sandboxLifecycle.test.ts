@@ -1,0 +1,1118 @@
+import {
+  CommandId,
+  EnvironmentId,
+  MessageId,
+  ProjectId,
+  ProviderDriverKind,
+  SandboxAccountId,
+  SandboxId,
+  SandboxRemoteUrl,
+  ThreadId,
+} from "@t3tools/contracts";
+import { describe, expect, it } from "@effect/vitest";
+
+import {
+  ANSWER_DEADLINE_MS,
+  BACKSTOP_GRACE_MS,
+  CREATE_KEY_WINDOW_MS,
+  FIRST_BOOT_DEADLINE_MS,
+  INFLIGHT_GRACE_MS,
+  TRANSITION_DEADLINE_MS,
+  planNext,
+  startupTtlSeconds,
+  type SandboxObservation,
+  type SandboxPlan,
+  type SandboxRecord,
+} from "./sandboxLifecycle.ts";
+import {
+  MAX_DEADLINE_SECONDS,
+  ProviderMachineId,
+  type ProviderMachineSetup,
+  type ProviderMachineState,
+} from "./SandboxProvider.ts";
+
+const NOW = 1_800_000_000_000;
+const MINUTE = 60_000;
+const ENV = EnvironmentId.make("env-guest");
+const STOP_AFTER_SECONDS = 2 * 60 * 60;
+const STOP_AFTER = STOP_AFTER_SECONDS * 1000;
+
+const fresh: SandboxRecord = {
+  id: SandboxId.make("sbx-1"),
+  accountId: SandboxAccountId.make("boat-work"),
+  provider: "boat",
+  spec: {
+    title: "Fix the bug",
+    message: "Fix the bug",
+    source: {
+      remoteUrl: SandboxRemoteUrl.make("https://github.com/octocat/Hello-World"),
+      base: { _tag: "default" },
+    },
+    driver: ProviderDriverKind.make("claudeAgent"),
+    model: "claude-sonnet-4-6",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    machine: {
+      size: "small",
+      stopAfterSeconds: STOP_AFTER_SECONDS,
+      ttlSeconds: startupTtlSeconds(STOP_AFTER_SECONDS),
+      template: null,
+      providerEnvironment: null,
+      setupScript: "#!/usr/bin/env bash",
+    },
+    t3: { kind: "npm", version: "0.0.45" },
+  },
+  seed: {
+    projectId: ProjectId.make("project-1"),
+    threadId: ThreadId.make("thread-1"),
+    commandId: CommandId.make("command-1"),
+    messageId: MessageId.make("message-1"),
+  },
+  desired: "running",
+  desiredRevision: 1,
+  status: { _tag: "creating" },
+  settledRevision: 0,
+  inflight: null,
+  createKey: "t3-sandbox-sbx-1-key",
+  createFirstAttemptAt: null,
+  machineId: null,
+  httpBaseUrl: null,
+  environmentId: null,
+  runningSince: null,
+  inputsWrittenAt: null,
+  credentialsStale: false,
+  restartPending: false,
+  githubTokenGeneration: null,
+  resolvedBase: null,
+  seedLaunchedAt: null,
+  createdAt: NOW - 30 * MINUTE,
+};
+
+const created: SandboxRecord = {
+  ...fresh,
+  runningSince: NOW - 5 * MINUTE,
+  machineId: ProviderMachineId.make("bx_test"),
+};
+const booting: SandboxRecord = {
+  ...created,
+  status: { _tag: "booting" },
+  inputsWrittenAt: NOW - 4 * MINUTE,
+  httpBaseUrl: "https://bx-test.boat.dev",
+};
+const launching: SandboxRecord = { ...booting, status: { _tag: "launching" }, environmentId: ENV };
+const prepared: SandboxRecord = {
+  ...launching,
+  resolvedBase: { branch: "main", commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d" },
+};
+const ready: SandboxRecord = {
+  ...prepared,
+  status: { _tag: "ready" },
+  seedLaunchedAt: NOW - 3 * MINUTE,
+  settledRevision: 1,
+};
+const stopRequested: SandboxRecord = { ...ready, desired: "stopped", desiredRevision: 2 };
+const stopIssued: SandboxRecord = {
+  ...stopRequested,
+  status: { _tag: "stopping", reason: "requested" },
+  inflight: { op: "stop", startedAt: NOW - MINUTE },
+};
+const stopped: SandboxRecord = {
+  ...stopRequested,
+  status: { _tag: "stopped", reason: "requested" },
+  settledRevision: 2,
+};
+const resumeRequested: SandboxRecord = { ...stopped, desired: "running", desiredRevision: 3 };
+const resumed: SandboxRecord = {
+  ...resumeRequested,
+  status: { _tag: "resuming" },
+  runningSince: NOW - MINUTE,
+  credentialsStale: true,
+};
+
+const machine = (
+  state: ProviderMachineState,
+  setup: ProviderMachineSetup = "done",
+  archiveAfter: number | null = null,
+) => ({
+  id: ProviderMachineId.make("bx_test"),
+  state,
+  setup,
+  archiveAfter,
+});
+const observed = (overrides: Partial<SandboxObservation> = {}): SandboxObservation => ({
+  now: NOW,
+  machine: null,
+  environmentId: null,
+  activity: null,
+  githubTokenGeneration: null,
+  ...overrides,
+});
+const busy = { busy: true, lastActivityAt: NOW - 30 * MINUTE };
+const idleSince = (at: number) => ({ busy: false, lastActivityAt: at });
+/** Running, with the provider's own stop at `archiveAfter`, and the guest's agents doing `activity`. */
+const watched = (archiveAfter: number | null, activity: SandboxObservation["activity"]) =>
+  observed({ machine: machine("running", null, archiveAfter), activity });
+/** Ready for long enough that only its agents' activity decides when it is idle. */
+const longReady: SandboxRecord = { ...ready, runningSince: NOW - 10 * STOP_AFTER };
+const neverStops: SandboxRecord = {
+  ...ready,
+  spec: {
+    ...ready.spec,
+    machine: { ...ready.spec.machine, stopAfterSeconds: null, ttlSeconds: null },
+  },
+};
+/** Stops after the longest stop time a user can pick, which is as far as the provider holds. */
+const stopsAfterAMonth: SandboxRecord = {
+  ...ready,
+  spec: {
+    ...ready.spec,
+    machine: {
+      ...ready.spec.machine,
+      stopAfterSeconds: 720 * 60 * 60,
+      ttlSeconds: startupTtlSeconds(720 * 60 * 60),
+    },
+  },
+};
+const running = observed({ machine: machine("running") });
+const answering = observed({ machine: machine("running"), environmentId: ENV });
+
+const settle = (status: SandboxPlan["status"]): SandboxPlan => ({
+  status,
+  action: { _tag: "Settle" },
+});
+const failed = (step: string, retryable: boolean) => ({
+  status: expect.objectContaining({ _tag: "failed", step, retryable }),
+  action: { _tag: "Settle" },
+});
+
+type Case = readonly [string, SandboxRecord, SandboxObservation, unknown];
+
+const cases: ReadonlyArray<Case> = [
+  // Creation and crash recovery.
+  [
+    "fresh launch creates",
+    fresh,
+    observed(),
+    { status: { _tag: "creating" }, action: { _tag: "Create" } },
+  ],
+  [
+    "stopped before any create settles without creating",
+    { ...fresh, desired: "stopped", desiredRevision: 2 },
+    observed(),
+    settle({ _tag: "stopped", reason: "requested" }),
+  ],
+  [
+    "crash after create, before the machine id was stored, replays the same create",
+    {
+      ...fresh,
+      inflight: { op: "create", startedAt: NOW - 60 * MINUTE },
+      createFirstAttemptAt: NOW - 60 * MINUTE,
+    },
+    observed(),
+    { status: { _tag: "creating" }, action: { _tag: "Create" } },
+  ],
+  [
+    "a create unknown past the key window fails instead of creating again",
+    {
+      ...fresh,
+      inflight: { op: "create", startedAt: NOW - CREATE_KEY_WINDOW_MS },
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    failed("create", false),
+  ],
+  [
+    "a stored machine id resolves a leftover create",
+    { ...created, inflight: { op: "create", startedAt: NOW - MINUTE } },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "creating" }, action: { _tag: "ClearInflight" } },
+  ],
+
+  // First boot.
+  [
+    "machine still starting",
+    created,
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "creating" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "running machine gets its inputs",
+    created,
+    running,
+    { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
+  ],
+  [
+    "inputs written, port not hosted yet",
+    { ...booting, httpBaseUrl: null },
+    running,
+    { status: { _tag: "booting" }, action: { _tag: "Host" } },
+  ],
+  [
+    "waits for T3 to answer",
+    booting,
+    running,
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a failed boot script fails the boot",
+    booting,
+    observed({ machine: machine("running", "failed") }),
+    failed("boot", false),
+  ],
+  [
+    "T3 not answering past the first boot deadline fails",
+    { ...booting, runningSince: NOW - FIRST_BOOT_DEADLINE_MS },
+    running,
+    failed("boot", false),
+  ],
+  [
+    "a machine still starting past the first boot deadline fails retryably",
+    { ...created, runningSince: NOW - FIRST_BOOT_DEADLINE_MS },
+    observed({ machine: machine("starting") }),
+    failed("boot", true),
+  ],
+  [
+    "a retried first boot boots the same machine once it finished provisioning",
+    {
+      ...created,
+      runningSince: NOW - 2 * FIRST_BOOT_DEADLINE_MS,
+      status: { _tag: "failed", step: "boot", message: "x", retryable: true },
+      settledRevision: 1,
+      desiredRevision: 2,
+    },
+    running,
+    { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
+  ],
+  [
+    "T3 answering once the creation script finished records the environment",
+    booting,
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "RecordEnvironment", environmentId: ENV } },
+  ],
+  [
+    "a T3 answering while the creation script runs, as one from a template does, is not recorded",
+    booting,
+    observed({ machine: machine("running", "running"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a T3 answering before the creation script started is not recorded",
+    booting,
+    observed({ machine: machine("running", "pending"), environmentId: ENV }),
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a failed creation script fails the boot though a T3 answers",
+    booting,
+    observed({ machine: machine("running", "failed"), environmentId: ENV }),
+    failed("boot", false),
+  ],
+  [
+    "prepares the project once T3 answers",
+    launching,
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
+  ],
+  [
+    "waits for T3 before preparing",
+    launching,
+    running,
+    { status: { _tag: "launching" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "launches the seed thread once the project is prepared",
+    prepared,
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+  ],
+  [
+    "seed launched: ready",
+    { ...prepared, seedLaunchedAt: NOW },
+    answering,
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+
+  // The owner's GitHub token.
+  [
+    "signs the guest in to GitHub before preparing the project",
+    launching,
+    observed({ ...answering, githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+  [
+    "prepares the project once the guest holds the current token",
+    { ...launching, githubTokenGeneration: 1 },
+    observed({ ...answering, githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
+  ],
+  [
+    "does not sign in before T3 answers",
+    launching,
+    observed({ machine: machine("running"), githubTokenGeneration: 1 }),
+    { status: { _tag: "launching" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a rotated token goes to a ready sandbox while its agents work",
+    { ...ready, githubTokenGeneration: 1 },
+    observed({ ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy), githubTokenGeneration: 2 }),
+    { status: { _tag: "ready" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+  [
+    "a stale token waits for a provider deadline that is due",
+    { ...ready, githubTokenGeneration: 1 },
+    observed({ ...watched(null, busy), githubTokenGeneration: 2 }),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a stale token does not keep an idle sandbox running",
+    { ...longReady, githubTokenGeneration: 1 },
+    observed({
+      ...watched(NOW + BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER)),
+      githubTokenGeneration: 2,
+    }),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "a ready sandbox holding the current token keeps watching",
+    { ...ready, githubTokenGeneration: 2 },
+    observed({ ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy), githubTokenGeneration: 2 }),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a disconnected GitHub leaves a sandbox with the token it has",
+    { ...ready, githubTokenGeneration: 1 },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a resumed sandbox refreshes its credentials before any token",
+    resumed,
+    observed({ machine: machine("running"), githubTokenGeneration: 1 }),
+    { status: { _tag: "resuming" }, action: { _tag: "RefreshCredentials" } },
+  ],
+  [
+    "a token rotated while the sandbox was stopped is delivered before it is ready",
+    { ...resumed, credentialsStale: false, githubTokenGeneration: 1 },
+    observed({ ...answering, githubTokenGeneration: 2 }),
+    { status: { _tag: "resuming" }, action: { _tag: "DeliverGitHubToken" } },
+  ],
+
+  // An env that changed while the sandbox was stopped.
+  [
+    "a pending restart waits while the agents work",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a pending restart waits while the guest does not answer",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, null),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a pending restart runs once the agents are idle",
+    { ...ready, restartPending: true },
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, idleSince(NOW - MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
+  ],
+  [
+    "a sandbox that never stops on its own still restarts once idle",
+    { ...neverStops, restartPending: true },
+    watched(null, idleSince(NOW - MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
+  ],
+  [
+    "a pending restart runs before a new token goes out",
+    { ...ready, restartPending: true, githubTokenGeneration: 1 },
+    observed({
+      ...watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS, idleSince(NOW - MINUTE)),
+      githubTokenGeneration: 2,
+    }),
+    { status: { _tag: "ready" }, action: { _tag: "RestartGuest" } },
+  ],
+  [
+    "a resume after the project was prepared but before the seed launched launches it",
+    { ...prepared, status: { _tag: "resuming" }, runningSince: NOW - MINUTE },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+  ],
+  [
+    "a ready sandbox stays ready while T3 restarts",
+    ready,
+    running,
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a stop requested mid-boot waits for T3 before stopping",
+    { ...booting, desired: "stopped", desiredRevision: 2 },
+    running,
+    { status: { _tag: "booting" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a stop requested mid-boot stops once the environment is recorded",
+    { ...launching, desired: "stopped", desiredRevision: 2 },
+    answering,
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
+  ],
+
+  // Stop.
+  [
+    "stop while ready",
+    stopRequested,
+    running,
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "an issued stop not yet visible waits",
+    stopIssued,
+    running,
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "an issued stop lost past the grace is cleared and re-planned",
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - INFLIGHT_GRACE_MS } },
+    running,
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "a stop past its deadline fails",
+    { ...stopIssued, inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS } },
+    observed({ machine: machine("stopping") }),
+    failed("stop", true),
+  ],
+  [
+    "a delete gives up on a stop past its deadline",
+    {
+      ...stopRequested,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "a delete after a stop failed past its deadline gives up on the stop",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "asking again after a stop failed past its deadline issues the stop again",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "a resume asked for after a stop failed past its deadline issues the stop again first",
+    {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desired: "running",
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "a stopped machine resolves the stop",
+    stopIssued,
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "stopped as asked",
+    stopRequested,
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "requested" }),
+  ],
+  [
+    "a resume requested during a stop waits for the stop to land",
+    { ...stopIssued, desired: "running", desiredRevision: 3 },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "requested" }, action: { _tag: "Wait" } },
+  ],
+
+  // Resume.
+  [
+    "resume a stopped sandbox",
+    resumeRequested,
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
+  ],
+  [
+    "an issued resume not yet visible waits",
+    { ...resumed, inflight: { op: "resume", startedAt: NOW - MINUTE } },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a stop requested during a resume waits for the resume to land",
+    {
+      ...resumed,
+      desired: "stopped",
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a resume past its deadline fails",
+    { ...resumed, inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS } },
+    observed({ machine: machine("starting") }),
+    failed("resume", true),
+  ],
+  [
+    "asking again after a resume failed past its deadline issues the resume again",
+    {
+      ...resumed,
+      status: { _tag: "failed", step: "resume", message: "x", retryable: true },
+      settledRevision: 3,
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
+  ],
+  [
+    "a machine starting with no resume in flight is tracked, so it gets a deadline",
+    { ...resumed, credentialsStale: false },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Track", op: "resume" } },
+  ],
+  [
+    "a delete gives up on a resume past its deadline",
+    {
+      ...resumed,
+      desired: "destroyed",
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "a running machine resolves the resume",
+    { ...resumed, inflight: { op: "resume", startedAt: NOW - MINUTE } },
+    running,
+    { status: { _tag: "resuming" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "credentials are rewritten after every resume",
+    resumed,
+    running,
+    { status: { _tag: "resuming" }, action: { _tag: "RefreshCredentials" } },
+  ],
+  [
+    "waits for T3 after a resume",
+    { ...resumed, credentialsStale: false },
+    running,
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "waits for T3 after a credential refresh that outlasted a transition",
+    { ...resumed, runningSince: NOW - TRANSITION_DEADLINE_MS - MINUTE, credentialsStale: false },
+    running,
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "T3 silent past the answer deadline fails, retryably",
+    { ...resumed, runningSince: NOW - ANSWER_DEADLINE_MS, credentialsStale: false },
+    running,
+    failed("resume", true),
+  ],
+  [
+    "T3 back with the same environment: ready",
+    { ...resumed, credentialsStale: false },
+    answering,
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "T3 back as a different environment fails",
+    { ...resumed, credentialsStale: false },
+    observed({ machine: machine("running"), environmentId: EnvironmentId.make("env-other") }),
+    failed("observe", false),
+  ],
+
+  // Idle stop and the provider's own deadline.
+  [
+    "a working sandbox gets a provider deadline past its stop time when it has none",
+    ready,
+    watched(null, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a working sandbox whose provider deadline trails by less than half the grace is left alone",
+    ready,
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS - 4 * MINUTE, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a working sandbox whose provider deadline trails by more than half the grace moves it",
+    ready,
+    watched(NOW + STOP_AFTER + BACKSTOP_GRACE_MS - 6 * MINUTE, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + STOP_AFTER + BACKSTOP_GRACE_MS },
+    },
+  ],
+  [
+    "a sandbox idle for less than its stop time keeps running",
+    longReady,
+    watched(NOW + 2 * BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER + MINUTE)),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox idle for its stop time is stopped by its owner, with running still asked for",
+    longReady,
+    watched(NOW + BACKSTOP_GRACE_MS, idleSince(NOW - STOP_AFTER)),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Stop" } },
+  ],
+  [
+    "an idle sandbox's provider deadline is moved to its stop time plus the grace",
+    longReady,
+    watched(NOW, idleSince(NOW - 30 * MINUTE)),
+    {
+      status: { _tag: "ready" },
+      action: {
+        _tag: "ExtendDeadline",
+        until: NOW - 30 * MINUTE + STOP_AFTER + BACKSTOP_GRACE_MS,
+      },
+    },
+  ],
+  [
+    "a resumed sandbox counts idle time from its resume, not from its last activity before",
+    { ...ready, runningSince: NOW - MINUTE },
+    watched(
+      NOW - MINUTE + startupTtlSeconds(STOP_AFTER_SECONDS)! * 1000,
+      idleSince(NOW - 10 * STOP_AFTER),
+    ),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox that never stops gets no provider deadline while working",
+    neverStops,
+    watched(null, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a sandbox that never stops is not stopped when idle",
+    neverStops,
+    watched(null, idleSince(NOW - 10 * STOP_AFTER)),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a working sandbox that stops after a month asks for no stop past what the provider holds",
+    stopsAfterAMonth,
+    watched(null, busy),
+    {
+      status: { _tag: "ready" },
+      action: { _tag: "ExtendDeadline", until: NOW + MAX_DEADLINE_SECONDS * 1000 },
+    },
+  ],
+  [
+    "a working sandbox that stops after a month keeps the provider's capped stop for a while",
+    stopsAfterAMonth,
+    watched(NOW + MAX_DEADLINE_SECONDS * 1000 - MINUTE, busy),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+  [
+    "a guest that cannot say what its agents do is neither stopped nor given more time",
+    ready,
+    watched(NOW + MINUTE, null),
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
+  ],
+
+  // Stops the provider made on its own.
+  [
+    "a provider stop in progress while ready is tracked as external, so it gets a deadline",
+    ready,
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "Track", op: "stop" } },
+  ],
+  [
+    "a tracked provider stop that lands stays external",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "external" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "stopping", reason: "external" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "a stop this owner did not issue settles as external, however long the sandbox ran",
+    { ...ready, runningSince: NOW - 10 * STOP_AFTER },
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "external" }),
+  ],
+  [
+    "an idle stop that landed settles as idle, with running still asked for",
+    { ...ready, status: { _tag: "stopping", reason: "idle" } },
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "idle" }),
+  ],
+  [
+    "an idle stop keeps its reason while it lands",
+    {
+      ...ready,
+      status: { _tag: "stopping", reason: "idle" },
+      inflight: { op: "stop", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("stopping") }),
+    { status: { _tag: "stopping", reason: "idle" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "an idle sandbox stays stopped until asked again",
+    { ...ready, status: { _tag: "stopped", reason: "idle" } },
+    observed({ machine: machine("stopped") }),
+    settle({ _tag: "stopped", reason: "idle" }),
+  ],
+  [
+    "asking for running again resumes an idle sandbox",
+    { ...ready, status: { _tag: "stopped", reason: "idle" }, desiredRevision: 2 },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
+  ],
+  [
+    "a resume never issued before a crash is issued, not mistaken for a stop from outside",
+    { ...resumeRequested, status: { _tag: "resuming" } },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Resume" } },
+  ],
+
+  // Destroy.
+  [
+    "destroy a never-created sandbox",
+    { ...fresh, desired: "destroyed", desiredRevision: 2 },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
+    "destroy after a crash mid-create replays the create to find the machine",
+    {
+      ...fresh,
+      desired: "destroyed",
+      desiredRevision: 2,
+      inflight: { op: "create", startedAt: NOW - MINUTE },
+      createFirstAttemptAt: NOW - MINUTE,
+    },
+    observed(),
+    { status: { _tag: "destroying" }, action: { _tag: "Create" } },
+  ],
+  [
+    "destroy of a create unknown past the key window tells the user to check the provider",
+    {
+      ...fresh,
+      desired: "destroyed",
+      desiredRevision: 2,
+      inflight: { op: "create", startedAt: NOW - CREATE_KEY_WINDOW_MS },
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    failed("create", false),
+  ],
+  [
+    "a delete after the user was told the create is unknown lets the sandbox go",
+    {
+      ...fresh,
+      status: planNext({ ...fresh, createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS }, observed())
+        .status,
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      inflight: { op: "create", startedAt: NOW - CREATE_KEY_WINDOW_MS },
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
+    "a delete after the create-unknown warning lets the sandbox go whatever its wording",
+    {
+      ...fresh,
+      status: { _tag: "failed", step: "create", message: "reworded", retryable: false },
+      settledRevision: 2,
+      desired: "destroyed",
+      desiredRevision: 3,
+      createFirstAttemptAt: NOW - CREATE_KEY_WINDOW_MS,
+    },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
+    "a delete of a create refused outright lets the sandbox go",
+    {
+      ...fresh,
+      status: { _tag: "failed", step: "create", message: "x", retryable: false },
+      settledRevision: 1,
+      desired: "destroyed",
+      desiredRevision: 2,
+    },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+  [
+    "destroy while booting",
+    { ...booting, desired: "destroyed", desiredRevision: 2 },
+    running,
+    { status: { _tag: "destroying" }, action: { _tag: "Destroy" } },
+  ],
+  [
+    "destroy while ready",
+    { ...ready, desired: "destroyed", desiredRevision: 2 },
+    running,
+    { status: { _tag: "destroying" }, action: { _tag: "Destroy" } },
+  ],
+  [
+    "destroy while stopped",
+    { ...stopped, desired: "destroyed", desiredRevision: 3 },
+    observed({ machine: machine("stopped") }),
+    { status: { _tag: "destroying" }, action: { _tag: "Destroy" } },
+  ],
+  [
+    "destroy while failed",
+    {
+      ...booting,
+      status: { _tag: "failed", step: "boot", message: "x", retryable: false },
+      settledRevision: 1,
+      desired: "destroyed",
+      desiredRevision: 2,
+    },
+    running,
+    { status: { _tag: "destroying" }, action: { _tag: "Destroy" } },
+  ],
+  [
+    "destroy during a resume waits for the resume to land",
+    {
+      ...resumed,
+      desired: "destroyed",
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - MINUTE },
+    },
+    observed({ machine: machine("starting") }),
+    { status: { _tag: "resuming" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "an issued destroy not yet visible waits",
+    {
+      ...ready,
+      desired: "destroyed",
+      desiredRevision: 2,
+      inflight: { op: "destroy", startedAt: NOW - MINUTE },
+    },
+    running,
+    { status: { _tag: "destroying" }, action: { _tag: "Wait" } },
+  ],
+  [
+    "a gone machine resolves the destroy",
+    {
+      ...ready,
+      desired: "destroyed",
+      desiredRevision: 2,
+      inflight: { op: "destroy", startedAt: NOW - MINUTE },
+    },
+    observed(),
+    { status: { _tag: "destroying" }, action: { _tag: "ClearInflight" } },
+  ],
+  [
+    "destroyed once the machine is gone",
+    { ...ready, desired: "destroyed", desiredRevision: 2 },
+    observed(),
+    settle({ _tag: "destroyed" }),
+  ],
+
+  // Failure and retry.
+  [
+    "a failed sandbox stays failed until asked again",
+    {
+      ...launching,
+      status: { _tag: "failed", step: "launch", message: "x", retryable: true },
+      settledRevision: 1,
+    },
+    answering,
+    settle({ _tag: "failed", step: "launch", message: "x", retryable: true }),
+  ],
+  [
+    "asking again re-plans a failed sandbox from what is observed",
+    {
+      ...launching,
+      status: { _tag: "failed", step: "launch", message: "x", retryable: true },
+      settledRevision: 1,
+      desiredRevision: 2,
+    },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "PrepareProject" } },
+  ],
+  [
+    "a retry after a failed launch keeps the prepared project and launches again",
+    {
+      ...prepared,
+      status: { _tag: "failed", step: "launch", message: "x", retryable: true },
+      settledRevision: 1,
+      desiredRevision: 2,
+    },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+  ],
+  ["a machine deleted outside T3 fails", ready, observed(), failed("observe", false)],
+  [
+    "a machine the provider reports failed during boot",
+    booting,
+    observed({ machine: machine("failed") }),
+    failed("boot", false),
+  ],
+  [
+    "a machine the provider reports failed later",
+    ready,
+    observed({ machine: machine("failed") }),
+    failed("resume", false),
+  ],
+];
+
+describe("planNext", () => {
+  it.each(cases)("%s", (_, record, observation, expected) => {
+    expect(planNext(record, observation)).toEqual(expected);
+  });
+});
+
+/**
+ * Plans step after step against a machine that never leaves `state`, applying
+ * each action's facts the way the reconciler records them, and returns the
+ * status the sandbox settles on, or null if it would wait forever.
+ */
+const settleAgainstStuckMachine = (start: SandboxRecord, state: ProviderMachineState) => {
+  const inflightAfter = (action: SandboxPlan["action"], now: number, current: SandboxRecord) => {
+    switch (action._tag) {
+      case "Stop":
+        return { op: "stop" as const, startedAt: now };
+      case "Resume":
+        return { op: "resume" as const, startedAt: now };
+      case "Track":
+        return { op: action.op, startedAt: now };
+      case "ClearInflight":
+        return null;
+      case "Wait":
+        return current.inflight;
+      default:
+        throw new Error(`Unexpected ${action._tag} against a stuck machine.`);
+    }
+  };
+  let record = start;
+  for (let now = NOW; now < NOW + 4 * ANSWER_DEADLINE_MS; now += MINUTE) {
+    const { status, action } = planNext(record, observed({ now, machine: machine(state) }));
+    if (action._tag === "Settle") return status;
+    record = Object.assign({}, record, { status, inflight: inflightAfter(action, now, record) });
+  }
+  return null;
+};
+
+describe("planNext over time", () => {
+  it("keeps a turn longer than the stop time running, then stops it itself once idle", () => {
+    let archiveAfter: number | null = null;
+    let extensions = 0;
+    const turnEnds = NOW + 3 * STOP_AFTER;
+    for (let now = NOW; now < turnEnds; now += MINUTE) {
+      // The provider has not stopped it on its own.
+      expect(archiveAfter === null || archiveAfter > now).toBe(true);
+      const next = planNext(
+        ready,
+        observed({ now, machine: machine("running", null, archiveAfter), activity: busy }),
+      );
+      expect(next.status).toEqual({ _tag: "ready" });
+      if (next.action._tag === "ExtendDeadline") {
+        archiveAfter = next.action.until;
+        extensions += 1;
+      } else {
+        expect(next.action).toEqual({ _tag: "Watch" });
+      }
+    }
+    // Once on the first look, then every sixth minute: past half the grace behind.
+    expect(extensions).toBe(60);
+
+    let stoppedAt: number | null = null;
+    for (let now = turnEnds; stoppedAt === null; now += MINUTE) {
+      const next = planNext(
+        ready,
+        observed({
+          now,
+          machine: machine("running", null, archiveAfter),
+          activity: idleSince(turnEnds),
+        }),
+      );
+      if (next.action._tag === "Stop") stoppedAt = now;
+      else if (next.action._tag === "ExtendDeadline") archiveAfter = next.action.until;
+      else expect(next.action).toEqual({ _tag: "Watch" });
+    }
+    expect(stoppedAt - turnEnds).toBe(STOP_AFTER);
+    // Its owner stops it before the provider's own deadline would.
+    expect(archiveAfter !== null && archiveAfter > stoppedAt).toBe(true);
+  });
+
+  it("fails again, instead of waiting forever, when a retried stop never lands", () => {
+    const retried: SandboxRecord = {
+      ...stopRequested,
+      status: { _tag: "failed", step: "stop", message: "x", retryable: true },
+      settledRevision: 2,
+      desiredRevision: 3,
+      inflight: { op: "stop", startedAt: NOW - 2 * TRANSITION_DEADLINE_MS },
+    };
+    expect(settleAgainstStuckMachine(retried, "stopping")).toMatchObject({
+      _tag: "failed",
+      step: "stop",
+      retryable: true,
+    });
+  });
+
+  it("fails again when a retried resume never lands", () => {
+    const retried: SandboxRecord = {
+      ...resumed,
+      status: { _tag: "failed", step: "resume", message: "x", retryable: true },
+      settledRevision: 3,
+      desiredRevision: 4,
+      inflight: { op: "resume", startedAt: NOW - TRANSITION_DEADLINE_MS },
+    };
+    expect(settleAgainstStuckMachine(retried, "starting")).toMatchObject({
+      _tag: "failed",
+      step: "resume",
+    });
+  });
+
+  it("fails a stop the provider began on its own that never lands", () => {
+    expect(settleAgainstStuckMachine(ready, "stopping")).toMatchObject({
+      _tag: "failed",
+      step: "stop",
+    });
+  });
+
+  it("fails a first create stuck in provisioning", () => {
+    expect(settleAgainstStuckMachine(created, "starting")).toMatchObject({
+      _tag: "failed",
+      step: "boot",
+      retryable: true,
+    });
+  });
+});

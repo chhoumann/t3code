@@ -27,6 +27,7 @@ import {
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitPullRequestRefInput,
+  type GitRemote,
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
@@ -1326,6 +1327,7 @@ export const make = Effect.gen(function* () {
     branch: null,
     upstreamRef: null,
     hasWorkingTreeChanges: false,
+    hasTrackedChanges: false,
     workingTree: { files: [], insertions: 0, deletions: 0 },
     hasUpstream: false,
     aheadCount: 0,
@@ -1341,17 +1343,21 @@ export const make = Effect.gen(function* () {
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
-    const hostingProvider = details.hasOriginRemote
-      ? yield* resolveHostingProviderForLocalStatus(cwd, details.branch)
-      : null;
+    const { remotes, trackedRemote, hostingProvider } = details.hasOriginRemote
+      ? yield* readLocalRemoteInfo(cwd, details.branch)
+      : { remotes: [], trackedRemote: undefined, hostingProvider: null };
 
     return {
       isRepo: details.isRepo,
       ...(hostingProvider ? { sourceControlProvider: hostingProvider } : {}),
       hasPrimaryRemote: details.hasOriginRemote,
+      remotes,
+      ...(trackedRemote ? { trackedRemote: trackedRemote.name } : {}),
       isDefaultRef: details.isDefaultBranch,
       refName: details.branch,
+      ...(details.headCommit === undefined ? {} : { headCommit: details.headCommit }),
       hasWorkingTreeChanges: details.hasWorkingTreeChanges,
+      hasTrackedChanges: details.hasTrackedChanges,
       workingTree: details.workingTree,
       ...(details.branchChanges ? { branchChanges: details.branchChanges } : {}),
     } satisfies VcsStatusLocalResult;
@@ -1818,6 +1824,22 @@ export const make = Effect.gen(function* () {
   const readRemoteUrlNullable = (cwd: string, remoteName: string) =>
     readLookupRemoteUrl(cwd, remoteName).pipe(Effect.orElseSucceed(() => null));
 
+  const readRemotes = Effect.fn("readRemotes")(function* (cwd: string, branch: string | null) {
+    const [remotes, trackedRemoteName] = yield* Effect.all(
+      [
+        gitCore.listRemoteFetchUrls(cwd).pipe(Effect.orElseSucceed((): GitRemote[] => [])),
+        branch === null
+          ? Effect.succeed(null)
+          : readConfigValueNullable(cwd, `branch.${branch}.remote`),
+      ],
+      { concurrency: "unbounded" },
+    );
+    return {
+      remotes,
+      trackedRemote: remotes.find((remote) => remote.name === trackedRemoteName),
+    };
+  });
+
   // Whether the remote's host creates change requests in this remote's repository. A host's tools
   // can let configuration, such as gh's default repository, name another one.
   const targetsRemote = Effect.fn("targetsRemote")(function* (
@@ -1843,27 +1865,19 @@ export const make = Effect.gen(function* () {
 
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
-    branch: string | null,
+    remote: GitRemote | undefined,
   ) {
-    const preferredRemoteName =
-      branch === null
-        ? "origin"
-        : ((yield* readConfigValueNullable(cwd, `branch.${branch}.remote`)) ?? "origin");
-    const remoteUrl =
-      (yield* readRemoteUrlNullable(cwd, preferredRemoteName)) ??
-      (yield* readRemoteUrlNullable(cwd, "origin"));
-
-    const provider = remoteUrl ? sourceControlDefinitions.recognizeRemote(remoteUrl) : null;
-    if (!remoteUrl || provider?.kind !== "unknown") return provider;
+    const provider = remote ? sourceControlDefinitions.recognizeRemote(remote.url) : null;
+    if (!remote || provider?.kind !== "unknown") return provider;
     const handle = yield* sourceControlProviders
       .resolveHandle({
         cwd,
-        context: { provider, remoteName: preferredRemoteName, remoteUrl },
+        context: { provider, remoteName: remote.name, remoteUrl: remote.url },
       })
       .pipe(Effect.orElseSucceed(() => null));
     return handle?.context?.provider ?? provider;
   });
-  const resolveHostingProviderForLocalStatus = (cwd: string, branch: string | null) =>
+  const readLocalRemoteInfo = (cwd: string, branch: string | null) =>
     Effect.suspend(() => {
       const reads: SharedPrLookupGitReads = {
         open: true,
@@ -1874,7 +1888,19 @@ export const make = Effect.gen(function* () {
         configValues: new Map(),
         remoteUrls: new Map(),
       };
-      return resolveHostingProvider(cwd, branch).pipe(
+      return Effect.gen(function* () {
+        const { remotes, trackedRemote } = yield* readRemotes(cwd, branch);
+        const preferredRemoteName = trackedRemote?.name ?? "origin";
+        const configuredRemoteUrl =
+          (yield* readRemoteUrlNullable(cwd, preferredRemoteName)) ??
+          (preferredRemoteName === "origin" ? null : yield* readRemoteUrlNullable(cwd, "origin"));
+        const hostingRemote =
+          configuredRemoteUrl !== null
+            ? { name: preferredRemoteName, url: configuredRemoteUrl }
+            : (trackedRemote ?? remotes.find((remote) => remote.name === "origin"));
+        const hostingProvider = yield* resolveHostingProvider(cwd, hostingRemote);
+        return { remotes, trackedRemote, hostingProvider };
+      }).pipe(
         Effect.provideService(prLookupGitReads, reads),
         Effect.ensuring(
           Effect.sync(() => {

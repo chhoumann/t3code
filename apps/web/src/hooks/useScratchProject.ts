@@ -80,15 +80,16 @@ export function createScratchProjectActions(input: {
     return null;
   };
 
+  /** Opens a draft without a project. Resolves with it, or null when none opened. */
   const startScratchThread = async (environmentId: EnvironmentId) => {
     const project = await openScratchProject(environmentId);
-    if (project) {
-      await input
-        .handleNewThread(scopeProjectRef(project.environmentId, project.id))
-        .catch((error: unknown) =>
-          reportScratchFailure(m(msg("Could not start without a project")), error),
-        );
-    }
+    if (!project) return null;
+    return input
+      .handleNewThread(scopeProjectRef(project.environmentId, project.id))
+      .catch((error: unknown) => {
+        reportScratchFailure(m(msg("Could not start without a project")), error);
+        return null;
+      });
   };
 
   return { scratchWorkspaceRootFor, scratchEnvironmentId, openScratchProject, startScratchThread };

@@ -1,5 +1,7 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import type {
+  ProjectCloneBase,
+  ProjectCloneCheckout,
   ProjectCloneSnapshot,
   ProjectCloneStage,
   ProjectCloneStartInput,
@@ -46,9 +48,19 @@ export class ProjectCloneTracker extends Context.Service<
     >;
     /** Interrupts a running clone and deletes the partial checkout. */
     readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
+    /**
+     * Clones a failed or cancelled project again. The destination was empty
+     * when the clone started, so a clone of the repository found there now is
+     * the one git finished before finalization failed or a cancel landed. It
+     * is adopted and finalized again.
+     */
     readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
-    /** Stops tracking, interrupts any running clone and removes unfinished checkouts. */
-    readonly discard: (projectId: ProjectId) => Effect.Effect<void>;
+    /**
+     * Forgets a deleted project's clone: interrupts it if it still runs and
+     * removes the staging clone beside `workspaceRoot`, which an earlier
+     * server run may have left with nothing tracked here.
+     */
+    readonly discard: (projectId: ProjectId, workspaceRoot: string) => Effect.Effect<void>;
     readonly get: (projectId: ProjectId) => Effect.Effect<ProjectCloneSnapshot | null>;
     readonly stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>>;
   }
@@ -62,10 +74,16 @@ export interface ProjectCloneHooks {
     readonly workspaceRoot: string;
     readonly createdAt: string;
   }) => Effect.Effect<void, OrchestrationDispatchCommandError | ProjectConflictError>;
-  readonly onCloned: (input: {
+  /**
+   * Runs once git is done and before the clone is reported done, so a
+   * thread cannot start until the project is complete. Its failure fails the
+   * clone.
+   */
+  readonly finalize: (input: {
     readonly projectId: ProjectId;
     readonly workspaceRoot: string;
-  }) => Effect.Effect<void>;
+    readonly base: ProjectCloneBase | null;
+  }) => Effect.Effect<void, OrchestrationDispatchCommandError>;
 }
 
 const DONE_RETENTION = "30 seconds";
@@ -91,6 +109,7 @@ interface TrackedClone {
     readonly cloneUrl: string;
     readonly destinationPath: string;
     readonly repository: SourceControlRepositoryInfo | null;
+    readonly checkout: ProjectCloneCheckout | undefined;
     readonly protocol: SourceControlCloneProtocol;
   };
 }
@@ -195,30 +214,42 @@ export const make = Effect.gen(function* () {
       Effect.forever,
     );
 
+  /** Ends a running clone. A clone that already ended keeps its outcome. */
   const finish = Effect.fn("ProjectCloneTracker.finish")(function* (
     projectId: ProjectId,
-    phase: "done" | "failed" | "cancelled",
-    error: string | null,
+    outcome:
+      | { readonly phase: "done"; readonly base: ProjectCloneBase | null }
+      | { readonly phase: "failed"; readonly error: string }
+      | { readonly phase: "cancelled" },
   ) {
     const endedAt = yield* nowIso;
-    yield* modify(projectId, (tracked) => ({
-      ...tracked,
-      fiber: null,
-      snapshot: {
-        ...tracked.snapshot,
-        phase,
-        endedAt,
-        percent: phase === "done" ? 100 : tracked.snapshot.percent,
-        stalled: false,
-        error: error === null ? null : clampText(error, PROJECT_CLONE_ERROR_MAX_LENGTH),
-      },
-    }));
-    if (phase === "done") yield* scheduleRemoval(projectId);
+    const ended = yield* modify(projectId, (tracked) =>
+      tracked.snapshot.phase !== "running"
+        ? tracked
+        : {
+            ...tracked,
+            fiber: null,
+            snapshot: {
+              ...tracked.snapshot,
+              phase: outcome.phase,
+              endedAt,
+              percent: outcome.phase === "done" ? 100 : tracked.snapshot.percent,
+              stalled: false,
+              error:
+                outcome.phase === "failed"
+                  ? clampText(outcome.error, PROJECT_CLONE_ERROR_MAX_LENGTH)
+                  : null,
+              ...(outcome.phase === "done" && outcome.base !== null ? { base: outcome.base } : {}),
+            },
+          },
+    );
+    if (ended?.phase === "done") yield* scheduleRemoval(projectId);
   });
 
   const cloneWatchingForStall = Effect.fn("ProjectCloneTracker.cloneWatchingForStall")(function* (
     projectId: ProjectId,
     tracked: TrackedClone,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
   ) {
     const pulses = yield* Queue.sliding<void>(1);
     yield* watchForStall(projectId, pulses).pipe(Effect.forkScoped);
@@ -232,36 +263,52 @@ export const make = Effect.gen(function* () {
         onProgress: (update) =>
           Queue.offer(pulses, undefined).pipe(Effect.andThen(progress(projectId, update))),
         timeoutMs: null,
+        ...(adopt === undefined ? {} : { adopt }),
+        ...(tracked.input.checkout === undefined ? {} : { checkout: tracked.input.checkout }),
       },
     );
   }, Effect.scoped);
 
   /**
-   * `onExit` records outcomes even on interruption; `matchCause` would be skipped.
-   * Mark the clone done before the post-clone hook so a late Cancel cannot remove it.
+   * Runs in its own fiber; `onExit` records failures even on interruption (unlike `matchCause`),
+   * and finalization runs uninterruptibly once git finishes so a late Cancel cannot tear down a complete clone.
    */
-  const runClone = (projectId: ProjectId, tracked: TrackedClone) =>
-    cloneWatchingForStall(projectId, tracked).pipe(
+  const runClone = (
+    projectId: ProjectId,
+    tracked: TrackedClone,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
+  ) =>
+    cloneWatchingForStall(projectId, tracked, adopt).pipe(
+      Effect.flatMap((cloned) =>
+        Effect.uninterruptible(
+          tracked.hooks
+            .finalize({
+              projectId,
+              workspaceRoot: tracked.input.destinationPath,
+              base: cloned.base ?? null,
+            })
+            .pipe(Effect.andThen(finish(projectId, { phase: "done", base: cloned.base ?? null }))),
+        ),
+      ),
       Effect.onExit((exit) =>
         Exit.isSuccess(exit)
-          ? finish(projectId, "done", null)
+          ? Effect.void
           : Cause.hasInterruptsOnly(exit.cause)
-            ? finish(projectId, "cancelled", null)
-            : finish(projectId, "failed", describeCloneFailure(exit.cause)),
-      ),
-      Effect.flatMap(() =>
-        tracked.hooks
-          .onCloned({ projectId, workspaceRoot: tracked.input.destinationPath })
-          .pipe(Effect.ignoreCause({ log: true })),
+            ? finish(projectId, { phase: "cancelled" })
+            : finish(projectId, { phase: "failed", error: describeCloneFailure(exit.cause) }),
       ),
       Effect.ignoreCause(),
     );
 
-  const launch = Effect.fn("ProjectCloneTracker.launch")(function* (projectId: ProjectId) {
+  /** Starts the clone fiber; `adopt` takes a clone of the repository already at the destination. */
+  const launch = Effect.fn("ProjectCloneTracker.launch")(function* (
+    projectId: ProjectId,
+    adopt: SourceControlRepositoryService.SourceControlCloneAdoption | undefined,
+  ) {
     const current = yield* Ref.get(clones);
     const tracked = current.get(projectId);
     if (!tracked) return;
-    const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
+    const fiber = yield* runClone(projectId, tracked, adopt).pipe(Effect.forkIn(cloneScope));
     yield* Ref.update(clones, (map) => {
       const existing = map.get(projectId);
       if (!existing) return map;
@@ -283,7 +330,11 @@ export const make = Effect.gen(function* () {
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (input, hooks) {
-      const prepared = yield* repositories.prepareClone(input);
+      const adopt = input.checkout?.reuseMatching === true ? "retarget-origin" : undefined;
+      const prepared = yield* repositories.prepareClone(
+        input,
+        adopt === undefined ? {} : { adopt },
+      );
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
@@ -321,6 +372,7 @@ export const make = Effect.gen(function* () {
             cloneUrl: prepared.cloneUrl,
             destinationPath: prepared.destinationPath,
             repository: prepared.repository,
+            checkout: input.checkout,
             protocol: input.protocol ?? "auto",
           },
         });
@@ -360,7 +412,7 @@ export const make = Effect.gen(function* () {
               }),
             );
           yield* publish;
-          yield* launch(projectId);
+          yield* launch(projectId, adopt);
           return projectId;
         }).pipe(Effect.tapError(() => remove(input.projectId))),
       );
@@ -382,16 +434,17 @@ export const make = Effect.gen(function* () {
       const tracked = current.get(projectId);
       if (!tracked || tracked.snapshot.phase !== "running" || !tracked.fiber) return false;
       // Finish cancellation despite disconnects to avoid dead fibers behind running snapshots.
-      yield* Effect.uninterruptible(
+      return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* Fiber.interrupt(tracked.fiber!);
           const after = yield* get(projectId);
-          if (after?.phase === "done") return;
-          if (after?.phase === "running") yield* finish(projectId, "cancelled", null);
+          // Git finished while the interrupt was landing: the checkout is complete and stays.
+          if (after?.phase === "done") return false;
+          if (after?.phase === "running") yield* finish(projectId, { phase: "cancelled" });
           yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+          return true;
         }),
       );
-      return true;
     },
   );
 
@@ -421,24 +474,24 @@ export const make = Effect.gen(function* () {
           endedAt: null,
         },
       }));
-      yield* launch(projectId);
+      // A retry takes the clone this tracker may already have published; only a
+      // sandbox's checkout points its origin at the requested URL.
+      yield* launch(
+        projectId,
+        tracked.input.checkout?.reuseMatching === true ? "retarget-origin" : "keep-origin",
+      );
       return true;
     },
   );
 
   const discard: ProjectCloneTracker["Service"]["discard"] = Effect.fn(
     "ProjectCloneTracker.discard",
-  )(function* (projectId) {
+  )(function* (projectId, workspaceRoot) {
     const current = yield* Ref.get(clones);
-    const tracked = current.get(projectId);
-    if (!tracked) return;
-    if (tracked.fiber) yield* Fiber.interrupt(tracked.fiber);
-    // Git may have finished while the interrupt was landing; the project
-    // is going away either way, but a complete checkout is the user's.
-    const after = yield* get(projectId);
-    if (after?.phase !== "done") {
-      yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
-    }
+    const fiber = current.get(projectId)?.fiber;
+    if (fiber) yield* Fiber.interrupt(fiber);
+    // Only the staging clone goes. A published checkout is the user's.
+    yield* repositories.discardClone(workspaceRoot).pipe(Effect.ignore);
     yield* clearRetention(projectId);
     yield* remove(projectId);
   });
@@ -471,8 +524,8 @@ export const make = Effect.gen(function* () {
     retry: Effect.fnUntraced(function* (projectId) {
       return yield* locked(retry(projectId));
     }),
-    discard: Effect.fnUntraced(function* (projectId) {
-      return yield* locked(discard(projectId));
+    discard: Effect.fnUntraced(function* (projectId, workspaceRoot) {
+      return yield* locked(discard(projectId, workspaceRoot));
     }),
     get,
     stream,
