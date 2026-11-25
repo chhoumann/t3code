@@ -1,5 +1,6 @@
 import Constants from "expo-constants";
 import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
+import * as RelayTracing from "@t3tools/shared/relayTracing";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
 
@@ -26,6 +27,7 @@ export interface CloudPublicConfig {
     readonly tracesUrl: string | null;
     readonly tracesDataset: string | null;
     readonly tracesToken: string | null;
+    readonly tracesHeaders: string | null;
   };
 }
 
@@ -43,19 +45,6 @@ function trimNonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function normalizeSecureUrl(value: unknown): string | null {
-  const raw = trimNonEmpty(value);
-  if (raw === null) {
-    return null;
-  }
-  try {
-    const url = new URL(raw);
-    return url.protocol === "https:" ? url.toString() : null;
-  } catch {
-    return null;
-  }
-}
-
 export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
   return {
     clerk: {
@@ -66,9 +55,10 @@ export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig
       url: normalizeSecureRelayUrl(trimNonEmpty(extra?.relay?.url) ?? ""),
     },
     observability: {
-      tracesUrl: normalizeSecureUrl(extra?.observability?.tracesUrl),
+      tracesUrl: RelayTracing.normalizeTelemetryTracesUrl(extra?.observability?.tracesUrl),
       tracesDataset: trimNonEmpty(extra?.observability?.tracesDataset),
       tracesToken: trimNonEmpty(extra?.observability?.tracesToken),
+      tracesHeaders: trimNonEmpty(extra?.observability?.tracesHeaders),
     },
   } satisfies CloudPublicConfig;
 }
@@ -76,24 +66,6 @@ export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig
 export function hasCloudPublicConfig(): boolean {
   const config = resolveCloudPublicConfig();
   return Boolean(config.clerk.publishableKey && config.clerk.jwtTemplate && config.relay.url);
-}
-
-type Configured<T> = {
-  readonly [Key in keyof T]: NonNullable<T[Key]>;
-};
-
-type TracingPublicConfig = Omit<CloudPublicConfig, "observability"> & {
-  readonly observability: Configured<CloudPublicConfig["observability"]>;
-};
-
-export function hasTracingPublicConfig(
-  config: CloudPublicConfig = resolveCloudPublicConfig(),
-): config is TracingPublicConfig {
-  return Boolean(
-    config.observability.tracesUrl &&
-    config.observability.tracesDataset &&
-    config.observability.tracesToken,
-  );
 }
 
 export function resolveRelayClerkTokenOptions() {

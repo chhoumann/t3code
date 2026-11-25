@@ -6,7 +6,11 @@ import assetLinks from "../web/public/.well-known/assetlinks.json";
 
 // Keep config parsing independent of local env files and build credentials.
 vi.mock("../../scripts/lib/public-config.ts", () => ({
-  loadRepoEnv: () => ({ APP_VARIANT: process.env.APP_VARIANT }),
+  loadRepoEnv: () => ({
+    APP_VARIANT: process.env.APP_VARIANT,
+    T3CODE_RELAY_URL: process.env.TEST_RELAY_URL,
+    EXPO_PUBLIC_MOBILE_OBSERVE_ENDPOINT_URL: process.env.TEST_OBSERVE_ENDPOINT_URL,
+  }),
 }));
 
 afterEach(() => {
@@ -44,4 +48,34 @@ it.each([
     { scheme: "https", host, pathPrefix: "/threads/" },
   ]);
   expect(assetLinks.map((link) => link.target.package_name)).toContain(identifier);
+});
+
+it.each([
+  [undefined, undefined, null, "https://observe.invalid"],
+  [
+    "https://relay.example.test",
+    undefined,
+    "https://relay.example.test/v1/mobile/observe",
+    "https://relay.example.test/v1/mobile/observe",
+  ],
+  [
+    "https://relay.example.test",
+    "https://crashes.example.test/observe",
+    "https://crashes.example.test/observe",
+    "https://crashes.example.test/observe",
+  ],
+])(
+  "sends crash reports to the configured endpoint (relay %j, explicit %j)",
+  async (relayUrl, explicitUrl, exposed, compiled) => {
+    vi.stubEnv("TEST_RELAY_URL", relayUrl);
+    vi.stubEnv("TEST_OBSERVE_ENDPOINT_URL", explicitUrl);
+    const config = await loadConfig(undefined);
+    expect(config.extra?.observability?.observeEndpointUrl).toBe(exposed);
+    expect(config.extra?.eas?.observe?.endpointUrl).toBe(compiled);
+  },
+);
+
+it("ships no trace receiver unless one is configured", async () => {
+  const config = await loadConfig(undefined);
+  expect(config.extra?.observability?.tracesUrl).toBeNull();
 });

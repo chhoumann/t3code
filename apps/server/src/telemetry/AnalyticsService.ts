@@ -1,4 +1,4 @@
-// T3 ingest retains events and forwards to PostHog; UUIDs deduplicate retries there.
+// Events go to a PostHog-compatible `/batch/` endpoint; UUIDs deduplicate retries there.
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { isCiEnvironment, isDoNotTrackSet } from "@t3tools/shared/otelEnvironment";
 import type { ClientOs } from "@t3tools/contracts";
@@ -67,13 +67,31 @@ function retryDelayMs(failures: number, random: number): number {
   return Math.round(ceiling / 2 + (ceiling / 2) * random);
 }
 
+declare const __T3CODE_BUILD_POSTHOG_HOST__: string | undefined;
+declare const __T3CODE_BUILD_POSTHOG_KEY__: string | undefined;
+
+const buildTimePosthogHost =
+  typeof __T3CODE_BUILD_POSTHOG_HOST__ === "undefined" ? "" : __T3CODE_BUILD_POSTHOG_HOST__;
+const buildTimePosthogKey =
+  typeof __T3CODE_BUILD_POSTHOG_KEY__ === "undefined" ? "" : __T3CODE_BUILD_POSTHOG_KEY__;
+
+/** `null` when no usable host is configured, which keeps analytics off. */
+function resolveAnalyticsBatchUrl(rawHost: string): string | null {
+  const host = rawHost.trim();
+  if (host === "") return null;
+  try {
+    const url = new URL(host);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.pathname = `${url.pathname.replace(/\/+$/u, "")}/batch/`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
-  ),
-  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
-    Config.withDefault("https://ingest.t3.codes"),
-  ),
+  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(Config.withDefault(buildTimePosthogKey)),
+  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(Config.withDefault(buildTimePosthogHost)),
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.option),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
@@ -122,7 +140,6 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 }
 
 /** @public */
-/** @public */
 export const make = Effect.gen(function* () {
   const telemetryConfig = yield* TelemetryEnvConfig;
   const hostEnvironment = yield* HostProcess.Environment;
@@ -132,10 +149,21 @@ export const make = Effect.gen(function* () {
   // A managed policy can switch analytics off over the environment, never on.
   const policyAllows =
     ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
+  // The desktop login shell can name the endpoint after startup, like the opt-out below.
+  const endpoint = () => {
+    const shellReady =
+      awaitingShellConsent && !hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+    const host =
+      (shellReady ? hostEnvironment.T3CODE_POSTHOG_HOST : undefined) ?? telemetryConfig.posthogHost;
+    const key =
+      (shellReady ? hostEnvironment.T3CODE_POSTHOG_KEY : undefined) ?? telemetryConfig.posthogKey;
+    return { batchUrl: resolveAnalyticsBatchUrl(host), posthogKey: key.trim() };
+  };
   // A cached PATH does not establish consent from the current login shell.
   const telemetryEnabled = Effect.suspend(() => {
     if (!enabledAtStartup || !policyAllows || isDoNotTrackSet(hostEnvironment))
       return Effect.succeed(false);
+    if (endpoint().batchUrl === null) return Effect.succeed(false);
     if (!awaitingShellConsent) return Effect.succeed(true);
     if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1")
       return Effect.succeed(false);
@@ -210,9 +238,11 @@ export const make = Effect.gen(function* () {
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
     if (!(yield* telemetryEnabled) || !distinctId) return;
+    const { batchUrl, posthogKey } = endpoint();
+    if (batchUrl === null) return;
 
     const payload = {
-      api_key: telemetryConfig.posthogKey,
+      ...(posthogKey ? { api_key: posthogKey } : {}),
       batch: events.map((event) => ({
         uuid: event.uuid,
         event: event.event,
@@ -244,7 +274,7 @@ export const make = Effect.gen(function* () {
       })),
     };
 
-    yield* HttpClientRequest.post(`${telemetryConfig.posthogHost}/batch/`).pipe(
+    yield* HttpClientRequest.post(batchUrl).pipe(
       HttpClientRequest.bodyJson(payload),
       Effect.flatMap(httpClient.execute),
       Effect.flatMap(HttpClientResponse.filterStatusOk),

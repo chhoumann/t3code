@@ -122,4 +122,35 @@ describe("web runtime relay telemetry policy", () => {
       expect(fetchFn).not.toHaveBeenCalled();
     }
   });
+
+  it("exports relay spans to a generic OTLP receiver with custom headers", async () => {
+    vi.resetModules();
+    vi.stubEnv("T3CODE_OTEL_SDK_DISABLED", "true");
+    vi.stubEnv("OTEL_SDK_DISABLED", "true");
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_URL", "https://otel.example.test/v1/traces");
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_DATASET", "");
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_TOKEN", "");
+    vi.stubEnv("VITE_RELAY_OTLP_TRACES_HEADERS", "x-api-key=web-key");
+    vi.stubGlobal("window", {
+      desktopBridge: { getRelayTelemetryEnabled: () => true },
+    });
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetchFn);
+    const { runtime: freshRuntime } = await import("./runtime");
+
+    try {
+      await freshRuntime.runPromise(
+        Effect.void.pipe(Effect.withSpan("relay.first-operation"), withRelayClientTracing),
+      );
+    } finally {
+      await freshRuntime.dispose();
+    }
+
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe("https://otel.example.test/v1/traces");
+    const headers = new Headers(fetchFn.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("x-api-key")).toBe("web-key");
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.has("x-axiom-dataset")).toBe(false);
+  });
 });

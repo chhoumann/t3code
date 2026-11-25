@@ -42,6 +42,12 @@ an authenticated connection does not count as product use.
 - Delivery ([`AnalyticsService.ts`](../../apps/server/src/telemetry/AnalyticsService.ts)) attaches a
   UUID per event, backs off on failure, and drops batches after bounded retries so a stuck batch
   cannot loop forever.
+- No endpoint is compiled into the source. `T3CODE_POSTHOG_HOST`/`T3CODE_POSTHOG_KEY` (build-time
+  defines in `apps/server/vite.config.ts`, or the runtime environment) name a PostHog-compatible
+  `/batch/` receiver, and an unset or invalid host turns analytics off. Relay and mobile tracing
+  likewise need an explicit OTLP URL; [`relayTracing.ts`](../../packages/shared/src/relayTracing.ts)
+  treats dataset, token, and headers as optional so any OTLP receiver works. Release builds that
+  should report to T3 must inject these values.
 - Dev-runner servers and servers on CI runners disable telemetry (and relay tracing) by default so
   they do not inflate install counts. CI detection is `isCiEnvironment` in
   [`otelEnvironment.ts`](../../packages/shared/src/otelEnvironment.ts). An explicit

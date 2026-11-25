@@ -779,46 +779,62 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect("resolveWsl carries the kill switch and resource attributes into the distro", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-desktop-backend-config-test-",
-      });
+  const TELEMETRY_ENDPOINT_ENV = {
+    T3CODE_POSTHOG_HOST: "https://posthog.example.com",
+    T3CODE_POSTHOG_KEY: "phc_self_hosted",
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://otel.example.com/v1/traces",
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: "relay",
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: "token",
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_HEADERS: "x-api-key=secret",
+  };
 
-      yield* Effect.gen(function* () {
-        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
-        const config = yield* configuration.resolveWsl({ port: 5050, distro: null });
+  it.effect(
+    "resolveWsl carries the kill switch, telemetry endpoints and resource attributes into the distro",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-desktop-backend-config-test-",
+        });
 
-        assert.equal(config.env.OTEL_SDK_DISABLED, "true");
-        assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_SDK_DISABLED");
-        assert.equal(config.env.T3CODE_TELEMETRY_ENABLED, "false");
-        assert.include((config.env.WSLENV ?? "").split(":"), "T3CODE_TELEMETRY_ENABLED");
-        assert.equal(config.env.OTEL_RESOURCE_ATTRIBUTES, "deployment.environment.name=staging");
-        assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_RESOURCE_ATTRIBUTES");
-      }).pipe(
-        Effect.provide(
-          layerBackendConfiguration().pipe(
-            Layer.provideMerge(layerServerExposure),
-            Layer.provideMerge(DesktopAppSettings.layerTest()),
-            Layer.provideMerge(DesktopWslServerTree.layerTest()),
-            Layer.provideMerge(
-              DesktopWslEnvironment.layerTest({
-                isAvailable: true,
-                windowsToWslPath: () => Option.some("/mnt/c/repo/apps/server/src/index.ts"),
-                getDistroIp: () => Option.some("172.27.0.99"),
-              }),
+        yield* Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          const config = yield* configuration.resolveWsl({ port: 5050, distro: null });
+
+          assert.equal(config.env.OTEL_SDK_DISABLED, "true");
+          assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_SDK_DISABLED");
+          assert.equal(config.env.T3CODE_TELEMETRY_ENABLED, "false");
+          assert.include((config.env.WSLENV ?? "").split(":"), "T3CODE_TELEMETRY_ENABLED");
+          assert.equal(config.env.OTEL_RESOURCE_ATTRIBUTES, "deployment.environment.name=staging");
+          assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_RESOURCE_ATTRIBUTES");
+          for (const [name, value] of Object.entries(TELEMETRY_ENDPOINT_ENV)) {
+            assert.equal(config.env[name], value);
+            assert.include((config.env.WSLENV ?? "").split(":"), name);
+          }
+        }).pipe(
+          Effect.provide(
+            layerBackendConfiguration().pipe(
+              Layer.provideMerge(layerServerExposure),
+              Layer.provideMerge(DesktopAppSettings.layerTest()),
+              Layer.provideMerge(DesktopWslServerTree.layerTest()),
+              Layer.provideMerge(
+                DesktopWslEnvironment.layerTest({
+                  isAvailable: true,
+                  windowsToWslPath: () => Option.some("/mnt/c/repo/apps/server/src/index.ts"),
+                  getDistroIp: () => Option.some("172.27.0.99"),
+                }),
+              ),
+              Layer.provideMerge(layerEnvironment(baseDir, { platform: "win32" })),
             ),
-            Layer.provideMerge(layerEnvironment(baseDir, { platform: "win32" })),
           ),
-        ),
-        Effect.provideService(HostProcess.Environment, {
-          OTEL_SDK_DISABLED: "true",
-          T3CODE_TELEMETRY_ENABLED: "false",
-          OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging",
-        }),
-      );
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+          Effect.provideService(HostProcess.Environment, {
+            OTEL_SDK_DISABLED: "true",
+            T3CODE_TELEMETRY_ENABLED: "false",
+            OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging",
+            ...TELEMETRY_ENDPOINT_ENV,
+          }),
+        );
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it.effect("resolveWsl preserves existing WSLENV entries when forwarding backend secrets", () =>
