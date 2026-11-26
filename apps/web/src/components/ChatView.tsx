@@ -2,7 +2,10 @@ import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
-import { draftSupportedRuntimeModes } from "./chat/runtimeModeConfig";
+import {
+  draftRuntimeModeLimitsInstance,
+  draftSupportedRuntimeModes,
+} from "./chat/runtimeModeConfig";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
@@ -201,7 +204,11 @@ import {
   ThreadPreviewMiniPlayer,
   useThreadPreviewCanvasSource,
 } from "./preview/ThreadPreviewMiniPlayer";
-import { createChatCanvasStore, resolveChatCanvasModel } from "./chat/canvasStore";
+import {
+  createChatCanvasStore,
+  resolveChatCanvasModel,
+  selectCanvasMeasurements,
+} from "./chat/canvasStore";
 import { usePreviewSession } from "./preview/usePreviewSession";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 
@@ -2156,7 +2163,7 @@ export default function ChatView(props: ChatViewProps) {
     chatCanvasStore,
     (state) =>
       resolveChatCanvasModel({
-        measurements: state.measurements,
+        measurements: selectCanvasMeasurements(state, rightPanelOpen),
         detailsCardMeasurement: state.detailsCardMeasurement,
         threadRef: activeThreadRef,
         preview: canvasPreview,
@@ -2709,7 +2716,6 @@ export default function ChatView(props: ChatViewProps) {
     !activeProject ||
     !isServerThread ||
     !manualCompactionProviderAvailable ||
-    isWorking ||
     isRevertingCheckpoint ||
     threadDetailLoading ||
     isPreparingWorktree ||
@@ -2717,7 +2723,8 @@ export default function ChatView(props: ChatViewProps) {
     feedbackUploading ||
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0;
-  const compactDisabled = compactThreadUnavailable;
+  // A typed /compact queues behind a running turn, so only the immediate compaction waits for idle.
+  const compactDisabled = compactThreadUnavailable || isWorking;
   const freshSessionAvailable =
     activeMessageCount > 0 && serverConfig?.environment.capabilities.freshContext === true;
   const freshSessionArmed = useFreshSessionArmed(routeThreadKey);
@@ -3757,6 +3764,7 @@ export default function ChatView(props: ChatViewProps) {
               enabled: threadFindEnabled,
             }}
             store={chatCanvasStore}
+            rightPanelOpen={rightPanelOpen}
             threadRef={activeThreadRef}
             preview={canvasPreview}
             detailsCardTopInset={isThreadFindActive ? THREAD_FIND_BAR_RESERVED_HEIGHT : 0}
@@ -4224,6 +4232,11 @@ export default function ChatView(props: ChatViewProps) {
                                               multipleModelSelections,
                                               providerStatuses,
                                             )}
+                                            instanceId={draftRuntimeModeLimitsInstance(
+                                              activeProviderStatus?.instanceId,
+                                              multipleModelSelections,
+                                            )}
+                                            cwd={gitCwd}
                                             onRuntimeModeChange={handleRuntimeModeChangeStable}
                                           />
                                         ),

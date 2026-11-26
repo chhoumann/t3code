@@ -1,6 +1,5 @@
 import { ComposerSelectControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
-import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
@@ -25,6 +24,7 @@ import {
   SelectSeparator,
   SelectValue,
 } from "./ui/select";
+import { SharedTooltipTrigger } from "./ui/shared-tooltip";
 
 interface BranchToolbarEnvironmentSelectorProps {
   autoEnvironmentLabel?: string | undefined;
@@ -98,10 +98,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       </span>
     );
     return (
-      <Tooltip>
-        <TooltipTrigger render={lockedRow} />
-        <TooltipPopup>{activeEnvironment?.label ?? gt("Run on")}</TooltipPopup>
-      </Tooltip>
+      <SharedTooltipTrigger render={lockedRow} label={activeEnvironment?.label ?? gt("Run on")} />
     );
   }
 
@@ -126,37 +123,40 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       }}
       items={environmentItems}
     >
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <ComposerSelectControl
-              size="xs"
-              className="min-w-0 max-w-full"
-              aria-label={gt("Run on")}
-              data-composer-shortcut="composer.host"
-              data-composer-context-control
-            />
-          }
-        >
-          {activeSandbox ? (
-            <BoxIcon className="size-3 shrink-0" aria-hidden="true" />
-          ) : autoEnvironmentLabel ? (
-            <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
-          ) : (
-            <EnvironmentMachineIcon
-              kind={activeEnvironment?.machine ?? "server"}
-              className="size-3 shrink-0"
-            />
-          )}
-          <ComposerContextLabel>
-            <SelectValue />
-          </ComposerContextLabel>
-        </TooltipTrigger>
-        <TooltipPopup>
-          {activeSandbox?.label ?? autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
-          {shortcutLabel ? ` · ${shortcutLabel}` : null}
-        </TooltipPopup>
-      </Tooltip>
+      <SharedTooltipTrigger
+        render={
+          <ComposerSelectControl
+            size="xs"
+            className="min-w-0 max-w-full"
+            aria-label={gt("Run on")}
+            data-composer-shortcut="composer.host"
+            data-composer-context-control
+          />
+        }
+        label={
+          <>
+            {activeSandbox?.label ??
+              autoEnvironmentLabel ??
+              activeEnvironment?.label ??
+              gt("Run on")}
+            {shortcutLabel ? ` · ${shortcutLabel}` : null}
+          </>
+        }
+      >
+        {activeSandbox ? (
+          <BoxIcon className="size-3 shrink-0" aria-hidden="true" />
+        ) : autoEnvironmentLabel ? (
+          <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
+        ) : (
+          <EnvironmentMachineIcon
+            kind={activeEnvironment?.machine ?? "server"}
+            className="size-3 shrink-0"
+          />
+        )}
+        <ComposerContextLabel>
+          <SelectValue />
+        </ComposerContextLabel>
+      </SharedTooltipTrigger>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
         <SelectGroup>
           <SelectGroupLabel>

@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { LARGE_MARKDOWN_CHUNK_MAX_CHARS, splitMarkdown } from "./markdownChunks.ts";
+import { toHtml } from "hast-util-to-html";
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import remarkRehype from "remark-rehype";
+import { unified } from "unified";
+
+import {
+  LARGE_MARKDOWN_CHUNK_MAX_CHARS,
+  splitMarkdown,
+  withMarkdownDefinitions,
+} from "./markdownChunks.ts";
+import { taskListMarkerOffset } from "./markdownTaskEdits.ts";
 
 const splitLargeMarkdown = (text: string, targetChars?: number) =>
   splitMarkdown(text, targetChars).chunks;
@@ -147,7 +158,31 @@ describe("splitMarkdown", () => {
     expect(starts(text)).toEqual(["---", "# Heading"]);
   });
 
-  it("collects link definitions outside code so every piece can resolve them", () => {
+  it("cuts after a leading horizontal rule with no frontmatter closer", () => {
+    const md =
+      "---\n\n" +
+      Array.from({ length: 300 }, (_, i) => `## Part ${i}\n${"a".repeat(450)}`).join("\n\n");
+    const { chunks } = splitMarkdown(md);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.text.length <= LARGE_MARKDOWN_CHUNK_MAX_CHARS)).toBe(true);
+    expect(chunks.map((chunk) => chunk.text).join("\n")).toBe(md);
+  });
+
+  it.each([
+    ["one space", " # References"],
+    ["two spaces", "  ### References"],
+    ["three spaces", "   ###### References"],
+  ])("collects definitions after headings indented by %s without cutting there", (_, heading) => {
+    const intro = "[Release notes][release]\n";
+    const definition = "[release]: /releases";
+    const appendix = ["## Appendix", heading, definition].join("\n");
+    const result = splitMarkdown(`${intro}\n${appendix}`, 1);
+
+    expect(result.definitions).toBe(definition);
+    expect(result.chunks.map((chunk) => chunk.text)).toEqual([intro, appendix]);
+  });
+
+  it.each(["", " "])("collects link definitions outside code with fence indent %j", (indent) => {
     const text = [
       "[![badge][b]][site]",
       "",
@@ -173,9 +208,9 @@ describe("splitMarkdown", () => {
       "===",
       "[p]: /paragraph-text",
       "",
-      "```sh",
+      `${indent}\`\`\`sh`,
       "npm install",
-      "```",
+      `${indent}\`\`\``,
       "[fence]: /after-fence",
       "~~~",
       "~~~",
@@ -205,5 +240,48 @@ describe("splitMarkdown", () => {
     expect(splitMarkdown(text).definitions).toBe(
       "[site]: https://example.com\n[b]: https://example.com/badge.svg 'Badge'\n[h]: /after-heading\n[t]: /after-break\n[fence]: /after-fence\n[comment]: /after-a-closed-comment",
     );
+    const frontmatter = ["---", "title: x", "...", "[fm]: /after-frontmatter", "", "# A"];
+    expect(splitMarkdown(frontmatter.join("\n")).definitions).toBe("[fm]: /after-frontmatter");
+    const unclosed = ["---", ...Array<string>(1000).fill("text"), "[u]: /paragraph-text"];
+    expect(splitMarkdown(unclosed.join("\n")).definitions).toBe("");
+    expect(splitMarkdown("---\n[rule]: /after-leading-rule\n\n# A").definitions).toBe(
+      "[rule]: /after-leading-rule",
+    );
+  });
+});
+
+describe("withMarkdownDefinitions", () => {
+  const html = (text: string) => {
+    const processor = unified().use(remarkParse).use(remarkRehype);
+    return toHtml(processor.runSync(processor.parse(text)));
+  };
+
+  it("keeps the first document definition ahead of later chunk definitions", () => {
+    const text = "[id]: /first\n\n" + "x".repeat(4100) + "\n\n# Next\n[id]: /later\n\n[id]";
+    const { chunks, definitions } = splitMarkdown(text);
+    expect(html(text)).toContain('href="/first"');
+    expect(chunks).toHaveLength(2);
+    expect(html(withMarkdownDefinitions(chunks[1]!.text, definitions))).toContain('href="/first"');
+    expect(chunks.map((chunk) => chunk.text).join("\n")).toBe(text);
+  });
+
+  it("keeps frontmatter hidden and task offsets shifted by exactly the prefix", () => {
+    const text = "\uFEFF---\r\ntitle: hidden\r\n---\r\n\r\n[ref]: /x\r\n\r\n- [ ] task";
+    const { definitions } = splitMarkdown(text);
+    const rendered = withMarkdownDefinitions(text, definitions);
+    expect(html(rendered)).not.toContain("hidden");
+    const list = unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .parse(rendered)
+      .children.find((node) => node.type === "list");
+    const marker = taskListMarkerOffset(rendered, list!.position!.start.offset!);
+    expect(marker! - (definitions.length + 2)).toBe(text.indexOf("[ ]"));
+  });
+
+  it("keeps shared definitions out of a trailing unclosed code fence", () => {
+    const text = "[ref]: /dst\n\n```text\nshown";
+    const { definitions } = splitMarkdown(text);
+    expect(html(withMarkdownDefinitions(text, definitions))).toBe(html(text));
   });
 });

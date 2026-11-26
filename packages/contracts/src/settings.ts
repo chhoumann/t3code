@@ -668,6 +668,10 @@ export interface ProviderSettingsFormAnnotation {
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
 
   readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
+  /** Shows the field only while the named select field holds one of these values. */
+  readonly visibleWhen?:
+    | { readonly field: string; readonly values: ReadonlyArray<string> }
+    | undefined;
 }
 
 export function secretSettingsFields(schema: {
@@ -887,6 +891,10 @@ export const AntigravityAuthMethod = Schema.Literals(
   ANTIGRAVITY_AUTH_METHODS.map((method) => method.value),
 );
 export type AntigravityAuthMethod = typeof AntigravityAuthMethod.Type;
+const antigravityGcpFieldVisibility = {
+  field: "authMethod",
+  values: ["oauth-business", "agent-platform"],
+} satisfies ProviderSettingsFormAnnotation["visibleWhen"];
 
 export const AntigravitySettings = makeProviderSettingsSchema(
   {
@@ -899,7 +907,7 @@ export const AntigravitySettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Sign-in method",
         description:
-          "Google accounts use your subscription; API keys and Agent Platform bill usage.",
+          "Google account and Gemini Enterprise use your existing plan. Gemini API key and Agent Platform charge per use to your key or Google Cloud project.",
         providerSettingsForm: {
           control: "select",
           options: ANTIGRAVITY_AUTH_METHODS,
@@ -917,6 +925,7 @@ export const AntigravitySettings = makeProviderSettingsSchema(
           control: "password",
           placeholder: "Optional",
           clearWhenEmpty: "omit",
+          visibleWhen: { field: "authMethod", values: ["gemini-api-key", "agent-platform"] },
         },
       }),
     ),
@@ -926,7 +935,11 @@ export const AntigravitySettings = makeProviderSettingsSchema(
         title: "GCP project",
         description:
           "Required for Gemini Enterprise. Agent Platform uses it when no API key is set.",
-        providerSettingsForm: { placeholder: "my-project-id", clearWhenEmpty: "omit" },
+        providerSettingsForm: {
+          placeholder: "my-project-id",
+          clearWhenEmpty: "omit",
+          visibleWhen: antigravityGcpFieldVisibility,
+        },
       }),
     ),
     gcpLocation: TrimmedString.pipe(
@@ -934,7 +947,11 @@ export const AntigravitySettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "GCP location",
         description: "Region for Gemini Enterprise or Agent Platform.",
-        providerSettingsForm: { placeholder: "us-central1", clearWhenEmpty: "omit" },
+        providerSettingsForm: {
+          placeholder: "us-central1",
+          clearWhenEmpty: "omit",
+          visibleWhen: antigravityGcpFieldVisibility,
+        },
       }),
     ),
     binaryPath: TrimmedString.pipe(
