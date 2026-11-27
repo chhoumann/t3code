@@ -77,7 +77,10 @@ const fresh: SandboxRecord = {
   createFirstAttemptAt: null,
   machineId: null,
   httpBaseUrl: null,
+  providerHttpUrl: null,
   environmentId: null,
+  firstBootAt: null,
+  overlayArchive: null,
   runningSince: null,
   inputsWrittenAt: null,
   credentialsStale: false,
@@ -97,9 +100,15 @@ const booting: SandboxRecord = {
   ...created,
   status: { _tag: "booting" },
   inputsWrittenAt: NOW - 4 * MINUTE,
+  providerHttpUrl: "https://bx-test.boat.dev",
   httpBaseUrl: "https://bx-test.boat.dev",
 };
-const launching: SandboxRecord = { ...booting, status: { _tag: "launching" }, environmentId: ENV };
+const launching: SandboxRecord = {
+  ...booting,
+  status: { _tag: "launching" },
+  environmentId: ENV,
+  firstBootAt: NOW - 4 * MINUTE,
+};
 const prepared: SandboxRecord = {
   ...launching,
   resolvedBase: { branch: "main", commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d" },
@@ -243,7 +252,7 @@ const cases: ReadonlyArray<Case> = [
   ],
   [
     "inputs written, port not hosted yet",
-    { ...booting, httpBaseUrl: null },
+    { ...booting, httpBaseUrl: null, providerHttpUrl: null },
     running,
     { status: { _tag: "booting" }, action: { _tag: "Host" } },
   ],
@@ -290,6 +299,24 @@ const cases: ReadonlyArray<Case> = [
     { status: { _tag: "launching" }, action: { _tag: "RecordEnvironment", environmentId: ENV } },
   ],
   [
+    "pre-allocated ms-0 environmentId still executes FirstBoot WriteInputs, Host, and RecordEnvironment",
+    { ...created, environmentId: ENV },
+    running,
+    { status: { _tag: "creating" }, action: { _tag: "WriteInputs" } },
+  ],
+  [
+    "pre-allocated ms-0 environmentId without providerHttpUrl still plans Host before firstBootAt is set",
+    { ...booting, environmentId: ENV, providerHttpUrl: null },
+    running,
+    { status: { _tag: "booting" }, action: { _tag: "Host" } },
+  ],
+  [
+    "pre-allocated ms-0 environmentId still plans RecordEnvironment before firstBootAt is set",
+    { ...booting, environmentId: ENV },
+    answering,
+    { status: { _tag: "launching" }, action: { _tag: "RecordEnvironment", environmentId: ENV } },
+  ],
+  [
     "a T3 answering while the creation script runs, as one from a template does, is not recorded",
     booting,
     observed({ machine: machine("running", "running"), environmentId: ENV }),
@@ -324,6 +351,12 @@ const cases: ReadonlyArray<Case> = [
     prepared,
     answering,
     { status: { _tag: "launching" }, action: { _tag: "LaunchSeed" } },
+  ],
+  [
+    "skips LaunchSeed and settles ready when skipSeedThread is true once project is prepared",
+    { ...prepared, spec: { ...prepared.spec, skipSeedThread: true } },
+    answering,
+    { status: { _tag: "ready" }, action: { _tag: "Watch" } },
   ],
   [
     "seed launched: ready",

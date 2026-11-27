@@ -1,7 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { SandboxBranchName, SandboxRemoteUrl, SandboxSource } from "./sandbox.ts";
+import { ProviderDriverKind } from "./providerInstance.ts";
+import {
+  SandboxAccountId,
+  SandboxAccountSaveInput,
+  SandboxBranchName,
+  SandboxId,
+  SandboxLaunchInput,
+  SandboxRemoteUrl,
+  SandboxSource,
+} from "./sandbox.ts";
 
 const isRemoteUrl = Schema.is(SandboxRemoteUrl);
 const isBranchName = Schema.is(SandboxBranchName);
@@ -65,5 +74,73 @@ describe("SandboxSource", () => {
     expect(decodeSource({ remoteUrl, base: { _tag: "branch", name: "HEAD" } })._tag).toBe(
       "Failure",
     );
+  });
+});
+
+describe("multi-provider accounts and local checkout launch", () => {
+  it("decodes docker, command, and boat accounts with exposed ports", () => {
+    const decodeAccount = Schema.decodeUnknownExit(SandboxAccountSaveInput);
+    const base = {
+      id: SandboxAccountId.make("acc-1"),
+      label: "Local Docker",
+      providerEnvironment: null,
+      size: "default" as const,
+      stopAfterHours: 4,
+      machineSetupScript: null,
+      env: [],
+    };
+    expect(
+      decodeAccount({
+        ...base,
+        provider: "docker",
+        dockerImage: "node:22-bookworm",
+        exposedHostPorts: [8317],
+      })._tag,
+    ).toBe("Success");
+    expect(
+      decodeAccount({
+        ...base,
+        provider: "command",
+        commandProgram: "/usr/local/bin/my-sandbox-driver",
+        exposedHostPorts: [8317, 3000],
+      })._tag,
+    ).toBe("Success");
+    expect(
+      decodeAccount({
+        ...base,
+        provider: "docker",
+        exposedHostPorts: [70_000],
+      })._tag,
+    ).toBe("Failure");
+  });
+
+  it("decodes SandboxLaunchInput with localCheckout and attachments", () => {
+    const decodeLaunch = Schema.decodeUnknownExit(SandboxLaunchInput);
+    const decoded = decodeLaunch({
+      id: SandboxId.make("sbx_1"),
+      accountId: SandboxAccountId.make("acc-1"),
+      title: "Fix tests",
+      message: "Run tests with my uncommitted fix",
+      source: {
+        remoteUrl: SandboxRemoteUrl.make("https://github.com/pingdotgg/t3code.git"),
+        base: { _tag: "default" },
+      },
+      driver: ProviderDriverKind.make("codex"),
+      model: "gpt-5",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      localCheckout: { cwd: "/tmp/repo", includeUncommitted: true },
+      attachments: [
+        {
+          id: "att-1",
+          type: "image",
+          name: "shot.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+          dataUrl: "data:image/png;base64,AAAA",
+        },
+      ],
+    });
+    expect(decoded._tag).toBe("Success");
   });
 });

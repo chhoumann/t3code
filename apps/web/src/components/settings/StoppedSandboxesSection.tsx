@@ -54,9 +54,10 @@ function StoppedSandboxRow(props: {
   // active, so resuming needs only the owner. The launch view opens the thread.
   const resume = async () => {
     if (!(await setDesired(ref, "running"))) return;
+    if (sandbox.environmentId === null) return;
     await navigate({
-      to: "/sandbox/$environmentId/$sandboxId",
-      params: { environmentId: props.ownerEnvironmentId, sandboxId: sandbox.id },
+      to: "/$environmentId/$threadId",
+      params: { environmentId: sandbox.environmentId, threadId: sandbox.threadId },
     });
   };
   return (

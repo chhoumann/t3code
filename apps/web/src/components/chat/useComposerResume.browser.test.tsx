@@ -56,11 +56,7 @@ function ResumeButton(props: {
     isSendBusy: false,
     isRevertingCheckpoint: false,
     threadDetailLoading: false,
-    sandboxWork: {
-      delivery: "now",
-      isHolding: () => false,
-      hold: () => undefined,
-    },
+    delivery: "now",
     runtimeMode: "full-access",
     localCheckoutBranchMismatch: null,
     composerRef: props.composerRef,

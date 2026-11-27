@@ -3,7 +3,9 @@ import {
   type SandboxAccountId,
   type SandboxAccountSaveInput,
   SandboxEnvName,
+  SandboxExposedPort,
   type SandboxMachineSize,
+  type SandboxProviderKind,
   isSandboxStopAfterHours,
   SANDBOX_MAX_STOP_AFTER_HOURS,
 } from "@t3tools/contracts";
@@ -19,6 +21,14 @@ export const SANDBOX_SIZE_LABELS: Record<SandboxMachineSize, string> = {
   xlarge: "Extra large",
 };
 
+export const SANDBOX_PROVIDER_LABELS: Record<SandboxProviderKind, string> = {
+  docker: "Local Docker",
+  command: "Custom Command",
+  boat: "Boat",
+};
+
+export const SANDBOX_PROVIDERS: ReadonlyArray<SandboxProviderKind> = ["docker", "command", "boat"];
+
 export interface SandboxEnvDraft {
   /** Stable row key; names can be edited. */
   readonly key: string;
@@ -32,8 +42,12 @@ export interface SandboxEnvDraft {
 
 export interface SandboxAccountDraft {
   readonly label: string;
+  readonly provider: SandboxProviderKind;
   /** Empty keeps a saved key. */
   readonly apiKey: string;
+  readonly dockerImage: string;
+  readonly commandProgram: string;
+  readonly exposedHostPorts: string;
   readonly size: SandboxMachineSize;
   /** Empty never stops a machine on its own. */
   readonly stopAfterHours: string;
@@ -48,7 +62,11 @@ export function sandboxAccountDraft(
 ): SandboxAccountDraft {
   return {
     label: account?.label ?? "",
+    provider: account?.provider ?? "docker",
     apiKey: "",
+    dockerImage: account?.dockerImage ?? "",
+    commandProgram: account?.commandProgram ?? "",
+    exposedHostPorts: (account?.exposedHostPorts ?? []).join(", "),
     size: account?.size ?? "small",
     stopAfterHours:
       account === null ? "8" : account.stopAfterHours === null ? "" : `${account.stopAfterHours}`,
@@ -66,6 +84,7 @@ export function sandboxAccountDraft(
 
 const nullIfBlank = (value: string) => (value.trim().length === 0 ? null : value.trim());
 const isEnvName = Schema.is(SandboxEnvName);
+const isExposedPort = Schema.is(SandboxExposedPort);
 
 /**
  * The save request for a draft, or what is wrong with it. A saved env value
@@ -93,6 +112,27 @@ export function sandboxAccountSaveInput(
       ),
     };
   }
+  const exposedHostPorts: Array<SandboxExposedPort> = [];
+  for (const token of draft.exposedHostPorts.split(/[\s,]+/)) {
+    const trimmed = token.trim();
+    if (trimmed.length === 0) continue;
+    if (!/^\d+$/.test(trimmed)) {
+      return {
+        _tag: "Invalid",
+        message: resolve(msg("Exposed host ports must be integers between 1 and 65535.")),
+      };
+    }
+    const parsedPort = Number(trimmed);
+    if (!isExposedPort(parsedPort)) {
+      return {
+        _tag: "Invalid",
+        message: resolve(msg("Exposed host ports must be integers between 1 and 65535.")),
+      };
+    }
+    if (!exposedHostPorts.includes(parsedPort)) {
+      exposedHostPorts.push(parsedPort);
+    }
+  }
   const badName = draft.env.find((entry) => !isEnvName(entry.name.trim()));
   if (badName !== undefined) {
     return {
@@ -106,12 +146,17 @@ export function sandboxAccountSaveInput(
     };
   }
   const apiKey = draft.apiKey.trim();
+  const dockerImage = draft.provider === "docker" ? nullIfBlank(draft.dockerImage) : null;
+  const commandProgram = draft.provider === "command" ? nullIfBlank(draft.commandProgram) : null;
   return {
     _tag: "Ready",
     input: {
       id,
       label,
-      provider: "boat",
+      provider: draft.provider,
+      dockerImage,
+      commandProgram,
+      exposedHostPorts,
       providerEnvironment: nullIfBlank(draft.providerEnvironment),
       size: draft.size,
       stopAfterHours,

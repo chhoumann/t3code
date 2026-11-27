@@ -13,6 +13,7 @@ import {
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_SETUP_ENV_FILE,
+  renderContainerBootScript,
   renderGitHubLoginCommand,
   renderRefreshCredentialsCommand,
   renderRestartServerCommand,
@@ -465,5 +466,28 @@ describe("renderGitHubLoginCommand", () => {
     NodeFS.rmSync(home2, { recursive: true });
     expect(log2).toContain("git config --global user.name octocat\n");
     expect(log2).not.toContain("user.email");
+  });
+});
+
+describe("renderContainerBootScript", () => {
+  it("renders valid bash with no /tmp paths and copies environment-id when staged", () => {
+    const script = renderContainerBootScript({ t3: tarball, sandboxId });
+    const syntax = bashSyntaxErrors(script);
+    expect(syntax.stderr).toBe("");
+    expect(syntax.status).toBe(0);
+    expect(script).not.toContain("/tmp");
+    expect(script).toContain("sandbox/environment-id");
+    expect(script).toContain("start-guest.sh");
+    expect(script).toContain("inputs-ready");
+    expect(script).toContain('"linkedEnvironmentsEnabled":true');
+  });
+
+  it("renders valid bash for npm mode", () => {
+    const script = renderContainerBootScript({ t3: npm, sandboxId });
+    const syntax = bashSyntaxErrors(script);
+    expect(syntax.stderr).toBe("");
+    expect(syntax.status).toBe(0);
+    expect(script).toContain("t3@0.0.45");
+    expect(script).toContain('"linkedEnvironmentsEnabled":true');
   });
 });

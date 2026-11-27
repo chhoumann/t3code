@@ -127,7 +127,7 @@ import {
 } from "./preparingComposerImages";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
 import { readCanSendWork } from "../../state/sandboxes";
-import type { SandboxWorkGate } from "./useHeldSandboxWork";
+import type { WorkDelivery } from "@t3tools/client-runtime/state/sandboxes";
 import { useLinkedEnvironments } from "../../state/peerLinks";
 import { ensureWorktreeLayoutApproved } from "../../worktreeLayoutApproval";
 import { useOrchestrationCommand, useWorkCommand } from "../../state/use-orchestration-command";
@@ -244,7 +244,7 @@ interface ComposerSendInput {
   readonly isRevertingCheckpoint: boolean;
   /** Whether the thread is still loading in a way a send must wait for. */
   readonly threadLoadBlocksSend: boolean;
-  readonly sandboxWork: SandboxWorkGate;
+  readonly delivery: WorkDelivery;
   /** Launches the draft into the new sandbox it picked; null when it picked none. */
   readonly launchSandboxDraft: (() => Promise<void>) | null;
   readonly isSendBusy: boolean;
@@ -345,7 +345,7 @@ export function useComposerSend(input: ComposerSendInput) {
     queuedRunEdit,
     isRevertingCheckpoint,
     threadLoadBlocksSend,
-    sandboxWork,
+    delivery,
     launchSandboxDraft,
     isSendBusy,
     sendQueuesBehindSetup,
@@ -434,8 +434,7 @@ export function useComposerSend(input: ComposerSendInput) {
     threadLoadBlocksSend ||
     readPendingEnvironmentChange() !== null ||
     sendInFlightRef.current ||
-    feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
-    sandboxWork.isHolding();
+    feedbackUploadsInFlightRef.current.has(routeThreadKey);
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -514,8 +513,7 @@ export function useComposerSend(input: ComposerSendInput) {
       !clientSettingsHydrated ||
       threadLoadBlocksSend ||
       readPendingEnvironmentChange() !== null ||
-      feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
-      sandboxWork.isHolding()
+      feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
       return;
@@ -557,7 +555,7 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       return;
     }
-    if (sandboxWork.delivery === "offline") {
+    if (delivery === "offline") {
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;
@@ -867,10 +865,6 @@ export function useComposerSend(input: ComposerSendInput) {
         );
         return;
       }
-      if (sandboxWork.delivery === "after-wake" && queuedRunEdit.editingRunId !== null) {
-        sandboxWork.hold({ kind: "edit-queued", runId: queuedRunEdit.editingRunId });
-        return;
-      }
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
       await queuedRunEdit.saveEdit(
@@ -1168,10 +1162,6 @@ export function useComposerSend(input: ComposerSendInput) {
       multipleTargets.push(resolved);
     }
 
-    if (sandboxWork.delivery === "after-wake") {
-      sandboxWork.hold({ kind: "send", dispatchMode, submissionIntent, directAnnotation });
-      return;
-    }
     const draftBeforePreparation = useComposerDraftStore
       .getState()
       .getComposerDraft(composerDraftTarget);

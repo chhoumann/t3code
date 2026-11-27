@@ -24,6 +24,10 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RunId,
+  SandboxAccountId,
+  SandboxId,
+  SandboxRemoteUrl,
+  type SandboxView,
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
@@ -76,6 +80,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as SandboxService from "../sandbox/SandboxService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -3853,6 +3858,221 @@ describe("OrchestratorMcpService provider resolution", () => {
             "always",
             "a cancelled blocking delegation left the task settled_only, so its result never reaches the still-live parent run",
           );
+        }).pipe(Effect.provide(layerTest));
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect(
+    'delegates with isolation "sandbox" by launching a sandbox without a seed thread and forwarding localCheckout',
+    () =>
+      Effect.gen(function* () {
+        const driver = ProviderDriverKind.make("codex");
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          {
+            instanceId: codexInstanceId,
+            driver,
+            getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+            planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+            openSession: () => Effect.die("unused"),
+          },
+        ]);
+        const layerDatabase = SqlitePersistence.layerMemory;
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-sandbox-delegation" },
+          layerRegistry,
+          { databaseLayer: layerDatabase, runEffectWorker: false },
+        );
+        const layerSettings = ServerSettings.layerTest({
+          providerInstances: { [codexInstanceId]: { driver: "codex", enabled: true } },
+          sandboxAccounts: {
+            [SandboxAccountId.make("docker-1")]: {
+              provider: "docker",
+              label: "Local Docker",
+              size: "default",
+              stopAfterHours: null,
+              providerEnvironment: null,
+              dockerImage: "t3code/sandbox:latest",
+              machineSetupScript: null,
+              env: [],
+            },
+          },
+        });
+        const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provideMerge(layerOrchestrator),
+          Layer.provide(
+            LegacyV1ThreadImporter.layer.pipe(
+              Layer.provide(layerOrchestrator),
+              Layer.provide(layerDatabase),
+            ),
+          ),
+          Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+          Layer.provideMerge(layerSettings),
+        );
+        const sandboxEnvId = EnvironmentId.make("environment:delegated-sandbox");
+        const sandboxProjectId = ProjectId.make("project:delegated-sandbox");
+        const sandboxThreadId = ThreadId.make("thread:delegated-sandbox");
+        const launchCalls: Array<unknown> = [];
+        const delegateCalls: Array<unknown> = [];
+        const layerMockSandbox = Layer.mock(SandboxService.SandboxService)({
+          launch: (input) =>
+            Effect.sync(() => {
+              launchCalls.push(input);
+              return {
+                id: input.id,
+                accountId: input.accountId,
+                title: input.title,
+                message: input.message,
+                source: input.source,
+                resolvedBase: null,
+                threadId: sandboxThreadId,
+                desired: "running",
+                revision: 1,
+                status: { _tag: "creating" },
+                settledRevision: 0,
+                environmentId: sandboxEnvId,
+                projectId: sandboxProjectId,
+                httpBaseUrl: `/_env/${sandboxEnvId}`,
+                createdAt: "2026-11-27T12:00:00.000Z",
+              } satisfies SandboxView;
+            }),
+          subscribe: () =>
+            Stream.succeed([
+              {
+                id: SandboxId.make("unused"),
+                accountId: SandboxAccountId.make("docker-1"),
+                title: "Delegated sandbox task",
+                message: "Run tests in sandbox.",
+                source: {
+                  remoteUrl: SandboxRemoteUrl.make("https://local.t3.invalid/local/app"),
+                  base: { _tag: "default" },
+                },
+                resolvedBase: { branch: "main", commit: "deadbeef" },
+                threadId: sandboxThreadId,
+                desired: "running",
+                revision: 1,
+                status: { _tag: "ready" },
+                settledRevision: 1,
+                environmentId: sandboxEnvId,
+                projectId: sandboxProjectId,
+                httpBaseUrl: `/_env/${sandboxEnvId}`,
+                createdAt: "2026-11-27T12:00:00.000Z",
+              } satisfies SandboxView,
+            ] as ReadonlyArray<SandboxView>).pipe(
+              Stream.map((views) =>
+                views.map((view) => ({
+                  ...view,
+                  id: (launchCalls[0] as { readonly id: SandboxId }).id,
+                })),
+              ),
+            ),
+        });
+        const layerRemoteDelegation = Layer.unwrap(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            return Layer.mock(RemoteDelegation.RemoteDelegation)({
+              delegate: (_scope, input) =>
+                Effect.gen(function* () {
+                  delegateCalls.push(input);
+                  const run = (yield* orchestrator.getThreadProjection(parentThreadId)).runs[0]!;
+                  yield* orchestrator.dispatch({
+                    type: "delegated_task.remote.request",
+                    commandId: CommandId.make("command:remote-delegate:sandbox"),
+                    parentThreadId,
+                    parentRunId: run.id,
+                    parentNodeId: run.rootNodeId!,
+                    task: input.task,
+                    driver: ProviderDriverKind.make("remote"),
+                    modelSelection: run.modelSelection,
+                    remoteChild: {
+                      environmentId: sandboxEnvId,
+                      threadId: sandboxThreadId,
+                      label: "Delegated sandbox task",
+                    },
+                    completionWake: "always",
+                  });
+                  const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+                  return { taskId: parent.subagents[0]!.id };
+                }).pipe(Effect.orDie),
+              runStatus: () => Effect.succeed(null),
+            });
+          }),
+        ).pipe(Layer.provide(layerThreads));
+        const layerTest = layerOrchestratorService.pipe(
+          Layer.provideMerge(layerThreads),
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              layerRegistry,
+              layerSettings,
+              providerRegistryLayer([
+                providerSnapshot({ instanceId: codexInstanceId, driver, model: "gpt-5.4" }),
+              ]),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: (id) =>
+                  Effect.succeedSome({
+                    id,
+                    title: "Local App",
+                    workspaceRoot: "/tmp/local-app",
+                    repositoryIdentity: null,
+                  } as never),
+              }),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              layerMockSandbox,
+              layerRemoteDelegation,
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:sandbox:create"),
+            threadId: parentThreadId,
+            projectId,
+            title: "MCP parent",
+            modelSelection: { instanceId: codexInstanceId, model: "gpt-5.4" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: "/tmp/local-app/wt-1",
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:sandbox:start"),
+            threadId: parentThreadId,
+            messageId: MessageId.make("parent:sandbox:msg"),
+            text: "Delegate to sandbox.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+          const res = yield* service.delegateTask(scope, {
+            task: "Run tests in sandbox.",
+            isolation: "sandbox",
+            mode: "async",
+            clientRequestId: "delegate-sandbox-1",
+          });
+          assert.equal(res.remoteChild?.environmentId, sandboxEnvId);
+          assert.equal(launchCalls.length, 1);
+          assert.deepInclude(launchCalls[0] as Record<string, unknown>, {
+            skipSeedThread: true,
+            localCheckout: { cwd: "/tmp/local-app/wt-1", includeUncommitted: true },
+          });
+          assert.equal(delegateCalls.length, 1);
+          assert.deepInclude(delegateCalls[0] as Record<string, unknown>, {
+            isolation: "shared",
+            target: {
+              environmentId: sandboxEnvId,
+              projectId: sandboxProjectId,
+              driverKind: driver,
+              model: "gpt-5.4",
+            },
+          });
         }).pipe(Effect.provide(layerTest));
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );

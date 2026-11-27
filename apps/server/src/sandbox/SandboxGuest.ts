@@ -4,6 +4,8 @@
  */
 import {
   type AuthGrantScope,
+  type AuthMcpClientAccess,
+  type ChatAttachment,
   type CommandId,
   EnvironmentAuthInvalidError,
   EnvironmentHttpApi,
@@ -12,6 +14,8 @@ import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  type OrchestrationMessageContext,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   WsRpcGroup,
   defaultInstanceIdForDriver,
   type MessageId,
@@ -24,11 +28,14 @@ import {
   type ProviderDriverKind,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type SandboxLaunchAttachment,
   type SandboxResolvedBase,
   type SandboxSource,
   SourceControlRepositoryError,
   type ThreadId,
+  type UploadChatAttachment,
 } from "@t3tools/contracts";
+import { toEnvironmentWsUrl } from "@t3tools/shared/environmentPath";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -50,9 +57,12 @@ import {
 } from "./ManagedSandbox.ts";
 import {
   SANDBOX_ENV_FILE,
+  SANDBOX_ENVIRONMENT_ID_FILE,
+  SANDBOX_FLEET_BOOTSTRAP_FILE,
   SANDBOX_GITHUB_TOKEN_FILE,
   SANDBOX_INPUTS_READY_FILE,
   SANDBOX_MANAGED_FILE,
+  SANDBOX_OVERLAY_ARCHIVE,
   SANDBOX_SETUP_ENV_FILE,
   SANDBOX_MACHINE_SETUP_SCRIPT,
   SANDBOX_STAGED_ENV_FILE,
@@ -103,6 +113,8 @@ export interface SandboxSeedThread {
   readonly model: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly attachments?: ReadonlyArray<SandboxLaunchAttachment>;
+  readonly context?: OrchestrationMessageContext;
 }
 
 /** What the owner writes into a machine for its account; contents are secret. */
@@ -116,6 +128,7 @@ export interface SandboxMachineCredentials {
 
 export const SandboxGuestOperation = Schema.Literals([
   "write-inputs",
+  "unpack-overlay",
   "refresh-credentials",
   "restart-server",
   "github-login",
@@ -129,6 +142,7 @@ export type SandboxGuestOperation = typeof SandboxGuestOperation.Type;
 
 const OPERATION_SUMMARY: Record<SandboxGuestOperation, string> = {
   "write-inputs": "write the boot inputs to the sandbox",
+  "unpack-overlay": "unpack the dirty checkout overlay in the sandbox",
   "refresh-credentials": "refresh the sandbox credentials",
   "restart-server": "restart T3 in the sandbox",
   "github-login": "sign the sandbox in to GitHub",
@@ -172,6 +186,9 @@ const sessionCallError = (operation: SandboxGuestOperation) => (cause: unknown) 
 const decodeIssuedSession = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Struct({ token: Schema.String })),
 );
+const decodeOverlayResult = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ branch: Schema.String, commit: Schema.String })),
+);
 const GUEST_CALL_TIMEOUT = Duration.seconds(60);
 // Boat's edge can hold a request to a port with no listener yet for minutes.
 const READINESS_TIMEOUT = Duration.seconds(5);
@@ -201,8 +218,7 @@ export const connectGuestRpc = Effect.fn("SandboxGuest.connectGuestRpc")(functio
   const { ticket } = yield* client.auth.webSocketTicket({
     headers: { authorization: `Bearer ${Redacted.value(target.token)}` },
   });
-  const socketUrl = new URL("/ws", target.baseUrl);
-  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  const socketUrl = toEnvironmentWsUrl(target.baseUrl, "/ws");
   socketUrl.searchParams.set(
     ORCHESTRATION_PROTOCOL_QUERY_PARAM,
     String(ORCHESTRATION_PROTOCOL_VERSION),
@@ -312,8 +328,27 @@ export class SandboxGuest extends Context.Service<
       inputs: SandboxMachineCredentials & {
         readonly tarball: Uint8Array | null;
         readonly managed: ManagedSandboxMarker;
+        readonly environmentId?: EnvironmentId;
+        readonly fleetBootstrapJson?: string;
       },
     ) => Effect.Effect<void, SandboxGuestError | SandboxProviderError>;
+    readonly unpackOverlay: (
+      account: SandboxProviderAccount,
+      machineId: ProviderMachineId,
+      input: {
+        readonly projectPath: string;
+        readonly archive: Uint8Array;
+      },
+    ) => Effect.Effect<SandboxResolvedBase, SandboxGuestError | SandboxProviderError>;
+    readonly registerLocalProject: (
+      target: SandboxGuestTarget,
+      project: {
+        readonly commandId: CommandId;
+        readonly projectId: ProjectId;
+        readonly title: string;
+        readonly path: string;
+      },
+    ) => Effect.Effect<void, SandboxGuestError>;
     /**
      * Rewrites the account credentials after a resume and re-runs the machine
      * setup when they changed. Reports whether T3 must restart to load them,
@@ -365,7 +400,11 @@ export class SandboxGuest extends Context.Service<
      */
     readonly launchSeedThread: (
       target: SandboxGuestTarget,
-      input: { readonly seed: SandboxSeedThread; readonly baseRef: string },
+      input: {
+        readonly seed: SandboxSeedThread;
+        readonly baseRef: string;
+        readonly workspaceStrategy?: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+      },
     ) => Effect.Effect<void, SandboxGuestError>;
     /** Whether the guest's agents are working, from its shell snapshot. */
     readonly readActivity: (
@@ -374,11 +413,18 @@ export class SandboxGuest extends Context.Service<
     /** A one-time grant a client exchanges for its own session on the guest. */
     readonly issuePairingCredential: (
       target: SandboxGuestTarget,
-      grant: {
-        readonly label: string;
-        /** Omitted grants the guest's default pairing scopes. */
-        readonly scopes?: ReadonlyArray<AuthGrantScope>;
-      },
+      grant:
+        | {
+            readonly label: string;
+            /** Omitted grants the guest's default pairing scopes. */
+            readonly scopes?: ReadonlyArray<AuthGrantScope>;
+            readonly purpose?: undefined;
+          }
+        | {
+            readonly label: string;
+            readonly access: AuthMcpClientAccess;
+            readonly purpose: "peer-link";
+          },
     ) => Effect.Effect<Redacted.Redacted<string>, SandboxGuestError>;
   }
 >()("t3/sandbox/SandboxGuest") {}
@@ -419,6 +465,39 @@ const make = Effect.gen(function* () {
 
   const encode = (text: string) => new TextEncoder().encode(text);
 
+  const writeChunkedFile = Effect.fn("SandboxGuest.writeChunkedFile")(function* (
+    operation: SandboxGuestOperation,
+    account: SandboxProviderAccount,
+    machineId: ProviderMachineId,
+    remotePath: string,
+    bytes: Uint8Array,
+  ) {
+    if (bytes.length <= UPLOAD_CHUNK_BYTES) {
+      yield* provider.writeFile(account, machineId, {
+        path: remotePath,
+        content: bytes,
+      });
+      return;
+    }
+    const parts = Math.ceil(bytes.length / UPLOAD_CHUNK_BYTES);
+    yield* Effect.forEach(
+      Array.from({ length: parts }, (_, index) => index),
+      (index) =>
+        provider.writeFile(account, machineId, {
+          path: `${remotePath}.part-${String(index).padStart(3, "0")}`,
+          content: bytes.subarray(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES),
+        }),
+      { concurrency: 3 },
+    );
+    yield* execOrFail(
+      operation,
+      account,
+      machineId,
+      `cat ${shellQuote(remotePath)}.part-* > ${shellQuote(remotePath)} && rm -f ${shellQuote(remotePath)}.part-*`,
+      60,
+    );
+  });
+
   const writeBootInputs: SandboxGuest["Service"]["writeBootInputs"] = Effect.fn(
     "SandboxGuest.writeBootInputs",
   )(function* (account, machineId, inputs) {
@@ -443,30 +522,58 @@ const make = Effect.gen(function* () {
       path: SANDBOX_MANAGED_FILE,
       content: encode(encodeManagedSandboxMarker(inputs.managed)),
     });
-    const tarball = inputs.tarball;
-    if (tarball !== null) {
-      const parts = Math.ceil(tarball.length / UPLOAD_CHUNK_BYTES);
-      yield* Effect.forEach(
-        Array.from({ length: parts }, (_, index) => index),
-        (index) =>
-          provider.writeFile(account, machineId, {
-            path: `${SANDBOX_T3_TARBALL}.part-${String(index).padStart(3, "0")}`,
-            content: tarball.subarray(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES),
-          }),
-        { concurrency: 3 },
-      );
-      yield* execOrFail(
+    if (inputs.environmentId !== undefined) {
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_ENVIRONMENT_ID_FILE,
+        content: encode(`${inputs.environmentId}\n`),
+      });
+    }
+    if (inputs.fleetBootstrapJson !== undefined) {
+      yield* provider.writeFile(account, machineId, {
+        path: SANDBOX_FLEET_BOOTSTRAP_FILE,
+        content: encode(inputs.fleetBootstrapJson),
+      });
+    }
+    if (inputs.tarball !== null) {
+      yield* writeChunkedFile(
         "write-inputs",
         account,
         machineId,
-        `cat ${shellQuote(SANDBOX_T3_TARBALL)}.part-* > ${shellQuote(SANDBOX_T3_TARBALL)} && rm -f ${shellQuote(SANDBOX_T3_TARBALL)}.part-*`,
-        60,
+        SANDBOX_T3_TARBALL,
+        inputs.tarball,
       );
     }
     yield* provider.writeFile(account, machineId, {
       path: SANDBOX_INPUTS_READY_FILE,
       content: encode(inputs.managed.sandboxId),
     });
+  });
+
+  const unpackOverlay: SandboxGuest["Service"]["unpackOverlay"] = Effect.fn(
+    "SandboxGuest.unpackOverlay",
+  )(function* (account, machineId, input) {
+    yield* writeChunkedFile(
+      "unpack-overlay",
+      account,
+      machineId,
+      SANDBOX_OVERLAY_ARCHIVE,
+      input.archive,
+    );
+    const stdout = yield* execOrFail(
+      "unpack-overlay",
+      account,
+      machineId,
+      `${shellQuote(SANDBOX_T3_BIN)} sandbox apply-overlay --dir ${shellQuote(input.projectPath)} --archive ${shellQuote(SANDBOX_OVERLAY_ARCHIVE)} && rm -f ${shellQuote(SANDBOX_OVERLAY_ARCHIVE)}`,
+      120,
+    );
+    const lastLine = stdout.trim().split("\n").at(-1) ?? "";
+    const parsed = yield* decodeOverlayResult(lastLine).pipe(
+      Effect.mapError((cause) => new SandboxGuestError({ operation: "unpack-overlay", cause })),
+    );
+    return {
+      branch: parsed.branch,
+      commit: parsed.commit.length > 0 ? parsed.commit : "HEAD",
+    } satisfies SandboxResolvedBase;
   });
 
   const refreshCredentials: SandboxGuest["Service"]["refreshCredentials"] = Effect.fn(
@@ -587,22 +694,64 @@ const make = Effect.gen(function* () {
   const prepareProject: SandboxGuest["Service"]["prepareProject"] = (target, project) =>
     guestRpc("clone", CLONE_TIMEOUT, target, (rpc) => prepareProjectOver(rpc, project));
 
+  const registerLocalProject: SandboxGuest["Service"]["registerLocalProject"] = (target, project) =>
+    guestRpc("clone", GUEST_CALL_TIMEOUT, target, (rpc) =>
+      rpc["projects.mutate"]({
+        type: "project.create",
+        commandId: project.commandId,
+        projectId: project.projectId,
+        title: project.title,
+        workspaceRoot: project.path,
+      }),
+    ).pipe(Effect.asVoid);
+
   const launchSeedThread: SandboxGuest["Service"]["launchSeedThread"] = (
     target,
-    { seed, baseRef },
+    { seed, baseRef, workspaceStrategy },
   ) =>
     guestRpc("launch-thread", GUEST_CALL_TIMEOUT, target, (rpc) =>
-      rpc["orchestration.launchThread"]({
-        commandId: seed.commandId,
-        threadId: seed.threadId,
-        projectId: seed.projectId,
-        title: seed.title,
-        modelSelection: { instanceId: defaultInstanceIdForDriver(seed.driver), model: seed.model },
-        runtimeMode: seed.runtimeMode,
-        interactionMode: seed.interactionMode,
-        // The preparation fetched the base once; starting from it again could move the base.
-        workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
-        initialMessage: { messageId: seed.messageId, text: seed.message, attachments: [] },
+      Effect.gen(function* () {
+        const uploads: Array<UploadChatAttachment> = [];
+        const existingAttachments: Array<ChatAttachment> = [];
+        for (const attachment of seed.attachments ?? []) {
+          if ("dataUrl" in attachment) {
+            uploads.push(attachment);
+          } else {
+            existingAttachments.push(attachment);
+          }
+        }
+        const persisted =
+          uploads.length === 0
+            ? []
+            : (yield* rpc["assets.persistChatAttachments"]({
+                threadId: seed.threadId,
+                messageId: seed.messageId,
+                attachments: uploads,
+              })).attachments;
+        return yield* rpc["orchestration.launchThread"]({
+          commandId: seed.commandId,
+          threadId: seed.threadId,
+          projectId: seed.projectId,
+          title: seed.title,
+          modelSelection: {
+            instanceId: defaultInstanceIdForDriver(seed.driver),
+            model: seed.model,
+          },
+          runtimeMode: seed.runtimeMode,
+          interactionMode: seed.interactionMode,
+          // The preparation fetched the base once; starting from it again could move the base.
+          workspaceStrategy: workspaceStrategy ?? {
+            type: "worktree",
+            baseRef,
+            startFromOrigin: false,
+          },
+          initialMessage: {
+            messageId: seed.messageId,
+            text: seed.message,
+            attachments: [...existingAttachments, ...persisted],
+            ...(seed.context === undefined ? {} : { context: seed.context }),
+          },
+        });
       }),
     );
 
@@ -634,10 +783,17 @@ const make = Effect.gen(function* () {
       Effect.flatMap((client) =>
         client.auth.pairingCredential({
           headers: bearer(target),
-          payload: {
-            label: grant.label,
-            ...(grant.scopes === undefined ? {} : { scopes: grant.scopes }),
-          },
+          payload:
+            grant.purpose === "peer-link"
+              ? {
+                  label: grant.label,
+                  access: grant.access,
+                  purpose: "peer-link" as const,
+                }
+              : {
+                  label: grant.label,
+                  ...(grant.scopes === undefined ? {} : { scopes: grant.scopes }),
+                },
         }),
       ),
       Effect.timeout(GUEST_CALL_TIMEOUT),
@@ -647,12 +803,14 @@ const make = Effect.gen(function* () {
 
   return SandboxGuest.of({
     writeBootInputs,
+    unpackOverlay,
     refreshCredentials,
     restartServer,
     deliverGitHubToken,
     readEnvironmentId,
     mintAdminSession,
     prepareProject,
+    registerLocalProject,
     launchSeedThread,
     readActivity,
     issuePairingCredential,

@@ -4,6 +4,7 @@ import type {
   ProviderDriverKind,
   ProviderInteractionMode,
   RuntimeMode,
+  SandboxLaunchInput,
   SandboxSource,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -11,27 +12,25 @@ import { useGT } from "gt-react";
 
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { type SandboxDraftTarget, useSandboxDraftStore } from "../sandboxDraftStore";
-import { sandboxes } from "../state/sandboxes";
+import { markPendingSandboxLaunch, sandboxes } from "../state/sandboxes";
 import { useAtomCommand } from "../state/use-atom-command";
 
 export interface SandboxLaunchRequest {
   readonly draftId: DraftId;
   readonly target: SandboxDraftTarget;
   readonly message: string;
-  /** Attachments and context the composer holds besides the message. */
-  readonly extrasCount: number;
   readonly source: SandboxSource;
   readonly driver: ProviderDriverKind;
   readonly model: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly localCheckout?: SandboxLaunchInput["localCheckout"];
+  readonly attachments?: SandboxLaunchInput["attachments"];
+  readonly context?: SandboxLaunchInput["context"];
 }
 
 /**
- * Launches a draft's new sandbox and opens it in place of the draft. The
- * sandbox clones the source's repository from its base and starts its own
- * thread from the message, so nothing local travels. Resolves with the
- * reason it did not launch, or null.
+ * Launches a draft's new sandbox and opens its thread immediately at `/_env/<environmentId>`.
  */
 export function useSandboxLaunch() {
   const gt = useGT();
@@ -39,11 +38,6 @@ export function useSandboxLaunch() {
   const launch = useAtomCommand(sandboxes.launch, { reportFailure: false });
 
   return async (request: SandboxLaunchRequest): Promise<string | null> => {
-    if (request.extrasCount > 0) {
-      return gt(
-        "A sandbox starts from your message alone. Remove attachments and context to start one.",
-      );
-    }
     const { target } = request;
     const result = await launch({
       environmentId: target.ownerEnvironmentId,
@@ -57,12 +51,19 @@ export function useSandboxLaunch() {
         model: request.model,
         runtimeMode: request.runtimeMode,
         interactionMode: request.interactionMode,
+        ...(request.localCheckout === undefined ? {} : { localCheckout: request.localCheckout }),
+        ...(request.attachments === undefined ? {} : { attachments: request.attachments }),
+        ...(request.context === undefined ? {} : { context: request.context }),
       },
     });
     if (result._tag !== "Success") return sandboxCommandFailure(result);
+    if (result.value.environmentId === null) {
+      return gt("Sandbox environment was not assigned.");
+    }
+    markPendingSandboxLaunch(result.value.environmentId);
     await navigate({
-      to: "/sandbox/$environmentId/$sandboxId",
-      params: { environmentId: target.ownerEnvironmentId, sandboxId: target.sandboxId },
+      to: "/$environmentId/$threadId",
+      params: { environmentId: result.value.environmentId, threadId: result.value.threadId },
       replace: true,
     });
     useComposerDraftStore.getState().clearDraftThread(request.draftId);

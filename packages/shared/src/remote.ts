@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 
+import { normalizeEnvironmentBasePath } from "./environmentPath.ts";
 import { parseUrl } from "./url.ts";
 
 const PAIRING_TOKEN_PARAM = "token";
@@ -101,9 +102,7 @@ const normalizeRemoteBaseUrl = (
       protocol: url.protocol,
     });
   }
-  url.pathname = "/";
-  url.search = "";
-  url.hash = "";
+  normalizeEnvironmentBasePath(url, true);
   return url;
 };
 
@@ -114,10 +113,7 @@ const toHttpBaseUrl = (url: URL): string => {
   } else if (next.protocol === "wss:") {
     next.protocol = "https:";
   }
-  next.pathname = "/";
-  next.search = "";
-  next.hash = "";
-  return next.toString();
+  return normalizeEnvironmentBasePath(next, true);
 };
 
 const toWsBaseUrl = (url: URL): string => {
@@ -127,10 +123,7 @@ const toWsBaseUrl = (url: URL): string => {
   } else if (next.protocol === "https:") {
     next.protocol = "wss:";
   }
-  next.pathname = "/";
-  next.search = "";
-  next.hash = "";
-  return next.toString();
+  return normalizeEnvironmentBasePath(next, true);
 };
 
 export interface ResolvedRemotePairingTarget {

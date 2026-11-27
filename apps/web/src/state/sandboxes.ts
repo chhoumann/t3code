@@ -10,6 +10,17 @@ import { environmentShell } from "./shell";
 
 export const sandboxes = createSandboxAtoms(connectionAtomRuntime);
 
+export const pendingSandboxEnvironmentsAtom = Atom.make<ReadonlyArray<EnvironmentId>>([]).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("sandboxes:pending-launches"),
+);
+
+export function markPendingSandboxLaunch(environmentId: EnvironmentId): void {
+  const current = appAtomRegistry.get(pendingSandboxEnvironmentsAtom);
+  if (current.includes(environmentId)) return;
+  appAtomRegistry.set(pendingSandboxEnvironmentsAtom, [...current, environmentId]);
+}
+
 /** This device's shell of an environment; null when it never registered it. */
 const shellStatusAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get): EnvironmentShellStatus | null =>

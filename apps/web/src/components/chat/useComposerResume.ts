@@ -1,6 +1,7 @@
 import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
+import type { WorkDelivery } from "@t3tools/client-runtime/state/sandboxes";
 import {
   type EnvironmentId,
   type ProviderInteractionMode,
@@ -22,7 +23,6 @@ import { useWorkCommand } from "../../state/use-orchestration-command";
 import type { makeThreadErrorSetter } from "../ChatView.logic";
 import { draftSendState } from "./chatViewSend";
 import type { useTimelineFollow } from "./useTimelineFollow";
-import type { SandboxWorkGate } from "./useHeldSandboxWork";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 
 interface ComposerResumeInput {
@@ -36,7 +36,7 @@ interface ComposerResumeInput {
   readonly isSendBusy: boolean;
   readonly isRevertingCheckpoint: boolean;
   readonly threadDetailLoading: boolean;
-  readonly sandboxWork: SandboxWorkGate;
+  readonly delivery: WorkDelivery;
   readonly runtimeMode: RuntimeMode;
   readonly localCheckoutBranchMismatch: { readonly currentBranch: string } | null;
   readonly composerRef: ComposerHandleRef;
@@ -68,7 +68,7 @@ export function useComposerResume(input: ComposerResumeInput) {
     isSendBusy,
     isRevertingCheckpoint,
     threadDetailLoading,
-    sandboxWork,
+    delivery,
     runtimeMode,
     localCheckoutBranchMismatch,
     composerRef,
@@ -96,16 +96,11 @@ export function useComposerResume(input: ComposerResumeInput) {
     isResuming ||
     isRevertingCheckpoint ||
     threadDetailLoading ||
-    sandboxWork.delivery === "offline" ||
-    sendInFlightRef.current ||
-    sandboxWork.isHolding();
+    delivery === "offline" ||
+    sendInFlightRef.current;
 
   const onResume = async () => {
     if (!activeThread || resumeBlocked()) return;
-    if (sandboxWork.delivery === "after-wake") {
-      sandboxWork.hold({ kind: "resume" });
-      return;
-    }
     const threadId = activeThread.id;
     sendInFlightRef.current = true;
     setResumingThreadKeys((current) => new Set(current).add(routeThreadKey));

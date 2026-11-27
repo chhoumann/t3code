@@ -24,6 +24,7 @@ import {
   type SandboxRegistrationAction,
   makeReconciler,
   planSandboxRegistrations,
+  resolveSandboxGrantHost,
   sandboxIndex,
 } from "./sandboxRegistrations.ts";
 
@@ -35,6 +36,7 @@ const view = (
   status: SandboxStatus,
   environmentId: EnvironmentId | null = SANDBOX_ENV,
   desired: SandboxView["desired"] = "running",
+  httpBaseUrl: string | null = environmentId === null ? null : "https://sbx-1.boat.test",
 ) =>
   ({
     id: SANDBOX_ID,
@@ -52,7 +54,7 @@ const view = (
     settledRevision: 1,
     status,
     environmentId,
-    httpBaseUrl: environmentId === null ? null : "https://sbx-1.boat.test",
+    httpBaseUrl,
     createdAt: "2026-10-09T12:00:00.000Z",
   }) as SandboxView;
 
@@ -203,6 +205,47 @@ describe("planSandboxRegistrations", () => {
       registered: userSaved(true),
       actions: [],
     },
+    {
+      name: "pairs a /_env/ sandbox immediately while creating",
+      views: [view({ _tag: "creating" }, SANDBOX_ENV, "running", `/_env/${SANDBOX_ENV}`)],
+      actions: [{ _tag: "Pair", sandboxId: SANDBOX_ID, environmentId: SANDBOX_ENV }],
+    },
+    {
+      name: "pairs a /_env/ sandbox immediately while asleep",
+      views: [
+        view(
+          { _tag: "stopped", reason: "external" },
+          SANDBOX_ENV,
+          "running",
+          `/_env/${SANDBOX_ENV}`,
+        ),
+      ],
+      actions: [{ _tag: "Pair", sandboxId: SANDBOX_ID, environmentId: SANDBOX_ENV }],
+    },
+    {
+      name: "keeps a /_env/ sandbox enabled and non-dormant while launching or asleep",
+      views: [
+        view({ _tag: "stopped", reason: "idle" }, SANDBOX_ENV, "running", `/_env/${SANDBOX_ENV}`),
+      ],
+      registered: contributed(false, true),
+      actions: [
+        { _tag: "SetDormant", environmentId: SANDBOX_ENV, dormant: false },
+        { _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: true },
+      ],
+    },
+    {
+      name: "switches a put-away /_env/ sandbox off",
+      views: [
+        view(
+          { _tag: "stopped", reason: "requested" },
+          SANDBOX_ENV,
+          "stopped",
+          `/_env/${SANDBOX_ENV}`,
+        ),
+      ],
+      registered: contributed(true, false),
+      actions: [{ _tag: "SetEnabled", environmentId: SANDBOX_ENV, enabled: false }],
+    },
   ];
 
   it.each(rows)("$name", ({ views, registered, actions }) => {
@@ -212,6 +255,15 @@ describe("planSandboxRegistrations", () => {
         registered: new Map(registered === undefined ? [] : [[SANDBOX_ENV, registered]]),
       }),
     ).toEqual(actions);
+  });
+
+  it("resolves relative /_env/ grants against the owner HTTP base URL", () => {
+    expect(resolveSandboxGrantHost("https://hub.example:3773/api", `/_env/${SANDBOX_ENV}`)).toBe(
+      `https://hub.example:3773/_env/${SANDBOX_ENV}`,
+    );
+    expect(resolveSandboxGrantHost("https://hub.example:3773", "https://sbx-1.boat.test")).toBe(
+      "https://sbx-1.boat.test",
+    );
   });
 });
 

@@ -8,7 +8,14 @@ import type {
 } from "@t3tools/contracts";
 import { sandboxRepositoryIdentity, sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import { T, useGT, Var } from "gt-react";
-import { ChevronDownIcon, FolderGit2Icon, GitBranchIcon, type LucideIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  FileDiffIcon,
+  FolderGit2Icon,
+  GitBranchIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { type Ref, useDeferredValue, useImperativeHandle, useState } from "react";
 
 import type { DraftId } from "../composerDraftStore";
@@ -67,12 +74,15 @@ export function BranchToolbarSandboxSource({
   draftId: DraftId;
   environmentId: EnvironmentId;
   project: {
+    readonly environmentId?: EnvironmentId;
+    readonly title?: string;
     readonly workspaceRoot: string;
     readonly repositoryIdentity?: RepositoryIdentity | null | undefined;
   };
   disabled: boolean;
   displayMode: DisplayMode;
 }) {
+  const gt = useGT();
   const target = useSandboxDraftTarget(draftId);
   const [openPicker, setOpenPicker] = useState<"repository" | "base" | null>(null);
   useImperativeHandle(
@@ -88,6 +98,11 @@ export function BranchToolbarSandboxSource({
   const projectRemoteUrl = sandboxSourceForProject(identity)?.remoteUrl ?? null;
   const followsProject = target.remoteUrl === undefined && projectRemoteUrl !== null;
   const source = resolveSandboxDraftSource(target, identity);
+  const canPackLocalCheckout =
+    project.environmentId === undefined || project.environmentId === target.ownerEnvironmentId;
+  const canUseLocalFallback =
+    canPackLocalCheckout && projectRemoteUrl === null && target.remoteUrl === undefined;
+  const includeUncommitted = target.includeUncommitted === true;
   const setSource = (patch: Parameters<SandboxDraftStoreSetSource>[1]) =>
     useSandboxDraftStore.getState().setSource(draftId, patch);
   const pickerOpenChange = (picker: "repository" | "base") => (open: boolean) =>
@@ -104,6 +119,7 @@ export function BranchToolbarSandboxSource({
         <SandboxRepositoryPicker
           remoteUrl={source?.remoteUrl ?? null}
           projectRemoteUrl={projectRemoteUrl}
+          fallbackLabel={canUseLocalFallback ? gt("Local checkout") : null}
           open={openPicker === "repository" && !disabled}
           onOpenChange={pickerOpenChange("repository")}
           onChange={(remoteUrl) => setSource({ remoteUrl })}
@@ -124,6 +140,36 @@ export function BranchToolbarSandboxSource({
         disabled={disabled}
         displayMode={displayMode}
       />
+      {canPackLocalCheckout ? (
+        displayMode === "panel" ? (
+          <ThreadDetailsControl
+            part="row"
+            disabled={disabled}
+            aria-pressed={includeUncommitted}
+            onClick={() => setSource({ includeUncommitted: !includeUncommitted })}
+          >
+            <FileDiffIcon
+              className={cn("size-3 shrink-0 opacity-70", THREAD_DETAILS_PANEL_ICON_CLASS)}
+            />
+            <span className="min-w-0 flex-1 truncate text-left">{gt("Include uncommitted")}</span>
+            {includeUncommitted ? <CheckIcon className="size-3.5 shrink-0 text-primary" /> : null}
+          </ThreadDetailsControl>
+        ) : (
+          <ComposerControl
+            size="xs"
+            disabled={disabled}
+            aria-pressed={includeUncommitted}
+            className={cn("min-w-0 shrink-0", includeUncommitted && "text-foreground")}
+            onClick={() => setSource({ includeUncommitted: !includeUncommitted })}
+          >
+            <FileDiffIcon className="size-3 shrink-0 opacity-70" />
+            <ComposerContextLabel displayMode={displayMode}>
+              {gt("Include uncommitted")}
+            </ComposerContextLabel>
+            {includeUncommitted ? <CheckIcon className="size-3 shrink-0 text-primary" /> : null}
+          </ComposerControl>
+        )
+      ) : null}
     </div>
   );
 }
@@ -192,6 +238,7 @@ function repositoryLabel(remoteUrl: SandboxRemoteUrl): string {
 function SandboxRepositoryPicker({
   remoteUrl,
   projectRemoteUrl,
+  fallbackLabel,
   open,
   onOpenChange,
   onChange,
@@ -201,6 +248,7 @@ function SandboxRepositoryPicker({
   remoteUrl: SandboxRemoteUrl | null;
   /** The draft's project's repository, offered as a way back to following it. */
   projectRemoteUrl: SandboxRemoteUrl | null;
+  fallbackLabel: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (remoteUrl: SandboxRemoteUrl | null) => void;
@@ -235,7 +283,11 @@ function SandboxRepositoryPicker({
     >
       <SandboxSourceTrigger
         icon={FolderGit2Icon}
-        label={remoteUrl === null ? gt("Choose repository") : repositoryLabel(remoteUrl)}
+        label={
+          remoteUrl === null
+            ? (fallbackLabel ?? gt("Choose repository"))
+            : repositoryLabel(remoteUrl)
+        }
         disabled={disabled}
         displayMode={displayMode}
       />

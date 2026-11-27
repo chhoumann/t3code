@@ -402,4 +402,49 @@ describe("SandboxAccounts", () => {
       assert.isOk((yield* accounts.get(ID)).apiKey);
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect(
+    "allows docker and command accounts without an API key and preserves exposed ports",
+    () => {
+      const { world, layer } = makeWorld();
+      return Effect.gen(function* () {
+        const accounts = yield* SandboxAccounts.SandboxAccounts;
+        const dockerSaved = yield* accounts.save({
+          id: SandboxAccountId.make("local-docker"),
+          label: "Local Docker",
+          provider: "docker",
+          providerEnvironment: null,
+          size: "default",
+          stopAfterHours: 2,
+          machineSetupScript: null,
+          dockerImage: "node:22-bookworm",
+          exposedHostPorts: [8317],
+          env: [],
+        });
+        assert.strictEqual(dockerSaved.provider, "docker");
+        assert.strictEqual(dockerSaved.dockerImage, "node:22-bookworm");
+        assert.deepStrictEqual(dockerSaved.exposedHostPorts, [8317]);
+
+        const dockerAccount = yield* accounts.get(SandboxAccountId.make("local-docker"));
+        assert.strictEqual(Redacted.value(dockerAccount.apiKey), "");
+        assert.strictEqual(dockerAccount.dockerImage, "node:22-bookworm");
+        assert.deepStrictEqual(dockerAccount.exposedHostPorts, [8317]);
+        assert.strictEqual(world.secrets.size, 0);
+
+        const cmdSaved = yield* accounts.save({
+          id: SandboxAccountId.make("custom-cmd"),
+          label: "Custom Driver",
+          provider: "command",
+          providerEnvironment: null,
+          size: "small",
+          stopAfterHours: null,
+          machineSetupScript: null,
+          commandProgram: "/usr/local/bin/my-sandbox",
+          env: [],
+        });
+        assert.strictEqual(cmdSaved.provider, "command");
+        assert.strictEqual(cmdSaved.commandProgram, "/usr/local/bin/my-sandbox");
+      }).pipe(Effect.provide(layer));
+    },
+  );
 });

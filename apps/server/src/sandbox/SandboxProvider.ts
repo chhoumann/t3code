@@ -2,7 +2,13 @@
  * Provider-neutral seam for sandbox machines; each call takes its account config
  * so multiple accounts share one provider layer.
  */
-import type { SandboxMachineSize } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  SandboxAccountId,
+  SandboxId,
+  SandboxMachineSize,
+  SandboxProviderKind,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Redacted from "effect/Redacted";
@@ -28,12 +34,21 @@ export interface ProviderMachine {
 export const MAX_DEADLINE_SECONDS = 30 * 24 * 60 * 60;
 
 export interface SandboxProviderAccount {
+  readonly id?: SandboxAccountId;
+  readonly provider?: SandboxProviderKind;
   readonly apiKey: Redacted.Redacted<string>;
+  readonly dockerImage?: string | null;
+  readonly commandProgram?: string | null;
+  readonly exposedHostPorts?: ReadonlyArray<number>;
 }
 
 export interface CreateMachineInput {
   /** Stable across retries of one logical create; the provider dedupes on it. */
   readonly idempotencyKey: string;
+  readonly sandboxId?: SandboxId;
+  readonly environmentId?: EnvironmentId;
+  readonly bootstrapUrl?: string;
+  readonly nodeSecret?: string;
   readonly size: SandboxMachineSize;
   /** Seconds until the provider stops the machine on its own; null never stops it. */
   readonly ttlSeconds: number | null;

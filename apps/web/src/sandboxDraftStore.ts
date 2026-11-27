@@ -26,6 +26,8 @@ const SandboxDraftTarget = Schema.Struct({
   remoteUrl: Schema.optionalKey(SandboxRemoteUrl),
   /** Omitted starts from the remote's default branch. */
   base: Schema.optionalKey(SandboxBase),
+  /** Whether to bundle uncommitted local workspace edits on launch. */
+  includeUncommitted: Schema.optionalKey(Schema.Boolean),
 });
 export type SandboxDraftTarget = typeof SandboxDraftTarget.Type;
 
@@ -43,7 +45,11 @@ interface SandboxDraftStoreState {
   /** A `remoteUrl` of null lets the draft follow its project's repository again. */
   readonly setSource: (
     draftId: DraftId,
-    source: { readonly remoteUrl?: SandboxRemoteUrl | null; readonly base?: SandboxBase },
+    source: {
+      readonly remoteUrl?: SandboxRemoteUrl | null;
+      readonly base?: SandboxBase;
+      readonly includeUncommitted?: boolean;
+    },
   ) => void;
   readonly clear: (draftId: DraftId) => void;
 }
@@ -71,7 +77,7 @@ export const useSandboxDraftStore = create<SandboxDraftStoreState>()(
             },
           };
         }),
-      setSource: (draftId, { remoteUrl, base }) =>
+      setSource: (draftId, { remoteUrl, base, includeUncommitted }) =>
         set((state) => {
           const current = state.targets[draftId];
           if (current === undefined) return state;
@@ -85,6 +91,7 @@ export const useSandboxDraftStore = create<SandboxDraftStoreState>()(
                 ...rest,
                 ...(nextRemoteUrl === undefined ? {} : { remoteUrl: nextRemoteUrl }),
                 ...(base === undefined ? {} : { base }),
+                ...(includeUncommitted === undefined ? {} : { includeUncommitted }),
               },
             },
           };

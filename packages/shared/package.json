@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./environmentPath": {
+      "types": "./src/environmentPath.ts",
+      "import": "./src/environmentPath.ts"
+    },
+    "./fleetMux": {
+      "types": "./src/fleetMux.ts",
+      "import": "./src/fleetMux.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"

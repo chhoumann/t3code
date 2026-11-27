@@ -10,6 +10,7 @@ import {
   type EnvironmentId,
   type SandboxAccountConfig,
   type SandboxMachineSize,
+  type SandboxProviderKind,
   type SandboxView,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -48,6 +49,8 @@ import { ProjectSandboxSettings } from "./ProjectSandboxSettings";
 import { SandboxGitHubSection } from "./SandboxGitHubSection";
 import { useSearchableSetting } from "./settingsSearch";
 import {
+  SANDBOX_PROVIDER_LABELS,
+  SANDBOX_PROVIDERS,
   SANDBOX_SIZE_LABELS,
   sandboxAccountDraft,
   sandboxAccountSaveInput,
@@ -56,7 +59,6 @@ import {
 } from "./sandboxesSettings.logic";
 
 const SANDBOX_SIZES = Object.keys(SANDBOX_SIZE_LABELS) as SandboxMachineSize[];
-const BOAT_PROVIDER_LABEL = "Boat";
 
 interface AccountEditor {
   readonly environmentId: EnvironmentId;
@@ -151,7 +153,7 @@ export function SandboxesSettings() {
 
 function accountSummary(account: SandboxAccountConfig, gt: ReturnType<typeof useGT>): string {
   return [
-    BOAT_PROVIDER_LABEL,
+    SANDBOX_PROVIDER_LABELS[account.provider],
     SANDBOX_SIZE_LABELS[account.size],
     account.stopAfterHours === null
       ? gt("Never stops")
@@ -283,16 +285,13 @@ function SandboxRow(props: {
   const { setDesired, confirmAndDelete } = useSandboxActions();
   const ref = { ownerEnvironmentId: props.ownerEnvironmentId, view: sandbox };
   const status = sandbox.status._tag;
-  const open = () =>
-    status === "ready" && sandbox.environmentId !== null
-      ? navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId: sandbox.environmentId, threadId: sandbox.threadId },
-        })
-      : navigate({
-          to: "/sandbox/$environmentId/$sandboxId",
-          params: { environmentId: props.ownerEnvironmentId, sandboxId: sandbox.id },
-        });
+  const open = () => {
+    if (sandbox.environmentId === null) return;
+    return navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: sandbox.environmentId, threadId: sandbox.threadId },
+    });
+  };
   return (
     <SettingsRow
       title={sandbox.title}
@@ -315,7 +314,7 @@ function SandboxRow(props: {
             <EllipsisIcon className="size-3.5" />
           </MenuTrigger>
           <MenuPopup align="end">
-            <MenuItem onClick={() => void open()}>
+            <MenuItem disabled={sandbox.environmentId === null} onClick={() => void open()}>
               <T>Open</T>
             </MenuItem>
             {status === "ready" ? (
@@ -425,24 +424,75 @@ function SandboxAccountDialog(props: {
                   />
                 </Field>
                 <Field label={gt("Provider")} htmlFor="sandbox-account-provider">
-                  <Select value="boat" disabled>
+                  <Select
+                    value={draft.provider}
+                    onValueChange={(provider) =>
+                      update({ provider: provider as SandboxProviderKind })
+                    }
+                  >
                     <SelectTrigger id="sandbox-account-provider">
-                      <SelectValue>{BOAT_PROVIDER_LABEL}</SelectValue>
+                      <SelectValue>{SANDBOX_PROVIDER_LABELS[draft.provider]}</SelectValue>
                     </SelectTrigger>
                     <SelectPopup>
-                      <SelectItem value="boat">{BOAT_PROVIDER_LABEL}</SelectItem>
+                      {SANDBOX_PROVIDERS.map((provider) => (
+                        <SelectItem key={provider} value={provider}>
+                          {SANDBOX_PROVIDER_LABELS[provider]}
+                        </SelectItem>
+                      ))}
                     </SelectPopup>
                   </Select>
                 </Field>
               </div>
-              <Field label={gt("API key")} htmlFor="sandbox-account-key">
+              {draft.provider === "docker" ? (
+                <Field label={gt("Docker image")} htmlFor="sandbox-account-docker-image">
+                  <Input
+                    id="sandbox-account-docker-image"
+                    placeholder="node:22-bookworm"
+                    value={draft.dockerImage}
+                    onChange={(event) => update({ dockerImage: event.target.value })}
+                  />
+                </Field>
+              ) : null}
+              {draft.provider === "command" ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label={gt("Command executable")} htmlFor="sandbox-account-command-program">
+                    <Input
+                      id="sandbox-account-command-program"
+                      placeholder={gt("Attach mode when blank")}
+                      value={draft.commandProgram}
+                      onChange={(event) => update({ commandProgram: event.target.value })}
+                    />
+                  </Field>
+                  <Field label={gt("Provider secret (optional)")} htmlFor="sandbox-account-key">
+                    <Input
+                      id="sandbox-account-key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={saved ? gt("Set") : gt("Optional")}
+                      value={draft.apiKey}
+                      onChange={(event) => update({ apiKey: event.target.value })}
+                    />
+                  </Field>
+                </div>
+              ) : null}
+              {draft.provider === "boat" ? (
+                <Field label={gt("API key")} htmlFor="sandbox-account-key">
+                  <Input
+                    id="sandbox-account-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={saved ? gt("Set") : undefined}
+                    value={draft.apiKey}
+                    onChange={(event) => update({ apiKey: event.target.value })}
+                  />
+                </Field>
+              ) : null}
+              <Field label={gt("Exposed host ports")} htmlFor="sandbox-account-exposed-ports">
                 <Input
-                  id="sandbox-account-key"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={saved ? gt("Set") : undefined}
-                  value={draft.apiKey}
-                  onChange={(event) => update({ apiKey: event.target.value })}
+                  id="sandbox-account-exposed-ports"
+                  placeholder="8317"
+                  value={draft.exposedHostPorts}
+                  onChange={(event) => update({ exposedHostPorts: event.target.value })}
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">

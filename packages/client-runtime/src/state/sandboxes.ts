@@ -41,15 +41,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "./runtime.ts";
-import {
-  SANDBOX_RECONNECT_TIMEOUT,
-  createSandboxEnvironmentAtoms,
-  wakesForWork,
-} from "./sandboxCommands.ts";
+import { createSandboxEnvironmentAtoms, wakesForWork } from "./sandboxCommands.ts";
 import { createEnvironmentSessionAtoms } from "./session.ts";
 import type { EnvironmentShellStatus } from "./shell.ts";
 
-export { SANDBOX_RECONNECT_TIMEOUT, sandboxPresence, wakesForWork };
+export { sandboxPresence, wakesForWork };
 export type { SandboxIndexEntry, SandboxPresence };
 
 type SandboxOwners = ReadonlyMap<EnvironmentId, ReadonlyArray<SandboxView>>;
@@ -157,7 +153,11 @@ export type WorkDelivery = "now" | "after-wake" | "offline";
 
 export function workDelivery(input: {
   /** The environment's sandbox, as its owner last described it; undefined for any other environment. */
-  readonly sandbox: Pick<SandboxView, "desired" | "status"> | undefined;
+  readonly sandbox:
+    | (Pick<SandboxView, "desired" | "status"> & {
+        readonly httpBaseUrl?: string | null | undefined;
+      })
+    | undefined;
   readonly connected: boolean;
 }): WorkDelivery {
   if (input.sandbox !== undefined && wakesForWork(input.sandbox)) return "after-wake";
@@ -193,6 +193,15 @@ export function sandboxWakeStatus(
   resolve: MFunctionType = mFallback,
 ): SandboxWakeStatus | null {
   switch (sandboxPresence(view)) {
+    case "launching":
+      switch (view.status._tag) {
+        case "creating":
+          return { kind: "waking", label: resolve(msg("Starting machine")) };
+        case "booting":
+          return { kind: "waking", label: resolve(msg("Installing T3")) };
+        default:
+          return { kind: "waking", label: resolve(msg("Starting thread")) };
+      }
     case "asleep":
       return { kind: "asleep", label: resolve(msg("Asleep")) };
     case "waking":
@@ -217,7 +226,7 @@ export function sandboxWakeStatus(
 }
 
 /** The stages a new sandbox shows before its thread opens, in order. */
-export const SANDBOX_LAUNCH_STAGES = ["creating", "booting", "launching"] as const;
+const SANDBOX_LAUNCH_STAGES = ["creating", "booting", "launching"] as const;
 
 /** Where a new sandbox is in `SANDBOX_LAUNCH_STAGES`; null once it is past them or off that path. */
 export function sandboxLaunchStageIndex(status: SandboxStatus): number | null {

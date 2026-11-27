@@ -99,6 +99,27 @@ describe("sandboxWakeStatus", () => {
     ["running while this device is offline", "running", ready, "offline", null],
     ["put away", "stopped", { _tag: "stopped", reason: "requested" }, "available", null],
     [
+      "creating",
+      "running",
+      { _tag: "creating" },
+      "available",
+      { kind: "waking", label: "Starting machine" },
+    ],
+    [
+      "booting",
+      "running",
+      { _tag: "booting" },
+      "available",
+      { kind: "waking", label: "Installing T3" },
+    ],
+    [
+      "launching",
+      "running",
+      { _tag: "launching" },
+      "available",
+      { kind: "waking", label: "Starting thread" },
+    ],
+    [
       "failed to resume",
       "running",
       {
@@ -175,6 +196,26 @@ describe("workDelivery", () => {
     [
       "a sandbox being deleted",
       { desired: "destroyed", status: { _tag: "destroying" } },
+      false,
+      "offline",
+    ],
+    [
+      "an asleep /_env/ sandbox while connected to Hub",
+      {
+        desired: "running",
+        status: { _tag: "stopped", reason: "idle" },
+        httpBaseUrl: "/_env/env-1",
+      },
+      true,
+      "now",
+    ],
+    [
+      "an asleep /_env/ sandbox while disconnected from Hub",
+      {
+        desired: "running",
+        status: { _tag: "stopped", reason: "idle" },
+        httpBaseUrl: "/_env/env-1",
+      },
       false,
       "offline",
     ],

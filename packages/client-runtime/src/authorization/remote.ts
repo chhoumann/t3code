@@ -8,6 +8,7 @@ import {
   type AuthWebSocketTicketResult,
   type AuthWebSocketTicketUse,
 } from "@t3tools/contracts";
+import { toEnvironmentWsUrl } from "@t3tools/shared/environmentPath";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import { hashTelemetryId } from "@t3tools/shared/telemetryId";
 import * as Effect from "effect/Effect";
@@ -269,11 +270,7 @@ export const issueRemoteDpopWebSocketTicket = Effect.fn(
 });
 
 function rpcSocketUrl(wsBaseUrl: string): URL {
-  const url = new URL(wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
-  }
-  return url;
+  return toEnvironmentWsUrl(wsBaseUrl, "/ws");
 }
 
 export const resolveRemoteWebSocketConnectionUrl = Effect.fn(

@@ -26,6 +26,7 @@ import {
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
+  resolveLocalSandboxFallbackSource,
   resolveBranchToolbarPrBranch,
   resolveConfirmedSelectedRef,
   resolveDefaultWorktreeBaseBranch,
@@ -686,5 +687,22 @@ describe("resolveConfirmedSelectedRef", () => {
     expect(resolveConfirmedSelectedRef(listed, refs === null ? null : { refs }).worktreePath).toBe(
       expected,
     );
+  });
+});
+
+describe("resolveLocalSandboxFallbackSource", () => {
+  it("slugifies folder paths to a local synthetic repository URL with default base", () => {
+    expect(resolveLocalSandboxFallbackSource("/Users/alice/My Cool Project/", {})).toEqual({
+      remoteUrl: SandboxRemoteUrl.make("https://local.t3.invalid/local/my-cool-project"),
+      base: { _tag: "default" },
+    });
+  });
+
+  it("preserves explicit base branch and falls back to project when no slug chars remain", () => {
+    const release = { _tag: "branch" as const, name: SandboxBranchName.make("release") };
+    expect(resolveLocalSandboxFallbackSource("///---///", { base: release })).toEqual({
+      remoteUrl: SandboxRemoteUrl.make("https://local.t3.invalid/local/project"),
+      base: release,
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { extractVirtualEnvironmentBasePath } from "@t3tools/shared/environmentPath";
 import {
   isLocalLoopbackHost,
   isPrivateNetworkHost,
@@ -267,6 +268,10 @@ export function mergeLearnedRoutes(input: {
     return null;
   }
   const activeProfile = Option.getOrNull(input.activeRoute.profile);
+  const activeBasePath =
+    activeProfile?._tag === "BearerConnectionProfile"
+      ? extractVirtualEnvironmentBasePath(new URL(activeProfile.httpBaseUrl).pathname)
+      : "";
   const authorization =
     active._tag === "RelayConnectionTarget" ||
     (activeProfile?._tag === "BearerConnectionProfile" &&
@@ -279,6 +284,8 @@ export function mergeLearnedRoutes(input: {
       : undefined;
   const reported = new Map<string, URL>();
   const tailscaleOrigins = new Set<string>();
+  const normalized = (url: string) => url.replace(/\/+$/, "");
+  const routeKey = (url: URL) => `${url.origin}${activeBasePath}`;
   for (const endpoint of input.reported) {
     let url: URL;
     try {
@@ -290,10 +297,10 @@ export function mergeLearnedRoutes(input: {
     if (url.protocol === "http:" && !input.allowInsecure) continue;
     // A loopback address names whichever device opens it, never the server.
     if (isLocalLoopbackHost(url.hostname)) continue;
-    reported.set(url.origin, url);
-    if (endpoint.kind === "tailnet") tailscaleOrigins.add(url.origin);
+    const key = routeKey(url);
+    reported.set(key, url);
+    if (endpoint.kind === "tailnet") tailscaleOrigins.add(key);
   }
-  const normalized = (url: string) => url.replace(/\/+$/, "");
   const known = new Set(
     saved.flatMap((route) => {
       const url = routeHttpBaseUrl(route);
@@ -316,21 +323,18 @@ export function mergeLearnedRoutes(input: {
   });
   let next: ReadonlyArray<ConnectionRoute> = kept;
   for (const url of reported.values()) {
-    if (known.has(url.origin)) continue;
+    const key = routeKey(url);
+    if (known.has(key)) continue;
     if (
       url.protocol === "http:" &&
       sharedCredential !== undefined &&
-      !tailscaleOrigins.has(url.origin) &&
+      !tailscaleOrigins.has(key) &&
       !tokenAllowsPlainHttp(saved, sharedCredential)
     ) {
       continue;
     }
-    const httpBaseUrl = `${url.origin}/`;
-    const connectionId = learnedConnectionId(
-      entry.target.environmentId,
-      url.origin,
-      sharedCredential,
-    );
+    const httpBaseUrl = `${url.origin}${activeBasePath}/`;
+    const connectionId = learnedConnectionId(entry.target.environmentId, key, sharedCredential);
     next = insertRoute(next, {
       target: new BearerConnectionTarget({
         environmentId: entry.target.environmentId,
@@ -343,10 +347,10 @@ export function mergeLearnedRoutes(input: {
           environmentId: entry.target.environmentId,
           label: entry.target.label,
           httpBaseUrl,
-          wsBaseUrl: `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}/`,
+          wsBaseUrl: `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}${activeBasePath}/`,
           learned: true,
           ...(authorization === undefined ? {} : { authorization }),
-          ...(tailscaleOrigins.has(url.origin) ? { network: "tailscale" as const } : {}),
+          ...(tailscaleOrigins.has(key) ? { network: "tailscale" as const } : {}),
         }),
       ),
     });

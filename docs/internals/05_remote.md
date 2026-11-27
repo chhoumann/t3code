@@ -76,3 +76,30 @@ through `/api/preview/tunnel` on the environment's own origin:
 - Remote servers outlive client releases. Clients negotiate features via advertised capabilities
   rather than assuming version parity. Process replacement uses the
   [update protocol](./07_server-updates.md).
+
+## Fleet Hub and virtual environment routing
+
+The self-hosted [`FleetHubService`](../../apps/server/src/fleet/FleetHubService.ts) multiplexes
+outbound guest/runner tunnels and exposes each remote node under `/_env/<environmentId>` on the
+single hub origin:
+
+- **Authority split by node kind.** Ephemeral sandboxes run in `hub_authority` mode: pairing grants,
+  session issuance, DPoP replay/thumbprint binding, and immediate WebSocket revocation live in the
+  hub SQLite database so access control works even while a sandbox is stopped. Persistent
+  self-hosted runners (`t3 runner start`, connecting via [`GuestFleetRuntime`](../../apps/server/src/fleet/GuestFleetRuntime.ts))
+  run in `runner_passthrough` mode and retain their own local session and device authority.
+- **Park-and-Splice zero-limbo lifecycle.** Sandboxes receive a deterministic `EnvironmentId` at
+  launch (`ms 0`) seeded into `sandbox_projection_cache`. While a sandbox boots or sleeps, shell and
+  thread reads serve directly from SQLite cache with zero container/VM wakeups; mutating commands park
+  idempotently in `sandbox_inbox`, trigger sandbox wake, drain once the mux tunnel attaches, and
+  splice live guest subscription chunks onto open client WebSockets.
+- **Origin preservation across `/_env/` proxies.** Forwarded HTTP requests carry
+  `x-t3-forwarded-prefix`, `x-forwarded-host`, and `x-forwarded-proto` so [`requestUrl`](../../apps/server/src/requestUrl.ts)
+  reconstructs the public `/_env/<environmentId>` URL on both guests and runners (required for
+  `McpOAuth` resource validation and `runner_passthrough` DPoP `htu` checks). Hub `/mcp`,
+  `/oauth/mcp/*`, and `/.well-known/oauth-*` forwards preserve caller `Authorization` headers so
+  automatic sibling `PeerLinks` (via `PeerLinks.linkInternalFleetPeer`) authenticate end-to-end.
+- **Exposed host ports and Portals.** Inbound TCP mux streams from a sandbox guest to localhost are
+  enforced against the node's allowlisted `exposed_ports_json` (`127.43.0.1:<port>` inside the
+  guest). Inbound HTTP/WebSocket Portal requests at `/_env/<environmentId>/portal/<port>/*` require
+  a valid hub session or WS ticket before tunneling into the sandbox.

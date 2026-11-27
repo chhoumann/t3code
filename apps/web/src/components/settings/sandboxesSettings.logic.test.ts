@@ -99,4 +99,43 @@ describe("sandboxAccountSaveInput", () => {
       );
     },
   );
+
+  it("supports docker and command providers and validates exposedHostPorts", () => {
+    const dockerInput = ready(
+      sandboxAccountSaveInput(ID, {
+        ...sandboxAccountDraft(null, makeKey),
+        label: "Local Docker",
+        provider: "docker",
+        dockerImage: "  node:22-bookworm  ",
+        exposedHostPorts: "8317, 3000 8317",
+      }),
+    );
+    expect(dockerInput).toMatchObject({
+      provider: "docker",
+      dockerImage: "node:22-bookworm",
+      commandProgram: null,
+      exposedHostPorts: [8317, 3000],
+    });
+
+    const commandInput = ready(
+      sandboxAccountSaveInput(ID, {
+        ...sandboxAccountDraft(null, makeKey),
+        label: "Fly Command",
+        provider: "command",
+        commandProgram: "/usr/local/bin/fly-sandbox",
+      }),
+    );
+    expect(commandInput).toMatchObject({
+      provider: "command",
+      commandProgram: "/usr/local/bin/fly-sandbox",
+      dockerImage: null,
+    });
+
+    const invalidPorts = sandboxAccountSaveInput(ID, {
+      ...sandboxAccountDraft(null, makeKey),
+      label: "Bad Ports",
+      exposedHostPorts: "8317, 70000",
+    });
+    expect(invalidPorts._tag).toBe("Invalid");
+  });
 });

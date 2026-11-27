@@ -30,6 +30,10 @@ export const SANDBOX_MANAGED_FILE = `${SANDBOX_T3_HOME}/${MANAGED_SANDBOX_FILE}`
  * sandbox already has that sandbox's.
  */
 export const SANDBOX_INPUTS_READY_FILE = `${SANDBOX_INPUTS_DIR}/inputs-ready`;
+export const SANDBOX_ENVIRONMENT_ID_FILE = `${SANDBOX_INPUTS_DIR}/environment-id`;
+export const SANDBOX_FLEET_BOOTSTRAP_FILE = `${SANDBOX_INPUTS_DIR}/fleet-bootstrap.json`;
+const SANDBOX_START_GUEST_SCRIPT = `${SANDBOX_INPUTS_DIR}/start-guest.sh`;
+export const SANDBOX_OVERLAY_ARCHIVE = `${SANDBOX_INPUTS_DIR}/overlay.json.gz`;
 /**
  * Held by the clone and the credential refresh, so one replayed while its
  * first run still goes waits for it and then finds the work done. The kernel
@@ -212,6 +216,8 @@ export function renderSandboxBootScript(input: {
     `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do ${inputsReady} && break; sleep 1; done`,
     `${inputsReady} || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
     `chmod 600 ${shellQuote(SANDBOX_ENV_FILE)} ${shellQuote(SANDBOX_SETUP_ENV_FILE)}`,
+    `if [ -s ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} ]; then mkdir -p "$T3CODE_HOME/userdata" && cp -f ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} "$T3CODE_HOME/userdata/environment-id"; fi`,
+    `if [ -s ${shellQuote(SANDBOX_FLEET_BOOTSTRAP_FILE)} ]; then mkdir -p "$T3CODE_HOME/userdata" && [ -f "$T3CODE_HOME/userdata/settings.json" ] || printf '{"linkedEnvironmentsEnabled":true}\\n' > "$T3CODE_HOME/userdata/settings.json"; fi`,
     "",
     // Dev servers and T3's own file watching exhaust the stock inotify limits,
     // and Boat caps user.slice swap at zero although the VM has a swapfile.
@@ -237,6 +243,88 @@ export function renderSandboxBootScript(input: {
     "UnsetEnvironment=ASCII_TOKEN",
     "EOF",
     ...renderInstall(input.t3),
+    "",
+    `for _ in $(seq 1 ${SERVER_START_WAIT_SECONDS}); do`,
+    `  curl -fsS -o /dev/null http://127.0.0.1:${SANDBOX_T3_PORT}/.well-known/t3/environment && exit 0`,
+    "  sleep 1",
+    "done",
+    'echo "T3 did not start." >&2',
+    "exit 1",
+    "",
+  ].join("\n");
+}
+
+export function renderContainerBootScript(input: {
+  readonly t3: SandboxT3Source;
+  readonly sandboxId: string;
+}): string {
+  const inputsReady = renderInputsReadyTest(input.sandboxId);
+  const installBody =
+    input.t3.kind === "npm"
+      ? [
+          `NPM_RUNTIME="$T3CODE_HOME/runtime/versions/"${shellQuote(input.t3.version)}`,
+          `if [ ! -x "$NPM_RUNTIME/t3" ]; then`,
+          `  npx --yes ${shellQuote(`t3@${input.t3.version}`)} --version >/dev/null 2>&1 || true`,
+          `  T3_PATH="$(command -v t3 || true)"`,
+          `  mkdir -p "$T3CODE_HOME/bin"`,
+          `  [ -n "$T3_PATH" ] && ln -sf "$T3_PATH" ${shellQuote(SANDBOX_T3_BIN)}`,
+          `fi`,
+        ]
+      : renderInstall(input.t3).filter((line) => !line.includes("service install"));
+
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "umask 077",
+    `export T3CODE_HOME=${shellQuote(SANDBOX_T3_HOME)}`,
+    `mkdir -p ${shellQuote(SANDBOX_INPUTS_DIR)} "$T3CODE_HOME/bin" "$T3CODE_HOME/userdata"`,
+    `exec > >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)}) 2> >(tee -a ${shellQuote(SANDBOX_BOOT_LOG)} >&2)`,
+    "set -x",
+    "",
+    "if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then",
+    '  if [ "$(id -u)" = "0" ]; then',
+    "    if command -v apt-get >/dev/null 2>&1; then",
+    "      apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates",
+    "    elif command -v apk >/dev/null 2>&1; then",
+    "      apk add --no-cache git curl bash ca-certificates",
+    "    fi",
+    "  fi",
+    "fi",
+    "",
+    `for _ in $(seq 1 ${INPUTS_WAIT_SECONDS}); do ${inputsReady} && break; sleep 1; done`,
+    `${inputsReady} || { echo "Timed out waiting for the sandbox inputs." >&2; exit 1; }`,
+    `chmod 600 ${shellQuote(SANDBOX_ENV_FILE)} ${shellQuote(SANDBOX_SETUP_ENV_FILE)}`,
+    `if [ -s ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} ]; then cp -f ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} "$T3CODE_HOME/userdata/environment-id"; fi`,
+    '[ -f "$T3CODE_HOME/userdata/settings.json" ] || printf \'{"linkedEnvironmentsEnabled":true}\\n\' > "$T3CODE_HOME/userdata/settings.json"',
+    "",
+    `if [ -s ${shellQuote(SANDBOX_MACHINE_SETUP_SCRIPT)} ]; then`,
+    `  ( set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && . ${shellQuote(SANDBOX_SETUP_ENV_FILE)} && set +a && bash ${shellQuote(SANDBOX_MACHINE_SETUP_SCRIPT)} >> ${shellQuote(MACHINE_SETUP_LOG)} 2>&1 )`,
+    "fi",
+    "",
+    ...installBody,
+    "",
+    `cat > ${shellQuote(SANDBOX_START_GUEST_SCRIPT)} <<'START_EOF'`,
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `export T3CODE_HOME=${shellQuote(SANDBOX_T3_HOME)}`,
+    `PID_FILE=${shellQuote(`${SANDBOX_INPUTS_DIR}/guest.pid`)}`,
+    'if [ -f "$PID_FILE" ]; then kill "$(cat "$PID_FILE")" 2>/dev/null || true; fi',
+    "set -a",
+    `[ -f ${shellQuote(SANDBOX_ENV_FILE)} ] && . ${shellQuote(SANDBOX_ENV_FILE)}`,
+    "set +a",
+    `if [ -s ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} ]; then mkdir -p "$T3CODE_HOME/userdata" && cp -f ${shellQuote(SANDBOX_ENVIRONMENT_ID_FILE)} "$T3CODE_HOME/userdata/environment-id"; fi`,
+    'mkdir -p "$T3CODE_HOME/userdata" && [ -f "$T3CODE_HOME/userdata/settings.json" ] || printf \'{"linkedEnvironmentsEnabled":true}\\n\' > "$T3CODE_HOME/userdata/settings.json"',
+    `export T3CODE_HOST=0.0.0.0`,
+    `export T3CODE_PORT=${SANDBOX_T3_PORT}`,
+    `export T3CODE_NO_STARTUP_PAIRING=true`,
+    `if [ -s ${shellQuote(SANDBOX_FLEET_BOOTSTRAP_FILE)} ]; then`,
+    `  export T3_BOOTSTRAP_FILE=${shellQuote(SANDBOX_FLEET_BOOTSTRAP_FILE)}`,
+    "fi",
+    `nohup ${shellQuote(SANDBOX_T3_BIN)} serve --base-dir "$T3CODE_HOME" --host 0.0.0.0 --port ${SANDBOX_T3_PORT} >> ${shellQuote(`${SANDBOX_INPUTS_DIR}/t3.log`)} 2>&1 &`,
+    'echo "$!" > "$PID_FILE"',
+    "START_EOF",
+    `chmod 755 ${shellQuote(SANDBOX_START_GUEST_SCRIPT)}`,
+    shellQuote(SANDBOX_START_GUEST_SCRIPT),
     "",
     `for _ in $(seq 1 ${SERVER_START_WAIT_SECONDS}); do`,
     `  curl -fsS -o /dev/null http://127.0.0.1:${SANDBOX_T3_PORT}/.well-known/t3/environment && exit 0`,
@@ -278,7 +366,11 @@ export function renderRefreshCredentialsCommand(): string {
     "t3_restart_pending=0",
     // A failed setup fails the refresh. Its marker stays, so the refresh a Retry runs re-runs it.
     `if [ -e ${shellQuote(SETUP_RESTART_PENDING)} ]; then`,
-    `  if sudo systemctl restart ${MACHINE_SETUP_UNIT} ${CLOSE_EXEC_LOCK}; then`,
+    `  if [ -x ${shellQuote(SANDBOX_START_GUEST_SCRIPT)} ]; then`,
+    `    if ( set -a && . ${shellQuote(SANDBOX_ENV_FILE)} && . ${shellQuote(SANDBOX_SETUP_ENV_FILE)} && set +a && bash ${shellQuote(SANDBOX_MACHINE_SETUP_SCRIPT)} >> ${shellQuote(MACHINE_SETUP_LOG)} 2>&1 ) ${CLOSE_EXEC_LOCK}; then`,
+    `      rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
+    "    else setup_failed=1; fi",
+    `  elif sudo systemctl restart ${MACHINE_SETUP_UNIT} ${CLOSE_EXEC_LOCK}; then`,
     `    rm -f ${shellQuote(SETUP_RESTART_PENDING)} && setup_restarted=1`,
     "  else setup_failed=1; fi",
     "fi",
@@ -300,7 +392,11 @@ export function renderRestartServerCommand(): string {
     'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
     "t3_restarted=0",
     `if [ -e ${shellQuote(T3_RESTART_PENDING)} ]; then`,
-    `  systemctl --user restart t3code.service ${CLOSE_EXEC_LOCK}`,
+    `  if [ -x ${shellQuote(SANDBOX_START_GUEST_SCRIPT)} ]; then`,
+    `    ${shellQuote(SANDBOX_START_GUEST_SCRIPT)} ${CLOSE_EXEC_LOCK}`,
+    `  else`,
+    `    systemctl --user restart t3code.service ${CLOSE_EXEC_LOCK}`,
+    `  fi`,
     `  rm -f ${shellQuote(T3_RESTART_PENDING)} && t3_restarted=1`,
     "fi",
     'echo "t3_restarted=$t3_restarted"',

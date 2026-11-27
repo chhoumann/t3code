@@ -32,7 +32,7 @@ import {
  */
 const RESUME_TIMEOUT = Duration.minutes(10);
 /** How long a device may take to reconnect to a sandbox once its owner reports it awake. */
-export const SANDBOX_RECONNECT_TIMEOUT = Duration.minutes(2);
+const SANDBOX_RECONNECT_TIMEOUT = Duration.minutes(2);
 
 /** Sandbox lifecycle commands, run against the environment that owns the sandbox. */
 export function createSandboxEnvironmentAtoms<R, E>(
@@ -213,7 +213,12 @@ const requireOwner = Effect.fn("SandboxCommands.requireOwner")(function* (
  * sleeps, was put away, failed on its way to running, or is already waking.
  * A sandbox being deleted never wakes.
  */
-export function wakesForWork(view: Pick<SandboxView, "desired" | "status">): boolean {
+export function wakesForWork(
+  view: Pick<SandboxView, "desired" | "status"> & {
+    readonly httpBaseUrl?: string | null | undefined;
+  },
+): boolean {
+  if (view.httpBaseUrl?.startsWith("/_env/") === true) return false;
   if (view.desired === "destroyed") return false;
   const presence = SandboxRegistrations.sandboxPresence(view);
   return (

@@ -97,7 +97,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { type AnyRouter, useParams, useRouter } from "@tanstack/react-router";
+import { type AnyRouter, useRouter } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -1047,13 +1047,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const acknowledgeWoke = useAcknowledgeThreadWoke();
   // A Settings or Usage modal keeps the thread behind it current.
   const routeTarget = useShownThreadRouteTarget().shownTarget;
-  const routeSandboxKey = useParams({
-    strict: false,
-    select: (params) =>
-      params.environmentId && params.sandboxId
-        ? sidebarPendingSandboxKey(params.environmentId, params.sandboxId)
-        : null,
-  });
   const routeDraftThread = useComposerDraftStore((store) =>
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
   );
@@ -2717,13 +2710,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
 
   const navigateToPendingSandbox = useStableCallback((pending: PendingSandboxThread) => {
+    if (pending.view.environmentId === null) return;
     clearSelection();
     if (isMobile) {
       setOpenMobile(false);
     }
     void router.navigate({
-      to: "/sandbox/$environmentId/$sandboxId",
-      params: { environmentId: pending.ownerEnvironmentId, sandboxId: pending.view.id },
+      to: "/$environmentId/$threadId",
+      params: { environmentId: pending.view.environmentId, threadId: pending.view.threadId },
     });
   });
   const handlePendingSandboxContextMenu = useStableCallback(
@@ -3783,7 +3777,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             pending={row.pending}
                             projectTitle={row.projectTitle}
                             projectDisplayName={row.projectDisplayName}
-                            isActive={routeSandboxKey === item.key}
+                            isActive={false}
                             onNavigate={navigateToPendingSandbox}
                             onContextMenu={handlePendingSandboxContextMenu}
                           />,

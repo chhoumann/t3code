@@ -24,7 +24,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import * as ConnectionOnboarding from "../connection/onboarding.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
-import { connectionRoutes } from "../connection/routes.ts";
+import { connectionRoutes, routeHttpBaseUrl } from "../connection/routes.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { request, subscribe } from "../rpc/client.ts";
 
@@ -106,6 +106,30 @@ export type SandboxRegistrationAction =
     }
   | { readonly _tag: "Remove"; readonly environmentId: EnvironmentId };
 
+function isHubVirtualSandbox(view: Pick<SandboxView, "httpBaseUrl">): boolean {
+  return view.httpBaseUrl?.startsWith("/_env/") === true;
+}
+
+export function resolveSandboxGrantHost(
+  ownerHttpBaseUrl: string | null,
+  grantHttpBaseUrl: string,
+): string {
+  if (!grantHttpBaseUrl.startsWith("/")) {
+    return grantHttpBaseUrl;
+  }
+  const fallbackOrigin =
+    typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:3773";
+  let origin = fallbackOrigin;
+  if (ownerHttpBaseUrl !== null) {
+    try {
+      origin = new URL(ownerHttpBaseUrl, fallbackOrigin).origin;
+    } catch {
+      origin = fallbackOrigin;
+    }
+  }
+  return `${origin}${grantHttpBaseUrl}`;
+}
+
 /**
  * Plans registry changes for one owner's sandboxes without touching user-paired routes.
  * Sets dormant before enabling so sleeping machines are never dialed on enable.
@@ -122,31 +146,36 @@ export function planSandboxRegistrations(input: {
     listed.add(environmentId);
     const registered = input.registered.get(environmentId);
     const presence = sandboxPresence(view);
-    if (presence === "running" && registered === undefined) {
+    const hubVirtual = isHubVirtualSandbox(view);
+    const effective = presence === "failed" && view.desired === "destroyed" ? "put-away" : presence;
+    if (
+      registered === undefined &&
+      (presence === "running" || (hubVirtual && effective !== "gone" && effective !== "put-away"))
+    ) {
       actions.push({ _tag: "Pair", sandboxId: view.id, environmentId });
     }
     if (registered?.contributed !== true) continue;
     // A sandbox whose delete failed stays switched off, like one put away, until it is retried.
-    switch (presence === "failed" && view.desired === "destroyed" ? "put-away" : presence) {
+    switch (effective) {
       case "gone":
         actions.push({ _tag: "Remove", environmentId });
         break;
       case "put-away":
         if (registered.enabled) actions.push({ _tag: "SetEnabled", environmentId, enabled: false });
         break;
+      case "launching":
+        if (!hubVirtual) break;
       case "running":
       case "asleep":
       case "waking":
       case "failed": {
-        const dormant = presence !== "running";
+        const dormant = hubVirtual ? false : presence !== "running";
         if (registered.dormant !== dormant) {
           actions.push({ _tag: "SetDormant", environmentId, dormant });
         }
         if (!registered.enabled) actions.push({ _tag: "SetEnabled", environmentId, enabled: true });
         break;
       }
-      case "launching":
-        break;
     }
   }
   for (const [environmentId, registered] of input.registered) {
@@ -328,17 +357,22 @@ export const layer = Layer.effect(
       registry.run(owner, request(WS_METHODS.sandboxesConnect, { id: sandboxId }));
     return yield* makeReconciler({
       sandboxes: (owner) => registry.followStream(owner, ownerSandboxes),
-      pair: (owner, sandboxId) =>
-        connect(owner, sandboxId).pipe(
-          Effect.flatMap((grant: SandboxConnectResult) =>
-            onboarding.registerPairing({
-              host: grant.httpBaseUrl,
-              pairingCode: grant.pairingCredential,
-              expectedEnvironmentId: grant.environmentId,
-              managedBy: owner,
-            }),
-          ),
-        ),
+      pair: Effect.fn("SandboxRegistrations.pair")(function* (owner, sandboxId) {
+        const grant: SandboxConnectResult = yield* connect(owner, sandboxId);
+        const ownerEntry = (yield* SubscriptionRef.get(registry.entries)).get(owner);
+        const ownerHttpBaseUrl =
+          ownerEntry === undefined
+            ? null
+            : (connectionRoutes(ownerEntry)
+                .map(routeHttpBaseUrl)
+                .find((url): url is string => url !== null) ?? null);
+        return yield* onboarding.registerPairing({
+          host: resolveSandboxGrantHost(ownerHttpBaseUrl, grant.httpBaseUrl),
+          pairingCode: grant.pairingCredential,
+          expectedEnvironmentId: grant.environmentId,
+          managedBy: owner,
+        });
+      }),
     });
   }),
 );

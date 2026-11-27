@@ -6,7 +6,7 @@ import {
   type RepositoryIdentity,
   type SandboxAccountId,
   type SandboxBranchName,
-  type SandboxRemoteUrl,
+  SandboxRemoteUrl,
   type SandboxSource,
   type VcsRef,
   type ProjectId,
@@ -122,6 +122,22 @@ export function resolveSandboxDraftSource(
 ): SandboxSource | null {
   const remoteUrl = target.remoteUrl ?? sandboxSourceForProject(projectIdentity)?.remoteUrl;
   return remoteUrl === undefined ? null : { remoteUrl, base: target.base ?? { _tag: "default" } };
+}
+
+export function resolveLocalSandboxFallbackSource(
+  projectFolderOrTitle: string,
+  target: Partial<SandboxSource>,
+): SandboxSource {
+  const folder = projectFolderOrTitle.split(/[\\/]/).filter(Boolean).pop() ?? projectFolderOrTitle;
+  const slug =
+    folder
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "project";
+  return {
+    remoteUrl: SandboxRemoteUrl.make(`https://local.t3.invalid/local/${slug}`),
+    base: target.base ?? { _tag: "default" },
+  };
 }
 
 /** The one repository a draft's picker offers: the project's own, or the one typed into it. */

@@ -97,6 +97,9 @@ import * as ProviderHostPathWatcher from "./provider/ProviderHostPathWatcher.ts"
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as FleetHubHttp from "./fleet/FleetHubHttp.ts";
+import * as FleetHubService from "./fleet/FleetHubService.ts";
+import * as GuestFleetRuntime from "./fleet/GuestFleetRuntime.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerClientPairing from "./peer/PeerClientPairing.ts";
@@ -259,7 +262,8 @@ import {
 } from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
-import * as BoatSandboxProvider from "./sandbox/BoatSandboxProvider.ts";
+import * as AttachedProviderRegistry from "./fleet/AttachedProviderRegistry.ts";
+import * as CompositeSandboxProvider from "./sandbox/CompositeSandboxProvider.ts";
 import * as GitHubAppConnection from "./sandbox/GitHubAppConnection.ts";
 import * as ManagedSandbox from "./sandbox/ManagedSandbox.ts";
 import * as SandboxAccounts from "./sandbox/SandboxAccounts.ts";
@@ -730,12 +734,18 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 // Sandbox machines this environment owns. Building the service plans every
 // unsettled sandbox again, so a restart picks up each one where it stopped.
+const layerFleetHub = FleetHubService.layer.pipe(
+  Layer.provideMerge(GitHubAppConnection.layer),
+  Layer.provide(NodeSocket.layerWebSocketConstructor),
+);
+
 const layerSandboxes = SandboxService.layer.pipe(
   Layer.provide(SandboxService.layerT3BuildFromConfig),
   Layer.provideMerge(SandboxAccounts.layer),
-  Layer.provideMerge(GitHubAppConnection.layer),
+  Layer.provideMerge(layerFleetHub),
   Layer.provide(SandboxGuest.layer),
-  Layer.provide(BoatSandboxProvider.layer),
+  Layer.provideMerge(CompositeSandboxProvider.layer),
+  Layer.provideMerge(AttachedProviderRegistry.layer),
   Layer.provide(NodeSocket.layerWebSocketConstructor),
 );
 
@@ -813,7 +823,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     Layer.provideMerge(MilestoneHub.layer),
     Layer.provideMerge(Layer.merge(layerTaskFolders, LayoutCommandApprovalWrites.layer)),
     Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
-    Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
+    Layer.provideMerge(Layer.mergeAll(ProjectStore.layer, ThreadSearch.layer, PeerLinks.layer)),
     Layer.provideMerge(SecretCheck.layer),
     Layer.provideMerge(SecretResolver.layer),
     // Above the settings it writes when a theme is applied.
@@ -837,6 +847,9 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     Layer.provideMerge(ProviderInstallationGate.layer),
   )
   .pipe(
+    Layer.provideMerge(
+      GuestFleetRuntime.layer.pipe(Layer.provide(NodeSocket.layerWebSocketConstructor)),
+    ),
     // Provider hydration builds the Claude runner, which reports agents to the same scanner the
     // terminal and preview layers share.
     Layer.provideMerge(layerPortScanner),
@@ -949,6 +962,7 @@ const layerMakeRoutes = Layer.mergeAll(
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
     PreviewTunnel.routeLayer,
+    FleetHubHttp.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
     speechStreamRouteLayer,
@@ -985,7 +999,6 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(
     Layer.mergeAll(PeerForwarding.layer, PeerThreadRelay.layer, PeerClientPairing.layer).pipe(
       Layer.provideMerge(PeerMcpClient.layer),
-      Layer.provideMerge(PeerLinks.layer),
     ),
   ),
   Layer.provide(
@@ -1049,6 +1062,8 @@ const layerMakeServer = Layer.unwrap(
         if (typeof address === "string" || !("port" in address)) {
           return;
         }
+        const fleetHub = yield* FleetHubService.FleetHubService;
+        fleetHub.setHubPort(address.port);
 
         const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
         const state = yield* makePersistedServerRuntimeState({

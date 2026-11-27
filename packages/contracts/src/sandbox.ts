@@ -4,9 +4,12 @@ import {
   EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
+  ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ChatAttachment, UploadChatAttachment } from "./chatAttachment.ts";
+import { OrchestrationMessageContext } from "./composerContext.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
@@ -122,6 +125,15 @@ export const SandboxResolvedBase = Schema.Struct({
 });
 export type SandboxResolvedBase = typeof SandboxResolvedBase.Type;
 
+export const SandboxLocalCheckoutInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  includeUncommitted: Schema.Boolean,
+});
+export type SandboxLocalCheckoutInput = typeof SandboxLocalCheckoutInput.Type;
+
+export const SandboxLaunchAttachment = Schema.Union([ChatAttachment, UploadChatAttachment]);
+export type SandboxLaunchAttachment = typeof SandboxLaunchAttachment.Type;
+
 export const SandboxLaunchInput = Schema.Struct({
   id: SandboxId,
   accountId: SandboxAccountId,
@@ -133,6 +145,10 @@ export const SandboxLaunchInput = Schema.Struct({
   model: TrimmedNonEmptyString,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  localCheckout: Schema.optionalKey(SandboxLocalCheckoutInput),
+  skipSeedThread: Schema.optionalKey(Schema.Boolean),
+  attachments: Schema.optionalKey(Schema.Array(SandboxLaunchAttachment)),
+  context: Schema.optionalKey(OrchestrationMessageContext),
 });
 export type SandboxLaunchInput = typeof SandboxLaunchInput.Type;
 
@@ -160,9 +176,17 @@ export type SandboxProjectDefaults = typeof SandboxProjectDefaults.Type;
 export const SandboxEnvName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/));
 export type SandboxEnvName = typeof SandboxEnvName.Type;
 
+export const SandboxProviderKind = Schema.Literals(["docker", "command", "boat"]);
+export type SandboxProviderKind = typeof SandboxProviderKind.Type;
+
+export const SandboxExposedPort = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: 65_535 }),
+);
+export type SandboxExposedPort = typeof SandboxExposedPort.Type;
+
 const SandboxAccountFields = {
   label: TrimmedNonEmptyString,
-  provider: Schema.Literal("boat"),
+  provider: SandboxProviderKind,
   /** A provider secret bundle; null creates machines with no provider-side secrets. */
   providerEnvironment: Schema.NullOr(TrimmedNonEmptyString),
   size: SandboxMachineSize,
@@ -170,6 +194,12 @@ const SandboxAccountFields = {
   stopAfterHours: Schema.NullOr(SandboxStopAfterHours),
   /** Run on every boot before T3 starts, with the account env loaded. Must be idempotent. */
   machineSetupScript: Schema.NullOr(Schema.String),
+  /** Container image when provider is `docker`; defaults to `node:22-bookworm`. */
+  dockerImage: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  /** Executable path for `command` provider, or null when attached via `t3 sandbox provider`. */
+  commandProgram: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  /** Hub localhost TCP ports forwarded inside sandboxes at `127.43.0.1` / `hub.t3.internal`. */
+  exposedHostPorts: Schema.optionalKey(Schema.Array(SandboxExposedPort)),
 };
 
 /**
@@ -365,6 +395,7 @@ export const SandboxView = Schema.Struct({
   settledRevision: NonNegativeInt,
   /** Known once the sandbox's T3 server has answered for the first time. */
   environmentId: Schema.NullOr(EnvironmentId),
+  projectId: Schema.optionalKey(ProjectId),
   httpBaseUrl: Schema.NullOr(Schema.String),
   createdAt: IsoDateTime,
 });

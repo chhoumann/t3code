@@ -31,6 +31,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as FleetHubService from "../fleet/FleetHubService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { GitHubAppConnection, type GitHubUserToken } from "./GitHubAppConnection.ts";
@@ -251,6 +252,12 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
           yield* Deferred.succeed(delivered, token.generation);
         }
       }),
+    unpackOverlay: () =>
+      Effect.succeed({
+        branch: "main",
+        commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+      }),
+    registerLocalProject: () => Effect.void,
     readEnvironmentId: (baseUrl) =>
       Effect.gen(function* () {
         const died = world.dieNextReadiness;
@@ -298,7 +305,10 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     issuePairingCredential: (target, grant) =>
       world.adminTokens.has(Redacted.value(target.token))
         ? Effect.sync(() => {
-            world.pairingGrants.push({ baseUrl: target.baseUrl, scopes: grant.scopes });
+            world.pairingGrants.push({
+              baseUrl: target.baseUrl,
+              scopes: grant.purpose === "peer-link" ? undefined : grant.scopes,
+            });
             return Redacted.make("pairing");
           })
         : Effect.fail(
@@ -331,7 +341,7 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     }),
   );
 
-  const serviceLayer = SandboxService.layer.pipe(
+  const baseServiceLayer = SandboxService.layer.pipe(
     Layer.provide(connectionLayer),
     Layer.provide(
       SandboxAccounts.layerStatic([
@@ -373,14 +383,30 @@ const makeWorld = (settingsLayer = ServerSettings.layerTest()) => {
     Layer.provideMerge(settingsLayer),
   );
 
+  const hubLayer = FleetHubService.layer.pipe(
+    Layer.provide(connectionLayer),
+    Layer.provide(Layer.succeed(ServerSecretStore.ServerSecretStore, secretStore)),
+    Layer.provide(NodeCrypto.layer),
+    Layer.provideMerge(settingsLayer),
+  );
+
   /** Starts the service in its own scope over the test's database; closing the scope is a crash. */
   const start = Effect.gen(function* () {
     const scope = yield* Scope.make();
-    const context = yield* Layer.buildWithScope(serviceLayer, scope);
+    const context = yield* Layer.buildWithScope(baseServiceLayer, scope);
     return { scope, context };
   });
 
-  return { world, start };
+  const startWithHub = Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const context = yield* Layer.buildWithScope(
+      baseServiceLayer.pipe(Layer.provideMerge(hubLayer)),
+      scope,
+    );
+    return { scope, context };
+  });
+
+  return { world, start, startWithHub };
 };
 
 const source = (remoteUrl: string): SandboxSource => ({
@@ -1168,5 +1194,34 @@ describe("SandboxService", () => {
       }).pipe(Effect.provide(started.context));
       yield* Scope.close(started.scope, Exit.void);
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "allocates deterministic /_env/<environmentId> at ms 0 and accepts connect() while creating",
+    () =>
+      Effect.gen(function* () {
+        const { world, startWithHub } = makeWorld();
+        const gate = yield* Deferred.make<void>();
+        world.hangNextCreate = gate;
+        const started = yield* startWithHub;
+        yield* Effect.gen(function* () {
+          const sandboxes = yield* service;
+          const id = SandboxId.make("sbx-ms0-hub");
+          const view = yield* sandboxes.launch(launchInput(id));
+
+          assert.strictEqual(view.status._tag, "creating");
+          assert.isNotNull(view.environmentId);
+          assert.strictEqual(view.httpBaseUrl, `/_env/${view.environmentId}`);
+
+          const connected = yield* sandboxes.connect({
+            id,
+            scopes: ["orchestration:read", "orchestration:operate"],
+          });
+          assert.strictEqual(connected.environmentId, view.environmentId);
+          assert.strictEqual(connected.httpBaseUrl, `/_env/${view.environmentId}`);
+          assert.isTrue(connected.pairingCredential.length > 0);
+        }).pipe(Effect.provide(started.context));
+        yield* Scope.close(started.scope, Exit.void);
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 });

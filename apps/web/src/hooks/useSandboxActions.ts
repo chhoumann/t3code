@@ -53,14 +53,11 @@ export function useSandboxActions() {
     );
     if (confirmed !== true) return false;
     if (!(await setDesired(sandbox, "destroyed"))) return false;
-    // The sandbox's threads go with it, so leave one that is open, or its launch view.
-    const params = router.state.matches.at(-1)?.params as
-      | { environmentId?: string; sandboxId?: string }
-      | undefined;
+    // The sandbox's threads go with it, so leave one that is open.
+    const params = router.state.matches.at(-1)?.params as { environmentId?: string } | undefined;
     if (
-      (sandbox.view.environmentId !== null &&
-        params?.environmentId === sandbox.view.environmentId) ||
-      params?.sandboxId === sandbox.view.id
+      sandbox.view.environmentId !== null &&
+      params?.environmentId === sandbox.view.environmentId
     ) {
       await router.navigate({ to: "/", replace: true });
     }

@@ -1,3 +1,4 @@
+import { joinEnvironmentPath } from "@t3tools/shared/environmentPath";
 import { encodeSpeechPcmRequest } from "@t3tools/shared/speech";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -173,7 +174,7 @@ export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
     run: ({ client, headers }) => client.webSocketTicketFor({ headers, params: { use: "media" } }),
   }).pipe(
     Effect.map(({ ticket }) => {
-      const url = new URL(SPEECH_STREAM_PATH, endpoint);
+      const url = new URL(joinEnvironmentPath(endpoint, SPEECH_STREAM_PATH));
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("wsTicket", Redacted.value(ticket));
       return url.toString();

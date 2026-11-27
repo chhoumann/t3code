@@ -35,6 +35,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientError from "effect/http/HttpClientError";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import { extractVirtualEnvironmentBasePath } from "@t3tools/shared/environmentPath";
 import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassification";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -109,6 +110,13 @@ export class PeerLinks extends Context.Service<
     readonly linkUnlessLinked: (
       input: PeerLinkCreateInput,
     ) => Effect.Effect<{ readonly link: PeerLink; readonly alreadyLinked: boolean }, PeerLinkError>;
+    readonly linkInternalFleetPeer: (input: {
+      readonly url: string;
+      readonly pairingCode: Redacted.Redacted<string>;
+      readonly expectedEnvironmentId: EnvironmentId;
+      readonly label?: string;
+      readonly access?: AuthMcpClientAccess;
+    }) => Effect.Effect<PeerLink, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
     /** The unexpired links' names, from what is stored, without asking any peer. */
     readonly names: Effect.Effect<ReadonlyArray<PeerLinkName>, PeerLinkError>;
@@ -197,7 +205,8 @@ const peerOrigin = (url: string) => {
       }),
     );
   }
-  return Effect.succeed(parsed.origin);
+  const basePath = extractVirtualEnvironmentBasePath(parsed.pathname);
+  return Effect.succeed(`${parsed.origin}${basePath}`);
 };
 
 /** The system error under a failed connection, such as ECONNREFUSED or ENOTFOUND. */
@@ -251,10 +260,15 @@ const make = Effect.gen(function* () {
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const isOwnLoopback = yield* LoopbackHost;
-  const enabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.linkedEnvironmentsEnabled),
-    Effect.orElseSucceed(() => false),
-  );
+  const enabled = Effect.gen(function* () {
+    const fromSettings = yield* serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.linkedEnvironmentsEnabled),
+      Effect.orElseSucceed(() => false),
+    );
+    if (fromSettings) return true;
+    const rows = yield* readRows.pipe(Effect.orElseSucceed(() => []));
+    return rows.length > 0;
+  });
 
   /** A fresh name for one link's token; the row records it. */
   const newSecretName = random.randomBytes(16).pipe(
@@ -507,6 +521,65 @@ const make = Effect.gen(function* () {
     return { primary, peer: yield* probe(primary), origins };
   });
 
+  const persistLinkedPeer = Effect.fn("PeerLinks.persistLinkedPeer")(function* (input: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly origins: ReadonlyArray<string>;
+    readonly access: AuthMcpClientAccess;
+    readonly accessToken: string;
+    readonly expiresInSeconds: number;
+  }) {
+    const now = yield* DateTime.now;
+    const linked: PeerLink = {
+      environmentId: input.environmentId,
+      label: input.label,
+      urls: input.origins,
+      access: input.access,
+      linkedAt: now,
+      expiresAt: DateTime.add(now, { seconds: input.expiresInSeconds }),
+      lastReachedAt: now,
+      lastError: null,
+    };
+    // The token goes under a name of its own before the row points at it,
+    // so the row and its token are replaced together.
+    const secretName = yield* newSecretName;
+    yield* secrets
+      .set(secretName, new TextEncoder().encode(input.accessToken))
+      .pipe(Effect.catch(failStorage));
+    // A token no row names could never be removed.
+    const previous = yield* Effect.gen(function* () {
+      const urlsJson = yield* encodeUrls(input.origins).pipe(Effect.catch(failStorage));
+      const previous = yield* readRow(input.environmentId);
+      yield* sql`
+        INSERT INTO peer_environment_links (
+          environment_id, secret_name, label, urls_json, access, linked_at, expires_at,
+          last_reached_at, last_error, fenced
+        ) VALUES (
+          ${linked.environmentId}, ${secretName}, ${linked.label}, ${urlsJson}, ${linked.access},
+          ${DateTime.formatIso(linked.linkedAt)}, ${DateTime.formatIso(linked.expiresAt)},
+          ${DateTime.formatIso(now)}, NULL, 1
+        )
+        ON CONFLICT (environment_id) DO UPDATE SET
+          secret_name = excluded.secret_name,
+          fenced = excluded.fenced,
+          label = excluded.label,
+          urls_json = excluded.urls_json,
+          access = excluded.access,
+          linked_at = excluded.linked_at,
+          expires_at = excluded.expires_at,
+          last_reached_at = excluded.last_reached_at,
+          last_error = NULL
+      `.pipe(Effect.catch(failStorage));
+      return previous;
+    }).pipe(Effect.onError(() => secrets.remove(secretName).pipe(Effect.ignore)));
+    // Linking again replaces the old token. A racing link may leave its own
+    // behind; it is unused either way.
+    if (Option.isSome(previous) && previous.value.secret_name !== secretName) {
+      yield* secrets.remove(previous.value.secret_name).pipe(Effect.ignore);
+    }
+    return linked;
+  });
+
   const linkWith = Effect.fn("PeerLinks.link")(function* (
     input: PeerLinkCreateInput,
     keepLinked: boolean,
@@ -558,54 +631,14 @@ const make = Effect.gen(function* () {
       });
     }
     const issued = yield* signIn(primary, input, `${LINK_CLIENT_NAME_PREFIX}${self.label}`);
-    const now = yield* DateTime.now;
-    const linked: PeerLink = {
+    const linked = yield* persistLinkedPeer({
       environmentId: peer.environmentId,
       label: peer.label,
-      urls: origins,
+      origins,
       access: input.access,
-      linkedAt: now,
-      expiresAt: DateTime.add(now, { seconds: issued.expires_in }),
-      lastReachedAt: now,
-      lastError: null,
-    };
-    // The token goes under a name of its own before the row points at it,
-    // so the row and its token are replaced together.
-    const secretName = yield* newSecretName;
-    yield* secrets
-      .set(secretName, new TextEncoder().encode(issued.access_token))
-      .pipe(Effect.catch(failStorage));
-    // A token no row names could never be removed.
-    const previous = yield* Effect.gen(function* () {
-      const urlsJson = yield* encodeUrls(origins).pipe(Effect.catch(failStorage));
-      const previous = yield* readRow(peer.environmentId);
-      yield* sql`
-        INSERT INTO peer_environment_links (
-          environment_id, secret_name, label, urls_json, access, linked_at, expires_at,
-          last_reached_at, last_error, fenced
-        ) VALUES (
-          ${linked.environmentId}, ${secretName}, ${linked.label}, ${urlsJson}, ${linked.access},
-          ${DateTime.formatIso(linked.linkedAt)}, ${DateTime.formatIso(linked.expiresAt)},
-          ${DateTime.formatIso(now)}, NULL, 1
-        )
-        ON CONFLICT (environment_id) DO UPDATE SET
-          secret_name = excluded.secret_name,
-          fenced = excluded.fenced,
-          label = excluded.label,
-          urls_json = excluded.urls_json,
-          access = excluded.access,
-          linked_at = excluded.linked_at,
-          expires_at = excluded.expires_at,
-          last_reached_at = excluded.last_reached_at,
-          last_error = NULL
-      `.pipe(Effect.catch(failStorage));
-      return previous;
-    }).pipe(Effect.onError(() => secrets.remove(secretName).pipe(Effect.ignore)));
-    // Linking again replaces the old token. A racing link may leave its own
-    // behind; it is unused either way.
-    if (Option.isSome(previous) && previous.value.secret_name !== secretName) {
-      yield* secrets.remove(previous.value.secret_name).pipe(Effect.ignore);
-    }
+      accessToken: issued.access_token,
+      expiresInSeconds: issued.expires_in,
+    });
     return { link: linked, alreadyLinked: false };
   });
 
@@ -613,6 +646,55 @@ const make = Effect.gen(function* () {
     linkWith(input, false).pipe(Effect.map((result) => result.link));
   const linkUnlessLinked: PeerLinks["Service"]["linkUnlessLinked"] = (input) =>
     linkWith(input, true);
+
+  const linkInternalFleetPeer: PeerLinks["Service"]["linkInternalFleetPeer"] = Effect.fn(
+    "PeerLinks.linkInternalFleetPeer",
+  )(function* (input) {
+    const origin = yield* peerOrigin(input.url);
+    const row = yield* readRow(input.expectedEnvironmentId);
+    const stored = Option.isSome(row) ? yield* toLink(row.value) : undefined;
+    if (
+      stored !== undefined &&
+      DateTime.isGreaterThan(stored.expiresAt, yield* DateTime.now) &&
+      stored.urls.includes(origin)
+    ) {
+      return stored;
+    }
+    const peer = yield* probe(origin);
+    if (peer.environmentId !== input.expectedEnvironmentId) {
+      return yield* new PeerLinkError({
+        reason: "unreachable",
+        message: `${origin} answered as ${peer.label} (${peer.environmentId}), not ${input.expectedEnvironmentId}.`,
+        answeredAs: peer.label,
+      });
+    }
+    if (!linkLimitsHold(peer)) {
+      return yield* new PeerLinkError({
+        reason: "incompatible",
+        message: `${peer.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
+      });
+    }
+    const self = yield* environment.getDescriptor;
+    const access = input.access ?? ("full-access" as const);
+    const issued = yield* signIn(
+      origin,
+      {
+        url: origin,
+        pairingCode: Redacted.value(input.pairingCode),
+        access,
+        expectedEnvironmentId: input.expectedEnvironmentId,
+      },
+      `${LINK_CLIENT_NAME_PREFIX}${self.label}`,
+    );
+    return yield* persistLinkedPeer({
+      environmentId: peer.environmentId,
+      label: input.label ?? peer.label,
+      origins: [origin],
+      access,
+      accessToken: issued.access_token,
+      expiresInSeconds: issued.expires_in,
+    });
+  });
 
   /** A peer's label follows its machine name, so the link takes the one its own address answers with. */
   const withLabel = (link: PeerLink, label: string) =>
@@ -817,6 +899,7 @@ const make = Effect.gen(function* () {
     enabled,
     link,
     linkUnlessLinked,
+    linkInternalFleetPeer,
     list,
     names,
     get,

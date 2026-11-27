@@ -19,6 +19,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import { extractVirtualEnvironmentBasePath } from "@t3tools/shared/environmentPath";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -73,11 +74,13 @@ export interface McpOAuthUrls {
 }
 
 export const requestUrls = (request: HttpServerRequest.HttpServerRequest): McpOAuthUrls => {
-  const origin = Option.match(requestUrl(request), {
-    onNone: () => "http://localhost",
-    onSome: (url) => url.origin,
-  });
-  return { issuer: origin, resource: `${origin}/mcp` };
+  const url = Option.getOrUndefined(requestUrl(request));
+  if (url === undefined) {
+    return { issuer: "http://localhost", resource: "http://localhost/mcp" };
+  }
+  const basePath = extractVirtualEnvironmentBasePath(url.pathname);
+  const issuer = `${url.origin}${basePath}`;
+  return { issuer, resource: `${issuer}/mcp` };
 };
 
 export const protectedResourceMetadata = (

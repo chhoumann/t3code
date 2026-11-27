@@ -6,7 +6,9 @@ import type {
   SandboxAccountConfig,
   SandboxAccountId,
   SandboxAccountSaveInput,
+  SandboxExposedPort,
   SandboxMachineSize,
+  SandboxProviderKind,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { isSandboxProjectKeyOf } from "@t3tools/shared/sandboxProject";
@@ -28,7 +30,7 @@ import {
 
 export interface SandboxAccount extends SandboxProviderAccount {
   readonly id: SandboxAccountId;
-  readonly provider: "boat";
+  readonly provider: SandboxProviderKind;
   /**
    * Written to the machine's env file on every boot and loaded by T3 and the
    * machine setup. An empty value is kept: `ANTHROPIC_API_KEY=""` matters.
@@ -46,6 +48,9 @@ export interface SandboxAccount extends SandboxProviderAccount {
   readonly size: SandboxMachineSize;
   /** Null never stops a machine on its own. */
   readonly stopAfterHours: number | null;
+  readonly dockerImage?: string | null;
+  readonly commandProgram?: string | null;
+  readonly exposedHostPorts?: ReadonlyArray<SandboxExposedPort>;
 }
 
 export class SandboxAccountNotFoundError extends Schema.TaggedError<SandboxAccountNotFoundError>()(
@@ -171,8 +176,9 @@ const make = Effect.gen(function* () {
       const notFound = new SandboxAccountNotFoundError({ accountId });
       const config = (yield* settings.getSettings.pipe(Effect.orDie)).sandboxAccounts[accountId];
       if (config === undefined) return yield* notFound;
-      const apiKey = yield* readSecret(apiKeySecretName(accountId)).pipe(Effect.orDie);
-      if (Option.isNone(apiKey)) return yield* notFound;
+      const storedApiKey = yield* readSecret(apiKeySecretName(accountId)).pipe(Effect.orDie);
+      if (config.provider === "boat" && Option.isNone(storedApiKey)) return yield* notFound;
+      const apiKey = Option.getOrElse(storedApiKey, () => "");
       const env = [];
       for (const { name, setupOnly } of config.env) {
         const value = yield* readSecret(envSecretName(accountId, name)).pipe(Effect.orDie);
@@ -183,12 +189,17 @@ const make = Effect.gen(function* () {
       return {
         id: accountId,
         provider: config.provider,
-        apiKey: Redacted.make(apiKey.value),
+        apiKey: Redacted.make(apiKey),
         env,
         machineSetupScript: config.machineSetupScript,
         providerEnvironment: config.providerEnvironment,
         size: config.size,
         stopAfterHours: config.stopAfterHours,
+        ...(config.dockerImage === undefined ? {} : { dockerImage: config.dockerImage }),
+        ...(config.commandProgram === undefined ? {} : { commandProgram: config.commandProgram }),
+        ...(config.exposedHostPorts === undefined
+          ? {}
+          : { exposedHostPorts: config.exposedHostPorts }),
       } satisfies SandboxAccount;
     },
   );
@@ -201,9 +212,10 @@ const make = Effect.gen(function* () {
         const store = Effect.mapError(
           (cause: unknown) => new SandboxAccountStoreError({ accountId: id, cause }),
         );
-        const apiKey =
-          input.apiKey ??
-          Option.getOrUndefined(yield* readSecret(apiKeySecretName(id)).pipe(store));
+        const storedApiKey = Option.getOrUndefined(
+          yield* readSecret(apiKeySecretName(id)).pipe(store),
+        );
+        const apiKey = input.apiKey ?? storedApiKey ?? (input.provider === "boat" ? undefined : "");
         if (apiKey === undefined) {
           return yield* new SandboxAccountInvalidError({
             accountId: id,
@@ -243,7 +255,16 @@ const make = Effect.gen(function* () {
           env.push({ name: entry.name, value, setupOnly: entry.setupOnly ?? false });
         }
 
-        const missingActions = yield* provider.checkAccess({ apiKey: Redacted.make(apiKey) });
+        const missingActions = yield* provider.checkAccess({
+          id,
+          provider: input.provider,
+          apiKey: Redacted.make(apiKey),
+          ...(input.dockerImage === undefined ? {} : { dockerImage: input.dockerImage }),
+          ...(input.commandProgram === undefined ? {} : { commandProgram: input.commandProgram }),
+          ...(input.exposedHostPorts === undefined
+            ? {}
+            : { exposedHostPorts: input.exposedHostPorts }),
+        });
         if (missingActions.length > 0) {
           return yield* new SandboxAccountKeyScopeError({ accountId: id, missingActions });
         }
@@ -255,13 +276,20 @@ const make = Effect.gen(function* () {
           size: input.size,
           stopAfterHours: input.stopAfterHours,
           machineSetupScript: input.machineSetupScript,
+          ...(input.dockerImage === undefined ? {} : { dockerImage: input.dockerImage }),
+          ...(input.commandProgram === undefined ? {} : { commandProgram: input.commandProgram }),
+          ...(input.exposedHostPorts === undefined
+            ? {}
+            : { exposedHostPorts: input.exposedHostPorts }),
           env: env.map(({ name, setupOnly }) => ({ name, setupOnly })),
         };
         let dropped: ReadonlyArray<string> = [];
         yield* settings
           .updateSandboxAccounts((current) =>
             Effect.gen(function* () {
-              yield* secrets.set(apiKeySecretName(id), textEncoder.encode(apiKey));
+              if (input.provider === "boat" || apiKey.length > 0) {
+                yield* secrets.set(apiKeySecretName(id), textEncoder.encode(apiKey));
+              }
               for (const entry of env) {
                 yield* secrets.set(envSecretName(id, entry.name), textEncoder.encode(entry.value));
               }

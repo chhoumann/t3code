@@ -1,4 +1,5 @@
 import type { ScheduledTaskWebhookEndpoint } from "@t3tools/contracts";
+import { joinEnvironmentPath } from "@t3tools/shared/environmentPath";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
@@ -24,7 +25,9 @@ export function webhookAddress(
       note: resolve(msg("Link this environment to T3 Connect for a public URL.")),
     };
   }
-  const url = new URL(endpoint.path, httpBaseUrl);
+  const url = new URL(
+    joinEnvironmentPath(httpBaseUrl, endpoint.path, { preserveSearchAndHash: true }),
+  );
   return {
     address: url.href,
     copyable: true,

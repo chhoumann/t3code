@@ -7,6 +7,8 @@ import type {
   AdvertisedEndpointStatus,
 } from "@t3tools/contracts";
 
+import { normalizeEnvironmentBasePath } from "./environmentPath.ts";
+
 export interface CreateAdvertisedEndpointInput {
   readonly id: string;
   readonly label: string;
@@ -32,10 +34,7 @@ export function normalizeHttpBaseUrl(rawValue: string): string {
     throw new Error(`Endpoint must use HTTP or HTTPS. Received ${url.protocol}`);
   }
 
-  url.pathname = "/";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
+  return normalizeEnvironmentBasePath(url, true);
 }
 
 export function deriveWsBaseUrl(httpBaseUrl: string): string {

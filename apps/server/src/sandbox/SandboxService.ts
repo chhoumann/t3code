@@ -11,6 +11,7 @@ import {
   SandboxAccountId,
   SandboxDesired,
   SandboxId,
+  SandboxProviderKind,
   SandboxResolvedBase,
   SandboxStatus,
   ThreadId,
@@ -25,6 +26,8 @@ import {
   sandboxProjectTitle,
   sandboxRepositoryIdentity,
 } from "@t3tools/shared/sandboxProject";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -52,9 +55,14 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   SANDBOX_T3_PORT,
+  renderContainerBootScript,
   renderSandboxBootScript,
   renderSandboxEnvFile,
 } from "./sandboxBootScript.ts";
+import { FleetHubService } from "../fleet/FleetHubService.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { packWorktreeOverlay } from "./worktreeOverlay.ts";
 import { GitHubAppConnection, type GitHubAppConnectionError } from "./GitHubAppConnection.ts";
 import * as SandboxAccounts from "./SandboxAccounts.ts";
 import * as SandboxGuest from "./SandboxGuest.ts";
@@ -212,7 +220,7 @@ export class SandboxService extends Context.Service<
 const SandboxCommandColumns = Schema.Struct({
   sandbox_id: SandboxId,
   account_id: SandboxAccountId,
-  provider: Schema.Literal("boat"),
+  provider: SandboxProviderKind,
   spec_json: Schema.fromJsonString(SandboxSpec),
   seed_json: Schema.fromJsonString(SandboxSeedIds),
   desired: SandboxDesired,
@@ -229,7 +237,10 @@ const SandboxReconcilerColumns = Schema.Struct({
   create_first_attempt_at: Schema.NullOr(Schema.Number),
   machine_id: Schema.NullOr(ProviderMachineId),
   http_base_url: Schema.NullOr(Schema.String),
+  provider_http_url: Schema.NullOr(Schema.String),
   environment_id: Schema.NullOr(EnvironmentId),
+  first_boot_at: Schema.NullOr(Schema.Number),
+  overlay_archive: Schema.NullOr(Schema.Uint8Array),
   running_since: Schema.NullOr(Schema.Number),
   inputs_written_at: Schema.NullOr(Schema.Number),
   credentials_stale: Schema.BooleanFromBit,
@@ -266,7 +277,10 @@ const reconcilerColumnsOf = (record: SandboxRecord) =>
     create_first_attempt_at: record.createFirstAttemptAt,
     machine_id: record.machineId,
     http_base_url: record.httpBaseUrl,
+    provider_http_url: record.providerHttpUrl,
     environment_id: record.environmentId,
+    first_boot_at: record.firstBootAt,
+    overlay_archive: record.overlayArchive,
     running_since: record.runningSince,
     inputs_written_at: record.inputsWrittenAt,
     credentials_stale: record.credentialsStale,
@@ -291,7 +305,10 @@ const recordOf = (row: Effect.Success<ReturnType<typeof decodeRow>>): SandboxRec
   createFirstAttemptAt: row.create_first_attempt_at,
   machineId: row.machine_id,
   httpBaseUrl: row.http_base_url,
+  providerHttpUrl: row.provider_http_url,
   environmentId: row.environment_id,
+  firstBootAt: row.first_boot_at,
+  overlayArchive: row.overlay_archive,
   runningSince: row.running_since,
   inputsWrittenAt: row.inputs_written_at,
   credentialsStale: row.credentials_stale,
@@ -322,6 +339,7 @@ const toView = (record: SandboxRecord): SandboxView => ({
   status: record.status,
   settledRevision: record.settledRevision,
   environmentId: record.environmentId,
+  projectId: record.seed.projectId,
   httpBaseUrl: record.httpBaseUrl,
   createdAt: DateTime.formatIso(DateTime.makeUnsafe(record.createdAt)),
 });
@@ -379,6 +397,8 @@ const failedStatus = (step: SandboxFailedStep, error: StepError): SandboxStatus 
 
 const statusKey = Schema.encodeSync(Schema.fromJsonString(SandboxStatus));
 
+const decodeUtf8 = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const random = yield* SecureRandom.SecureRandom;
@@ -390,11 +410,24 @@ const make = Effect.gen(function* () {
   const build = yield* SandboxT3Build;
   const githubConnection = yield* GitHubAppConnection;
   const ownerEnvironmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
+  const maybeFleetHub = yield* Effect.serviceOption(FleetHubService);
+  const maybePeerLinks = yield* Effect.serviceOption(PeerLinks.PeerLinks);
+  const maybeProcessRunner = yield* Effect.serviceOption(ProcessRunner.ProcessRunner);
+  const maybeChildSpawner = yield* Effect.serviceOption(ChildProcessSpawner.ChildProcessSpawner);
   const changesPubSub = yield* PubSub.unbounded<SandboxView>();
   const fibers = yield* FiberMap.make<SandboxId>();
 
   const uuid = random.uuidV4().pipe(Effect.orDie);
   const persistence = Effect.mapError((cause: unknown) => new SandboxPersistenceError({ cause }));
+
+  const resolveGuestBaseUrl = (record: SandboxRecord): string | null => {
+    if (Option.isSome(maybeFleetHub) && record.environmentId !== null) {
+      const bridge = maybeFleetHub.value.getInternalBridgeUrl(record.environmentId);
+      if (bridge !== null) return bridge;
+      return record.providerHttpUrl?.startsWith("mux://") ? null : record.providerHttpUrl;
+    }
+    return record.providerHttpUrl ?? record.httpBaseUrl;
+  };
 
   const readRecord = (id: SandboxId) =>
     sql`SELECT * FROM sandboxes WHERE sandbox_id = ${id}`.pipe(
@@ -529,20 +562,42 @@ const make = Effect.gen(function* () {
         : yield* accounts
             .get(record.accountId)
             .pipe(Effect.flatMap((account) => provider.inspect(account, machineId)));
-    const guestUp = machine?.state === "running" && record.httpBaseUrl !== null;
+    if (
+      Option.isSome(maybeFleetHub) &&
+      record.environmentId !== null &&
+      record.provider === "boat" &&
+      machine?.state === "running" &&
+      record.providerHttpUrl !== null
+    ) {
+      yield* maybeFleetHub.value.ensureBoatReverseTunnel(
+        record.environmentId,
+        record.providerHttpUrl,
+      );
+    }
+    const tunnelUp =
+      Option.isSome(maybeFleetHub) &&
+      record.environmentId !== null &&
+      maybeFleetHub.value.hasActiveTunnel(record.environmentId);
+    const directUrl = resolveGuestBaseUrl(record);
+    const guestUp = machine?.state === "running" && (tunnelUp || directUrl !== null);
     // A ready sandbox stays ready while its server restarts; only the machine state matters then.
     const environmentId =
       guestUp && record.status._tag !== "ready"
-        ? yield* guest.readEnvironmentId(record.httpBaseUrl)
+        ? tunnelUp && Option.isSome(maybeFleetHub) && record.environmentId !== null
+          ? yield* maybeFleetHub.value.probeGuestEnvironmentId(record.environmentId)
+          : directUrl !== null
+            ? yield* guest.readEnvironmentId(directUrl)
+            : null
         : null;
     const activity =
       guestUp &&
       record.status._tag === "ready" &&
+      directUrl !== null &&
       (record.spec.machine.stopAfterSeconds !== null || record.restartPending)
-        ? yield* readActivity(record, machine.id, record.httpBaseUrl)
+        ? yield* readActivity(record, machine.id, directUrl)
         : null;
     const githubTokenGeneration =
-      guestUp && record.environmentId !== null ? yield* githubTokenGenerationNow() : null;
+      guestUp && record.firstBootAt !== null ? yield* githubTokenGenerationNow() : null;
     return {
       now,
       machine,
@@ -575,9 +630,25 @@ const make = Effect.gen(function* () {
           createFirstAttemptAt: record.createFirstAttemptAt ?? now,
           runningSince: now,
         });
+        const fleetNode =
+          Option.isSome(maybeFleetHub) && record.environmentId !== null
+            ? yield* maybeFleetHub.value
+                .getNode(record.environmentId)
+                .pipe(Effect.orElseSucceed(() => null))
+            : null;
+        const hubPort = Option.isSome(maybeFleetHub) ? maybeFleetHub.value.getHubPort() : null;
+        const hubHost = resolved.provider === "docker" ? "host.docker.internal" : "127.0.0.1";
+        const bootstrapUrl =
+          hubPort !== null && fleetNode !== null
+            ? `http://${hubHost}:${hubPort}/_fleet/bootstrap/${record.id}`
+            : undefined;
         const created = yield* provider
           .create(resolved, {
             idempotencyKey: record.createKey,
+            sandboxId: record.id,
+            ...(record.environmentId === null ? {} : { environmentId: record.environmentId }),
+            ...(bootstrapUrl === undefined ? {} : { bootstrapUrl }),
+            ...(fleetNode?.nodeSecretPlain ? { nodeSecret: fleetNode.nodeSecretPlain } : {}),
             size: record.spec.machine.size,
             ttlSeconds: record.spec.machine.ttlSeconds,
             template: record.spec.machine.template,
@@ -614,6 +685,22 @@ const make = Effect.gen(function* () {
             : build.kind === "tarball" && build.version === record.spec.t3.version
               ? build.bytes
               : yield* new SandboxBuildUnavailableError({ version: record.spec.t3.version });
+        let fleetBootstrapJson: string | undefined;
+        if (Option.isSome(maybeFleetHub) && record.environmentId !== null) {
+          const hubPort = maybeFleetHub.value.getHubPort();
+          const hubConnectUrl =
+            hubPort !== null
+              ? resolved.provider === "docker"
+                ? `ws://host.docker.internal:${hubPort}/_fleet/connect`
+                : resolved.provider === "command"
+                  ? `ws://127.0.0.1:${hubPort}/_fleet/connect`
+                  : null
+              : null;
+          fleetBootstrapJson =
+            (yield* maybeFleetHub.value
+              .buildBootstrapManifestJson(record.environmentId, hubConnectUrl)
+              .pipe(Effect.orElseSucceed(() => null))) ?? undefined;
+        }
         yield* guest.writeBootInputs(resolved, yield* machineId, {
           ...machineCredentials(resolved),
           tarball,
@@ -621,6 +708,8 @@ const make = Effect.gen(function* () {
             ownerEnvironmentId,
             sandboxId: record.id,
           },
+          ...(record.environmentId === null ? {} : { environmentId: record.environmentId }),
+          ...(fleetBootstrapJson === undefined ? {} : { fleetBootstrapJson }),
         });
         return yield* writeFacts(record, {
           status,
@@ -628,42 +717,167 @@ const make = Effect.gen(function* () {
         });
       }
       case "Host": {
-        const baseUrl = yield* provider.host(yield* account(), yield* machineId, SANDBOX_T3_PORT);
-        return yield* writeFacts(record, { status, httpBaseUrl: baseUrl });
+        const resolved = yield* account();
+        const baseUrl = yield* provider.host(resolved, yield* machineId, SANDBOX_T3_PORT).pipe(
+          Effect.catchIf(
+            (err) =>
+              err.kind === "transient" &&
+              Option.isSome(maybeFleetHub) &&
+              record.environmentId !== null &&
+              maybeFleetHub.value.hasActiveTunnel(record.environmentId),
+            () => Effect.succeed(`mux://${record.environmentId}`),
+          ),
+        );
+        if (
+          resolved.provider === "boat" &&
+          Option.isSome(maybeFleetHub) &&
+          record.environmentId !== null
+        ) {
+          yield* maybeFleetHub.value.ensureBoatReverseTunnel(record.environmentId, baseUrl);
+        }
+        return yield* writeFacts(record, {
+          status,
+          providerHttpUrl: baseUrl,
+          ...(record.httpBaseUrl === null ? { httpBaseUrl: baseUrl } : {}),
+        });
       }
       case "RecordEnvironment":
-        return yield* writeFacts(record, { status, environmentId: action.environmentId });
+        return yield* writeFacts(record, {
+          status,
+          environmentId: action.environmentId,
+          firstBootAt: now,
+        });
       case "PrepareProject": {
         const resolved = yield* account();
+        const machine = yield* machineId;
         const baseUrl =
-          record.httpBaseUrl ??
-          (yield* Effect.die(new Error("PrepareProject planned without a base URL.")));
+          resolveGuestBaseUrl(record) ??
+          (yield* Effect.die(new Error("PrepareProject planned without a guest URL.")));
         const title = sandboxProjectTitle(
           sandboxRepositoryIdentity(record.spec.source, sourceControlDefinitions),
         );
-        const resolvedBase = yield* asOwner(record, resolved, yield* machineId, (token) =>
-          guest.prepareProject(
-            { baseUrl, token },
-            {
-              projectId: record.seed.projectId,
-              title,
-              // Shared by every sandbox of the repository, so a template's clone is found.
-              path: `${SANDBOX_HOME_PROJECTS}/${title}`,
-              createdAt: DateTime.formatIso(DateTime.makeUnsafe(record.createdAt)),
-              source: record.spec.source,
-            },
-          ),
+        const projectPath = `${SANDBOX_HOME_PROJECTS}/${title}`;
+        const isLocalFallback = record.spec.source.remoteUrl.startsWith(
+          "https://local.t3.invalid/",
         );
-        return yield* writeFacts(record, { status, resolvedBase });
+        const facts: ReconcilerFacts = yield* Effect.gen(function* () {
+          if (record.overlayArchive !== null) {
+            if (isLocalFallback) {
+              const overlayBase = yield* guest.unpackOverlay(resolved, machine, {
+                projectPath,
+                archive: record.overlayArchive,
+              });
+              const regCommandId = CommandId.make(yield* uuid);
+              yield* asOwner(record, resolved, machine, (token) =>
+                guest.registerLocalProject(
+                  { baseUrl, token },
+                  {
+                    commandId: regCommandId,
+                    projectId: record.seed.projectId,
+                    title,
+                    path: projectPath,
+                  },
+                ),
+              );
+              return {
+                status,
+                resolvedBase: overlayBase,
+                overlayArchive: null,
+              };
+            }
+            yield* asOwner(record, resolved, machine, (token) =>
+              guest.prepareProject(
+                { baseUrl, token },
+                {
+                  projectId: record.seed.projectId,
+                  title,
+                  path: projectPath,
+                  createdAt: DateTime.formatIso(DateTime.makeUnsafe(record.createdAt)),
+                  source: record.spec.source,
+                },
+              ),
+            );
+            const overlayBase = yield* guest.unpackOverlay(resolved, machine, {
+              projectPath,
+              archive: record.overlayArchive,
+            });
+            return {
+              status,
+              resolvedBase: overlayBase,
+              overlayArchive: null,
+            };
+          }
+          const resolvedBase = yield* asOwner(record, resolved, machine, (token) =>
+            guest.prepareProject(
+              { baseUrl, token },
+              {
+                projectId: record.seed.projectId,
+                title,
+                // Shared by every sandbox of the repository, so a template's clone is found.
+                path: projectPath,
+                createdAt: DateTime.formatIso(DateTime.makeUnsafe(record.createdAt)),
+                source: record.spec.source,
+              },
+            ),
+          );
+          return { status, resolvedBase };
+        });
+        if (Option.isSome(maybePeerLinks) && record.environmentId !== null) {
+          const sandboxEnvId = record.environmentId;
+          const hubPort = Option.isSome(maybeFleetHub) ? maybeFleetHub.value.getHubPort() : null;
+          const peerUrl =
+            hubPort !== null
+              ? `http://127.0.0.1:${hubPort}/_env/${sandboxEnvId}`
+              : !baseUrl.startsWith("mux://")
+                ? baseUrl
+                : null;
+          if (peerUrl !== null) {
+            yield* Effect.gen(function* () {
+              const existingLink = yield* maybePeerLinks.value
+                .get(sandboxEnvId)
+                .pipe(Effect.option, Effect.map(Option.flatten));
+              if (Option.isSome(existingLink)) {
+                const nowDt = yield* DateTime.now;
+                if (DateTime.isGreaterThan(existingLink.value.expiresAt, nowDt)) return;
+              }
+              const pairingCode = yield* asOwner(record, resolved, machine, (token) =>
+                guest.issuePairingCredential(
+                  { baseUrl, token },
+                  { label: "hub-fleet-mesh", access: "full-access", purpose: "peer-link" },
+                ),
+              );
+              yield* maybePeerLinks.value.linkInternalFleetPeer({
+                url: peerUrl,
+                pairingCode,
+                expectedEnvironmentId: sandboxEnvId,
+                label: record.spec.title,
+              });
+            }).pipe(
+              Effect.tapError((error) =>
+                Effect.logWarning("sandbox sibling peer link failed").pipe(
+                  Effect.annotateLogs({ sandboxId: record.id, environmentId: sandboxEnvId, error }),
+                ),
+              ),
+              Effect.ignore({ log: true }),
+            );
+          }
+        }
+        return yield* writeFacts(record, facts);
       }
       case "LaunchSeed": {
         const resolved = yield* account();
         const baseUrl =
-          record.httpBaseUrl ??
-          (yield* Effect.die(new Error("LaunchSeed planned without a base URL.")));
+          resolveGuestBaseUrl(record) ??
+          (yield* Effect.die(new Error("LaunchSeed planned without a guest URL.")));
         const resolvedBase =
           record.resolvedBase ??
           (yield* Effect.die(new Error("LaunchSeed planned before the project was prepared.")));
+        const useRootWorkspace = record.spec.localCheckoutIncludeUncommitted === true;
+        const isLocalFallback = record.spec.source.remoteUrl.startsWith(
+          "https://local.t3.invalid/",
+        );
+        const hasOverlayCommit =
+          isLocalFallback || record.spec.localCheckoutIncludeUncommitted !== undefined;
         yield* asOwner(record, resolved, yield* machineId, (token) =>
           guest.launchSeedThread(
             { baseUrl, token },
@@ -676,13 +890,23 @@ const make = Effect.gen(function* () {
                 model: record.spec.model,
                 runtimeMode: record.spec.runtimeMode,
                 interactionMode: record.spec.interactionMode,
+                ...(record.spec.attachments === undefined
+                  ? {}
+                  : { attachments: record.spec.attachments }),
+                ...(record.spec.context === undefined ? {} : { context: record.spec.context }),
               },
-              // The preparation fetched this remote-tracking ref, so the worktree starts there.
-              baseRef: `origin/${resolvedBase.branch}`,
+              baseRef: hasOverlayCommit ? resolvedBase.branch : `origin/${resolvedBase.branch}`,
+              ...(useRootWorkspace
+                ? { workspaceStrategy: { type: "root" as const, branch: resolvedBase.branch } }
+                : {}),
             },
           ),
         );
-        return yield* writeFacts(record, { status, seedLaunchedAt: now });
+        const updated = yield* writeFacts(record, { status, seedLaunchedAt: now });
+        if (Option.isSome(maybeFleetHub) && record.environmentId !== null) {
+          yield* maybeFleetHub.value.notifyGuestReadyForInbox(record.environmentId);
+        }
+        return updated;
       }
       case "DeliverGitHubToken": {
         const token = yield* githubConnection.current(GITHUB_TOKEN_MIN_LIFETIME);
@@ -755,10 +979,34 @@ const make = Effect.gen(function* () {
         return yield* writeFacts(record, { status, inflight: { op: action.op, startedAt: now } });
       case "Wait":
         return yield* writeFacts(record, { status });
-      case "Watch":
+      case "Watch": {
+        const updated = yield* writeFacts(record, {
+          status,
+          settledRevision: record.desiredRevision,
+        });
+        if (
+          record.status._tag !== "ready" &&
+          status._tag === "ready" &&
+          Option.isSome(maybeFleetHub) &&
+          record.environmentId !== null
+        ) {
+          yield* maybeFleetHub.value.notifyGuestReadyForInbox(record.environmentId);
+        }
+        return updated;
+      }
       case "Settle": {
         if (status._tag === "destroyed") {
           yield* secrets.remove(adminSecretName(record.id)).pipe(Effect.ignore({ log: true }));
+          if (Option.isSome(maybePeerLinks) && record.environmentId !== null) {
+            yield* maybePeerLinks.value
+              .unlink(record.environmentId)
+              .pipe(Effect.ignore({ log: true }));
+          }
+          if (Option.isSome(maybeFleetHub) && record.environmentId !== null) {
+            yield* maybeFleetHub.value
+              .revokeNode(record.environmentId)
+              .pipe(Effect.ignore({ log: true }));
+          }
         }
         return yield* writeFacts(record, { status, settledRevision: record.desiredRevision });
       }
@@ -917,6 +1165,26 @@ const make = Effect.gen(function* () {
         yield* kick(input.id);
         return toView(existing.value);
       }
+      const packedOverlay =
+        input.localCheckout === undefined
+          ? null
+          : yield* packWorktreeOverlay(input.localCheckout).pipe(
+              Effect.provide(
+                Option.isSome(maybeProcessRunner)
+                  ? Layer.succeed(ProcessRunner.ProcessRunner, maybeProcessRunner.value)
+                  : ProcessRunner.layer.pipe(
+                      Layer.provide(
+                        Option.isSome(maybeChildSpawner)
+                          ? Layer.succeed(
+                              ChildProcessSpawner.ChildProcessSpawner,
+                              maybeChildSpawner.value,
+                            )
+                          : NodeServices.layer,
+                      ),
+                    ),
+              ),
+              persistence,
+            );
       // Recorded under the account, so removing the account either sees this sandbox or runs first.
       yield* accounts.withAccount(input.accountId, (account) =>
         Effect.gen(function* () {
@@ -933,6 +1201,52 @@ const make = Effect.gen(function* () {
           );
           const stopAfterSeconds =
             defaults.stopAfterHours === null ? null : defaults.stopAfterHours * 3600;
+          const projectId = ProjectId.make(yield* uuid);
+          const threadId = ThreadId.make(yield* uuid);
+          const commandId = CommandId.make(yield* uuid);
+          const messageId = MessageId.make(yield* uuid);
+          const allocatedEnvId = Option.isSome(maybeFleetHub)
+            ? EnvironmentId.make(yield* uuid)
+            : null;
+          const allocatedHttpBaseUrl = allocatedEnvId === null ? null : `/_env/${allocatedEnvId}`;
+          const setupScript =
+            account.provider === "boat"
+              ? renderSandboxBootScript({
+                  t3: { kind: build.kind, version: build.version },
+                  sandboxId: input.id,
+                  label: input.title,
+                })
+              : renderContainerBootScript({
+                  t3: { kind: build.kind, version: build.version },
+                  sandboxId: input.id,
+                });
+          const projectTitle = sandboxProjectTitle(
+            sandboxRepositoryIdentity(input.source, sourceControlDefinitions),
+          );
+          if (Option.isSome(maybeFleetHub) && allocatedEnvId !== null) {
+            yield* maybeFleetHub.value
+              .registerSandboxNode({
+                environmentId: allocatedEnvId,
+                sandboxId: input.id,
+                title: input.title,
+                serverVersion: build.version,
+                projectId,
+                projectTitle,
+                projectPath: `${SANDBOX_HOME_PROJECTS}/${projectTitle}`,
+                threadId,
+                messageId,
+                message: input.message,
+                driver: input.driver,
+                model: input.model,
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                exposedPorts: account.exposedHostPorts ?? [],
+                ...(input.skipSeedThread === undefined
+                  ? {}
+                  : { skipSeedThread: input.skipSeedThread }),
+              })
+              .pipe(persistence);
+          }
           const record: SandboxRecord = {
             id: input.id,
             accountId: input.accountId,
@@ -945,25 +1259,32 @@ const make = Effect.gen(function* () {
               model: input.model,
               runtimeMode: input.runtimeMode,
               interactionMode: input.interactionMode,
+              ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
+              ...(input.context === undefined ? {} : { context: input.context }),
+              ...(input.localCheckout === undefined
+                ? {}
+                : { localCheckoutIncludeUncommitted: input.localCheckout.includeUncommitted }),
+              ...(input.skipSeedThread === undefined
+                ? {}
+                : { skipSeedThread: input.skipSeedThread }),
+              ...(account.exposedHostPorts === undefined
+                ? {}
+                : { exposedHostPorts: account.exposedHostPorts }),
               machine: {
                 size: defaults.size,
                 stopAfterSeconds,
                 ttlSeconds: startupTtlSeconds(stopAfterSeconds),
                 template: defaults.template,
                 providerEnvironment: account.providerEnvironment,
-                setupScript: renderSandboxBootScript({
-                  t3: { kind: build.kind, version: build.version },
-                  sandboxId: input.id,
-                  label: input.title,
-                }),
+                setupScript,
               },
               t3: { kind: build.kind, version: build.version },
             },
             seed: {
-              projectId: ProjectId.make(yield* uuid),
-              threadId: ThreadId.make(yield* uuid),
-              commandId: CommandId.make(yield* uuid),
-              messageId: MessageId.make(yield* uuid),
+              projectId,
+              threadId,
+              commandId,
+              messageId,
             },
             desired: "running",
             desiredRevision: 1,
@@ -973,8 +1294,11 @@ const make = Effect.gen(function* () {
             createKey: `t3-sandbox-${input.id}-${yield* uuid}`,
             createFirstAttemptAt: null,
             machineId: null,
-            httpBaseUrl: null,
-            environmentId: null,
+            httpBaseUrl: allocatedHttpBaseUrl,
+            providerHttpUrl: null,
+            environmentId: allocatedEnvId,
+            firstBootAt: null,
+            overlayArchive: packedOverlay ?? null,
             runningSince: null,
             inputsWrittenAt: null,
             credentialsStale: false,
@@ -1068,8 +1392,22 @@ const make = Effect.gen(function* () {
       const record = found.value;
       const { machineId, httpBaseUrl, environmentId } = record;
       if (
+        Option.isSome(maybeFleetHub) &&
+        environmentId !== null &&
+        httpBaseUrl !== null &&
+        httpBaseUrl.startsWith("/_env/") &&
+        record.status._tag !== "destroyed"
+      ) {
+        const pairingCredential = yield* maybeFleetHub.value
+          .issuePairingCredential(environmentId, scopes)
+          .pipe(persistence);
+        return { environmentId, httpBaseUrl, pairingCredential };
+      }
+      const directUrl = resolveGuestBaseUrl(record);
+      if (
         record.status._tag !== "ready" ||
         machineId === null ||
+        directUrl === null ||
         httpBaseUrl === null ||
         environmentId === null
       ) {
@@ -1077,14 +1415,24 @@ const make = Effect.gen(function* () {
       }
       const account = yield* accounts.get(record.accountId);
       const credential = yield* asOwner(record, account, machineId, (token) =>
-        guest.issuePairingCredential(
-          { baseUrl: httpBaseUrl, token },
-          { label: "T3 client", scopes },
-        ),
+        guest.issuePairingCredential({ baseUrl: directUrl, token }, { label: "T3 client", scopes }),
       );
       return { environmentId, httpBaseUrl, pairingCredential: Redacted.value(credential) };
     },
   );
+
+  if (Option.isSome(maybeFleetHub)) {
+    maybeFleetHub.value.registerSandboxCallbacks({
+      wakeSandbox: (id) => update({ id, desired: "running" }).pipe(Effect.asVoid, Effect.ignore),
+      pauseSandbox: (id) => update({ id, desired: "stopped" }).pipe(Effect.asVoid, Effect.ignore),
+      getGuestAdminToken: (id) =>
+        secrets.get(adminSecretName(id)).pipe(
+          Effect.map(Option.match({ onNone: () => null, onSome: decodeUtf8 })),
+          Effect.orElseSucceed(() => null),
+        ),
+      listSandboxes: () => list().pipe(Effect.orElseSucceed(() => [])),
+    });
+  }
 
   const listTemplates: SandboxService["Service"]["listTemplates"] = (accountId) =>
     accounts.get(accountId).pipe(Effect.flatMap(provider.listTemplates));

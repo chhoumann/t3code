@@ -14,6 +14,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -22,7 +23,9 @@ import * as TestClock from "effect/testing/TestClock";
 import { Tool, Toolkit } from "effect/ai";
 import {
   FetchHttpClient,
+  HttpBody,
   HttpClient,
+  HttpClientRequest,
   HttpServer,
   HttpServerRequest,
   HttpServerResponse,
@@ -922,6 +925,159 @@ it.effect("names an untrusted certificate instead of calling the peer something 
       `;
       expect((yield* a.links.resolve(box.environmentId)).url).toBe(b.url);
       expect((yield* a.links.list).map((link) => link.status)).toEqual(["reachable"]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live(
+  "links an internal loopback fleet /_env/<id> peer even when linkedEnvironmentsEnabled is off",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const b = yield* serveB(box);
+        const mounted = yield* serveRaw((request) => {
+          const prefix = `/_env/${box.environmentId}`;
+          if (!request.url.startsWith(prefix)) {
+            return Effect.succeed(HttpServerResponse.empty({ status: 404 }));
+          }
+          const stripped = request.url.slice(prefix.length) || "/";
+          const headers: Record<string, string> = {
+            "x-t3-forwarded-prefix": prefix,
+            ...(request.headers.host ? { "x-forwarded-host": request.headers.host } : {}),
+          };
+          for (const [key, value] of Object.entries(request.headers)) {
+            if (
+              value === undefined ||
+              key === "host" ||
+              key === "content-length" ||
+              key === "connection" ||
+              key === "transfer-encoding"
+            ) {
+              continue;
+            }
+            headers[key] = value;
+          }
+          const runForward = Effect.gen(function* () {
+            const client = yield* HttpClient.HttpClient;
+            const reqUrl = `${b.url}${stripped}`;
+            if (request.method === "POST") {
+              const body = yield* request.text;
+              const res = yield* client.execute(
+                HttpClientRequest.post(reqUrl).pipe(
+                  HttpClientRequest.setHeaders(headers),
+                  HttpClientRequest.setBody(
+                    HttpBody.text(body, request.headers["content-type"] ?? "application/json"),
+                  ),
+                ),
+              );
+              const resText = yield* res.text;
+              const outHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(res.headers)) {
+                if (k !== "content-length" && k !== "transfer-encoding") outHeaders[k] = v;
+              }
+              return HttpServerResponse.text(resText, { status: res.status, headers: outHeaders });
+            }
+            const res = yield* client.execute(
+              HttpClientRequest.get(reqUrl).pipe(HttpClientRequest.setHeaders(headers)),
+            );
+            const resText = yield* res.text;
+            const outHeaders: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (k !== "content-length" && k !== "transfer-encoding") outHeaders[k] = v;
+            }
+            return HttpServerResponse.text(resText, { status: res.status, headers: outHeaders });
+          });
+          return runForward.pipe(Effect.provide(FetchHttpClient.layer), Effect.orDie);
+        });
+        const a = yield* makeA(laptop);
+        yield* a.settings.updateSettings({ linkedEnvironmentsEnabled: false });
+        expect(yield* a.links.enabled).toBe(false);
+        const pairing = yield* b.auth.issuePairingCredential();
+        const linked = yield* a.links.linkInternalFleetPeer({
+          url: `${mounted}/_env/${box.environmentId}`,
+          pairingCode: Redacted.make(pairing.credential),
+          expectedEnvironmentId: box.environmentId,
+          label: "Internal Sandbox",
+        });
+        expect(linked.environmentId).toBe(box.environmentId);
+        expect(yield* a.links.enabled).toBe(true);
+        expect(yield* probe(a)).toEqual({
+          caller: "T3 Code · Laptop",
+          modes: "full-access/default",
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live("links and invokes MCP tools against a peer served under a /_env/<id> path prefix", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const b = yield* serveB(box);
+      const mounted = yield* serveRaw((request) => {
+        const prefix = "/_env/environment-box";
+        if (!request.url.startsWith(prefix)) {
+          return Effect.succeed(HttpServerResponse.empty({ status: 404 }));
+        }
+        const stripped = request.url.slice(prefix.length) || "/";
+        const headers: Record<string, string> = {
+          "x-t3-forwarded-prefix": prefix,
+          ...(request.headers.host ? { "x-forwarded-host": request.headers.host } : {}),
+        };
+        for (const [key, value] of Object.entries(request.headers)) {
+          if (
+            value === undefined ||
+            key === "host" ||
+            key === "content-length" ||
+            key === "connection" ||
+            key === "transfer-encoding"
+          ) {
+            continue;
+          }
+          headers[key] = value;
+        }
+        const runForward = Effect.gen(function* () {
+          const client = yield* HttpClient.HttpClient;
+          const reqUrl = `${b.url}${stripped}`;
+          if (request.method === "POST") {
+            const body = yield* request.text;
+            const res = yield* client.execute(
+              HttpClientRequest.post(reqUrl).pipe(
+                HttpClientRequest.setHeaders(headers),
+                HttpClientRequest.setBody(
+                  HttpBody.text(body, request.headers["content-type"] ?? "application/json"),
+                ),
+              ),
+            );
+            const resText = yield* res.text;
+            const outHeaders: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (k !== "content-length" && k !== "transfer-encoding") outHeaders[k] = v;
+            }
+            return HttpServerResponse.text(resText, { status: res.status, headers: outHeaders });
+          }
+          const res = yield* client.execute(
+            HttpClientRequest.get(reqUrl).pipe(HttpClientRequest.setHeaders(headers)),
+          );
+          const resText = yield* res.text;
+          const outHeaders: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (k !== "content-length" && k !== "transfer-encoding") outHeaders[k] = v;
+          }
+          return HttpServerResponse.text(resText, { status: res.status, headers: outHeaders });
+        });
+        return runForward.pipe(Effect.provide(FetchHttpClient.layer), Effect.orDie);
+      });
+      const mountedUrl = `${mounted}/_env/environment-box`;
+      const a = yield* makeA(laptop);
+      const pairing = yield* b.auth.issuePairingCredential();
+      const linked = yield* a.links.link({
+        url: mountedUrl,
+        pairingCode: pairing.credential,
+        access: "auto",
+      });
+      expect(linked.urls).toEqual([mountedUrl]);
+      expect(yield* probe(a)).toEqual({ caller: "T3 Code · Laptop", modes: "auto/default" });
+      expect(yield* a.links.unlink(box.environmentId)).toEqual({ removed: true, endedThere: true });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

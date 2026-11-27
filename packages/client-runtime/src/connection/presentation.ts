@@ -1,3 +1,4 @@
+import { joinEnvironmentPath } from "@t3tools/shared/environmentPath";
 import type { ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { mFallback, msg } from "gt-i18n";
@@ -173,16 +174,11 @@ export function environmentMcpUrl(input: {
 }
 
 function mcpUrlFromBase(httpBaseUrl: string): string | null {
-  let url: URL;
   try {
-    url = new URL(httpBaseUrl);
+    return joinEnvironmentPath(httpBaseUrl, "/mcp");
   } catch {
     return null;
   }
-  url.pathname = "/mcp";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
 }
 
 export function connectionCatalogDisplayUrl(entry: ConnectionCatalogEntry): string | null {

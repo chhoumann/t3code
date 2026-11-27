@@ -4,6 +4,7 @@ import type {
   AuthClientPresentationMetadata,
   ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
+import { toEnvironmentWsUrl } from "@t3tools/shared/environmentPath";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -82,10 +83,7 @@ function primarySocketUrl(
   clientMetadata: AuthClientPresentationMetadata | undefined,
   owners: ClientOwnerParams,
 ): string {
-  const url = new URL(target.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
-  }
+  const url = toEnvironmentWsUrl(target.wsBaseUrl, "/ws");
   appendClientConnectionParams(url, clientMetadata, "direct", owners);
   return url.toString();
 }

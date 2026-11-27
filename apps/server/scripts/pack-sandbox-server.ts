@@ -3,7 +3,7 @@
  * Packs this checkout's server the way a sandbox installs it, for an owner
  * whose own version is not published on npm. Run from the repository root:
  *
- *   vp run pack-sandbox-server [--skip-build] [--out <path>]
+ *   vp run pack-sandbox-server [--skip-build] [--arch <x64|arm64>] [--out <path>]
  *
  * then start the owner with `T3CODE_SANDBOX_SERVER_TARBALL=<path>`.
  */
@@ -14,6 +14,7 @@ import * as NodeUtil from "node:util";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -54,16 +55,22 @@ const run = Effect.fn("PackSandboxServer.run")(function* (
  * minus the single executable: the machine's Node runs the bundle.
  */
 export const packSandboxServer = Effect.fn("PackSandboxServer.packSandboxServer")(
-  function* (options: { readonly skipBuild: boolean; readonly out: string }) {
+  function* (options: {
+    readonly skipBuild: boolean;
+    readonly arch?: "x64" | "arm64";
+    readonly out: string;
+  }) {
     if (!options.skipBuild) yield* run("vp", ["run", "--filter", "t3", "build"], repoRoot);
     const stage = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-pack-"));
     const root = NodePath.join(stage, "t3");
     NodeFS.mkdirSync(root);
+    const hostArch = yield* HostProcess.Architecture;
+    const targetArch = options.arch ?? (hostArch === "arm64" ? "arm64" : "x64");
     yield* stageRuntimeExternals({
       repoRoot,
       stageDir: root,
       platform: "linux",
-      arch: "x64",
+      arch: targetArch,
       version: serverPackageJson.version,
     });
     NodeFS.cpSync(NodePath.join(serverDir, "dist"), NodePath.join(root, "dist"), {
@@ -81,11 +88,19 @@ if (import.meta.main) {
   const { values } = NodeUtil.parseArgs({
     options: {
       "skip-build": { type: "boolean", default: false },
+      arch: { type: "string" },
       out: { type: "string", default: NodePath.join(repoRoot, ".t3/sandbox-server.tgz") },
     },
   });
+  if (values.arch !== undefined && values.arch !== "x64" && values.arch !== "arm64") {
+    throw new Error(`Invalid --arch "${values.arch}" (expected "x64" or "arm64").`);
+  }
   const out = NodePath.resolve(values.out);
-  packSandboxServer({ skipBuild: values["skip-build"], out }).pipe(
+  packSandboxServer({
+    skipBuild: values["skip-build"],
+    ...(values.arch === undefined ? {} : { arch: values.arch }),
+    out,
+  }).pipe(
     Effect.andThen(
       Effect.suspend(() =>
         Console.log(

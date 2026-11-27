@@ -56,6 +56,10 @@ interface SystemComposerBannersInput {
   /** Whether the active environment is a sandbox that does not run now. */
   readonly sandboxNotRunning: boolean;
   readonly sandboxWakeStatus: SandboxWakeStatus | null;
+  readonly sandboxWakeAction?: {
+    readonly label: string;
+    readonly onAction: () => void;
+  } | null;
 }
 
 /**
@@ -74,6 +78,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     autoUpdateEnvironments,
     sandboxNotRunning,
     sandboxWakeStatus,
+    sandboxWakeAction,
   } = input;
   const gt = useGT();
   const messages = useMessages();
@@ -220,6 +225,15 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
             <SunriseIcon />
           ),
         title: label,
+        ...(sandboxWakeAction
+          ? {
+              actions: (
+                <Button size="xs" variant="ghost" onClick={sandboxWakeAction.onAction}>
+                  {sandboxWakeAction.label}
+                </Button>
+              ),
+            }
+          : {}),
       });
     }
     if (showUnavailableBanner) {

@@ -1,6 +1,7 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
 import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+import { extractVirtualEnvironmentBasePath } from "@t3tools/shared/environmentPath";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -109,7 +110,8 @@ const resolvePairingTarget = Effect.fn("clientRuntime.connection.onboarding.reso
 );
 
 function bearerConnectionId(environmentId: EnvironmentId, httpBaseUrl: string): string {
-  return `bearer:${environmentId}:${new URL(httpBaseUrl).origin}`;
+  const url = new URL(httpBaseUrl);
+  return `bearer:${environmentId}:${url.origin}${extractVirtualEnvironmentBasePath(url.pathname)}`;
 }
 
 function differentMachineError(label: string) {

@@ -5,10 +5,13 @@
 import {
   CommandId,
   MessageId,
+  OrchestrationMessageContext,
   ProjectId,
   ProviderDriverKind,
   ProviderInteractionMode,
   RuntimeMode,
+  SandboxExposedPort,
+  SandboxLaunchAttachment,
   SandboxSource,
   ThreadId,
   type EnvironmentId,
@@ -17,6 +20,7 @@ import {
   SandboxMachineSize,
   type SandboxFailedStep,
   type SandboxId,
+  type SandboxProviderKind,
   type SandboxResolvedBase,
   type SandboxStatus,
 } from "@t3tools/contracts";
@@ -70,6 +74,11 @@ export const SandboxSpec = Schema.Struct({
   model: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  attachments: Schema.optionalKey(Schema.Array(SandboxLaunchAttachment)),
+  context: Schema.optionalKey(OrchestrationMessageContext),
+  localCheckoutIncludeUncommitted: Schema.optionalKey(Schema.Boolean),
+  skipSeedThread: Schema.optionalKey(Schema.Boolean),
+  exposedHostPorts: Schema.optionalKey(Schema.Array(SandboxExposedPort)),
   machine: Schema.Struct({
     size: SandboxMachineSize,
     /** How long without agent activity before the machine stops; null never stops it. */
@@ -105,7 +114,7 @@ export type SandboxInflight = typeof SandboxInflight.Type;
 export interface SandboxRecord {
   readonly id: SandboxId;
   readonly accountId: SandboxAccountId;
-  readonly provider: "boat";
+  readonly provider: SandboxProviderKind;
   readonly spec: SandboxSpec;
   readonly seed: SandboxSeedIds;
   /** Written by commands only. */
@@ -122,7 +131,10 @@ export interface SandboxRecord {
   readonly createFirstAttemptAt: number | null;
   readonly machineId: ProviderMachineId | null;
   readonly httpBaseUrl: string | null;
+  readonly providerHttpUrl: string | null;
   readonly environmentId: EnvironmentId | null;
+  readonly firstBootAt: number | null;
+  readonly overlayArchive: Uint8Array | null;
   /** When the latest create or resume was issued. */
   readonly runningSince: number | null;
   readonly inputsWrittenAt: number | null;
@@ -257,7 +269,7 @@ export function planNext(record: SandboxRecord, observation: SandboxObservation)
   if (machine === null) {
     return plan(failed("observe", "The machine was deleted outside T3.", false), act("Settle"));
   }
-  const firstBootDone = record.environmentId !== null;
+  const firstBootDone = record.firstBootAt !== null;
   switch (machine.state) {
     case "failed":
       return plan(
@@ -405,7 +417,7 @@ function planFirstBoot(
   machine: ProviderMachine,
 ): SandboxPlan {
   if (record.inputsWrittenAt === null) return plan(creating, act("WriteInputs"));
-  if (record.httpBaseUrl === null) return plan(booting, act("Host"));
+  if (record.providerHttpUrl === null) return plan(booting, act("Host"));
   // The provider's setup status is only meaningful here: after a resume it reports stale values.
   if (machine.setup === "failed") {
     return plan(failed("boot", "The sandbox boot script failed.", false), act("Settle"));
@@ -426,7 +438,10 @@ function planRunning(
   if (record.desired === "stopped") {
     return plan({ _tag: "stopping", reason: "requested" }, act("Stop"));
   }
-  const waiting = record.seedLaunchedAt === null ? launching : resuming;
+  const isInitialLaunch =
+    record.seedLaunchedAt === null &&
+    !(record.spec.skipSeedThread === true && record.resolvedBase !== null);
+  const waiting = isInitialLaunch ? launching : resuming;
   if (record.credentialsStale) return plan(waiting, act("RefreshCredentials"));
   if (record.status._tag === "ready") return planReady(record, observation, machine);
   if (observation.environmentId === null) {
@@ -451,7 +466,9 @@ function planRunning(
   // Before the clone, so a private repository is reachable.
   if (githubTokenStale(record, observation)) return plan(waiting, act("DeliverGitHubToken"));
   if (record.resolvedBase === null) return plan(launching, act("PrepareProject"));
-  if (record.seedLaunchedAt === null) return plan(launching, act("LaunchSeed"));
+  if (record.seedLaunchedAt === null && record.spec.skipSeedThread !== true) {
+    return plan(launching, act("LaunchSeed"));
+  }
   return plan(ready, act("Watch"));
 }
 

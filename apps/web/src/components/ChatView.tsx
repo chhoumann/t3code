@@ -63,7 +63,6 @@ import {
   sandboxWakeStatus,
   workDelivery,
 } from "@t3tools/client-runtime/state/sandboxes";
-import { sanitizeThreadErrorMessage } from "@t3tools/client-runtime/errors";
 import { resolveWorktreeRepositorySelection } from "@t3tools/client-runtime/state/thread-repositories";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
@@ -346,21 +345,24 @@ import {
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { ThreadDetailsPanel } from "./chat/ThreadDetailsPanel";
 import { NoActiveThreadState } from "./NoActiveThreadState";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
+import { buildMessageContext } from "../lib/composerContextRecords";
 import {
   type SandboxRunChoice,
   deriveSandboxRunChoices,
   offersWorkspaceModes,
   resolveEffectiveEnvMode,
+  resolveLocalSandboxFallbackSource,
   resolveSandboxDraftSend,
   resolveSandboxDraftSource,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
+import { useSandboxActions } from "../hooks/useSandboxActions";
 import { useSandboxLaunch } from "../hooks/useSandboxLaunch";
 import { useSandboxDraftStore, useSandboxDraftTarget } from "../sandboxDraftStore";
 import { sandboxes } from "../state/sandboxes";
-import { useHeldSandboxWork } from "./chat/useHeldSandboxWork";
 import {
   getProviderStatusDismissalKey,
   shouldShowProviderStatusBanner,
@@ -433,11 +435,18 @@ import {
 } from "./chat/useSystemComposerBanners";
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
-import { draftFanoutSelectionsAtom, draftSendState } from "./chat/chatViewSend";
 import {
+  draftFanoutSelectionsAtom,
+  draftSendState,
+  prepareTurnAttachments,
+} from "./chat/chatViewSend";
+import {
+  boundAttachmentIds,
+  deriveComposerSendState,
   isCompactCommandMessage,
   type LocalThreadErrorEntry,
   makeThreadErrorSetter,
+  snapshotComposerSend,
 } from "./ChatView.logic";
 
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -699,6 +708,7 @@ export default function ChatView(props: ChatViewProps) {
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const launchFromDraft = useSandboxLaunch();
+  const { setDesired: setSandboxDesired } = useSandboxActions();
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerFilesRef = useRef<ComposerFileAttachment[]>([]);
@@ -1403,12 +1413,17 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
-  const providerStatuses = resolveProvidersForCwd(
+  const rawProviderStatuses = resolveProvidersForCwd(
     (providerEnvironmentId === undefined
       ? undefined
       : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS,
     gitCwd,
   );
+  // Host-local ACP registry entries cannot be resolved on a new sandbox machine.
+  const providerStatuses =
+    sandboxDraftTarget !== null
+      ? rawProviderStatuses.filter((provider) => provider.driver !== "acpRegistry")
+      : rawProviderStatuses;
   const composerModelSelectionApplies = draftModelSelectionApplies(
     { modelSelectionExplicit: composerModelSelectionExplicit },
     threadHasStarted(activeThread),
@@ -1471,6 +1486,22 @@ export default function ChatView(props: ChatViewProps) {
         return environment ? [environment] : [];
       })
     : EMPTY_AUTO_UPDATE_ENVIRONMENTS;
+  const sandboxWakeAction =
+    activeSandbox === undefined || activeSandboxWakeStatus === null
+      ? null
+      : activeSandboxWakeStatus.kind === "asleep"
+        ? {
+            label: gt("Wake"),
+            onAction: () => void setSandboxDesired(activeSandbox, "running"),
+          }
+        : activeSandboxWakeStatus.kind === "failed" &&
+            activeSandbox.view.status._tag === "failed" &&
+            activeSandbox.view.status.retryable
+          ? {
+              label: gt("Retry"),
+              onAction: () => void setSandboxDesired(activeSandbox, "running"),
+            }
+          : null;
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
@@ -1482,6 +1513,7 @@ export default function ChatView(props: ChatViewProps) {
     autoUpdateEnvironments,
     sandboxNotRunning: activeSandboxPresence !== null && activeSandboxPresence !== "running",
     sandboxWakeStatus: activeSandboxWakeStatus,
+    sandboxWakeAction,
   });
   const providerInstanceEntries = providerInstanceEntriesFor(
     providerStatuses,
@@ -3171,49 +3203,6 @@ export default function ChatView(props: ChatViewProps) {
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus: scheduleComposerFocusStable,
   });
-  const heldSandboxWork = useHeldSandboxWork({
-    environmentId,
-    threadRef: routeThreadRef,
-    threadKey: routeThreadKey,
-    isServerThread,
-    composerDraftTarget,
-    editingRunId: queuedRunEdit.editingRunId,
-    isRunQueued: (runId) =>
-      serverProjection?.runs.some((run) => run.id === runId && run.status === "queued") ?? true,
-    delivery: sendDelivery,
-    threadLoading: threadDetailLoading,
-    setError: (threadKey, message) => {
-      if (threadKey === routeThreadKey) {
-        setThreadError(activeThread?.id ?? null, message);
-        return;
-      }
-      // Held work ends on leaving its server thread; the error shows when the user returns.
-      setLocalServerErrorsByThreadKey((existing) => ({
-        ...existing,
-        [threadKey]: { message: sanitizeThreadErrorMessage(message), at: Date.now() },
-      }));
-    },
-    run: (work) => {
-      if (work.kind === "resume" ? resumeBlocked() : sendBlocked()) return false;
-      switch (work.kind) {
-        case "send":
-          void onSend(undefined, work.dispatchMode, work.submissionIntent, work.directAnnotation);
-          return true;
-        // The composer still edits that run; the hold checked it.
-        case "edit-queued":
-          void onSend();
-          return true;
-        case "resume":
-          void onResume();
-          return true;
-      }
-    },
-  });
-  const sandboxWork = {
-    delivery: sendDelivery,
-    isHolding: heldSandboxWork.isHolding,
-    hold: heldSandboxWork.hold,
-  };
   const launchSandboxFromDraft = async (
     sandboxDraftId: DraftId,
     target: NonNullable<typeof sandboxDraftTarget>,
@@ -3230,35 +3219,116 @@ export default function ChatView(props: ChatViewProps) {
     }
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx?.providerAvailable) return;
-    const message = promptRef.current.trim();
-    if (message.length === 0) return;
-    const source = resolveSandboxDraftSource(target, activeProject?.repositoryIdentity ?? null);
+    const replyTo =
+      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.replyTo ?? null;
+    const { sendableTerminalContexts } = deriveComposerSendState({
+      prompt: promptRef.current,
+      imageCount: sendCtx.images.length,
+      existingAttachmentCount: sendCtx.files.length,
+      terminalContexts: sendCtx.terminalContexts,
+      elementContextCount:
+        sendCtx.previewAnnotations.length +
+        sendCtx.reviewComments.length +
+        sendCtx.threadContexts.length +
+        sendCtx.environmentContexts.length +
+        (replyTo === null ? 0 : 1),
+    });
+    const snapshot = snapshotComposerSend({
+      ...sendCtx,
+      prompt: promptRef.current,
+      sendableTerminalContexts,
+      replyTo,
+    });
+    if (snapshot.messageText.length === 0 && snapshot.attachments.length === 0) return;
+    const remoteSource = resolveSandboxDraftSource(
+      target,
+      activeProject?.repositoryIdentity ?? null,
+    );
+    const canPackLocalCheckout =
+      activeProject !== null && target.ownerEnvironmentId === activeProject.environmentId;
+    const source =
+      remoteSource ??
+      (canPackLocalCheckout
+        ? resolveLocalSandboxFallbackSource(
+            activeProject.workspaceRoot || activeProject.title,
+            target,
+          )
+        : null);
     if (source === null) {
       branchToolbarRef.current?.openSandboxRepository();
       return;
     }
+    const localCheckout =
+      canPackLocalCheckout && (remoteSource === null || target.includeUncommitted === true)
+        ? {
+            cwd: activeProject.workspaceRoot,
+            includeUncommitted: remoteSource === null ? true : target.includeUncommitted === true,
+          }
+        : undefined;
     sendInFlightRef.current = true;
-    const error = await launchFromDraft({
+    const prepared =
+      snapshot.attachments.length === 0
+        ? { ok: true as const, value: [] }
+        : await prepareTurnAttachments({
+            environmentId: target.ownerEnvironmentId,
+            attachments: snapshot.attachments,
+            usesAttachmentUploads: false,
+            draftTarget: composerDraftTarget,
+          }).then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error }),
+          );
+    if (!prepared.ok) {
+      sendInFlightRef.current = false;
+      setThreadError(
+        activeThread.id,
+        prepared.error instanceof Error
+          ? prepared.error.message
+          : gt("Could not prepare sandbox attachments."),
+      );
+      return;
+    }
+    const preparedAttachments = prepared.value;
+    const attachmentIds = boundAttachmentIds(preparedAttachments, snapshot.attachments);
+    const context = buildMessageContext({
+      terminalContexts: snapshot.terminalContexts,
+      reviewComments: snapshot.reviewComments,
+      previewAnnotations: snapshot.previewAnnotations,
+      threadContexts: snapshot.threadContexts,
+      environmentContexts: snapshot.environmentContexts,
+      replyTo: snapshot.replyTo,
+      attachments: snapshot.attachments.map((attachment, index) => ({
+        attachment,
+        attachmentId: attachmentIds[index] ?? attachment.id,
+      })),
+    });
+    const launched = await launchFromDraft({
       draftId: sandboxDraftId,
       target,
-      message,
-      extrasCount:
-        sendCtx.images.length +
-        sendCtx.files.length +
-        sendCtx.terminalContexts.length +
-        sendCtx.previewAnnotations.length +
-        sendCtx.reviewComments.length +
-        sendCtx.threadContexts.length,
+      message: snapshot.messageText || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
       source,
       driver: sendCtx.selectedProvider,
       model: sendCtx.selectedModel,
       runtimeMode,
       interactionMode: DEFAULT_INTERACTION_MODE,
-    });
+      ...(localCheckout === undefined ? {} : { localCheckout }),
+      ...(preparedAttachments.length === 0 ? {} : { attachments: preparedAttachments }),
+      ...(context === undefined ? {} : { context }),
+    }).then(
+      (error) => ({ ok: true as const, error }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     sendInFlightRef.current = false;
-    setThreadError(activeThread.id, error);
+    setThreadError(
+      activeThread.id,
+      launched.ok
+        ? launched.error
+        : launched.error instanceof Error
+          ? launched.error.message
+          : gt("Could not prepare sandbox attachments."),
+    );
   };
-  const { onResume, resumeBlocked, isResuming } = useComposerResume({
+  const { onResume, isResuming } = useComposerResume({
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3269,7 +3339,7 @@ export default function ChatView(props: ChatViewProps) {
     isSendBusy,
     isRevertingCheckpoint,
     threadDetailLoading,
-    sandboxWork,
+    delivery: sendDelivery,
     runtimeMode,
     localCheckoutBranchMismatch,
     composerRef,
@@ -3278,7 +3348,7 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     setThreadError,
   });
-  const { onSend, captureDetachedSend, sendBlocked } = useComposerSend({
+  const { onSend, captureDetachedSend } = useComposerSend({
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3312,7 +3382,7 @@ export default function ChatView(props: ChatViewProps) {
     queuedRunEdit,
     isRevertingCheckpoint,
     threadLoadBlocksSend: threadLoadBlocksWork,
-    sandboxWork,
+    delivery: sendDelivery,
     launchSandboxDraft:
       sandboxDraftTarget !== null && draftId
         ? () => launchSandboxFromDraft(draftId, sandboxDraftTarget)
@@ -4045,8 +4115,7 @@ export default function ChatView(props: ChatViewProps) {
                                   (setupQueueSendThreadKey !== null &&
                                     setupQueueSendThreadKey === activeThreadKey) ||
                                   queuedRunEdit.isSaving ||
-                                  isResuming ||
-                                  heldSandboxWork.holding
+                                  isResuming
                                 }
                                 canResume={canResume}
                                 isRevertingCheckpoint={isRevertingCheckpoint}

@@ -4,10 +4,12 @@ import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
 } from "@t3tools/client-runtime/state/presentation";
+import { sandboxPresence } from "@t3tools/client-runtime/state/sandboxes";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
+import { pendingSandboxEnvironmentsAtom, sandboxes } from "./sandboxes";
 import { serverEnvironment } from "./server";
 import { expectsPrimaryEnvironment } from "./shell";
 
@@ -42,7 +44,16 @@ export const environmentUnreachableAtom = Atom.family((environmentId: Environmen
       return false;
     }
     const entry = catalog.entries.get(environmentId);
-    return !entry?.enabled || entry.unsupportedReason !== undefined;
+    if (entry === undefined) {
+      if (get(pendingSandboxEnvironmentsAtom).includes(environmentId)) return false;
+      const sandbox = get(sandboxes.indexAtom).get(environmentId);
+      if (sandbox !== undefined) {
+        const presence = sandboxPresence(sandbox.view);
+        if (presence !== "gone" && presence !== "put-away") return false;
+      }
+      return true;
+    }
+    return !entry.enabled || entry.unsupportedReason !== undefined;
   }),
 );
 

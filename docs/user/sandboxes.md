@@ -1,26 +1,40 @@
 # Sandboxes
 
-A sandbox is a cloud machine that runs its own T3 Code server for one task.
-Your T3 Code environment creates the machine, clones your project onto a new
-branch there, and starts a thread with your message. Sandboxes run on
-[Boat](https://boat.dev).
+A sandbox is an isolated environment that runs its own T3 Code server. Your T3 Code
+environment creates the machine or container, prepares your project onto a new branch,
+and routes traffic to it at a stable `/_env/<environmentId>` path on your server.
+Sandboxes can run in the cloud on [Boat](https://boat.dev), locally in Docker
+containers (**Local Docker**), or through any **Custom Command** provider driver.
+You can also connect persistent self-hosted machines to the same server hub with
+`t3 runner start`.
 
 ## Add an account
 
-Open **Settings → Sandboxes** and choose **Add account**. Paste a Boat API key.
-T3 Code checks that the key can create, read, update, stop, resume, and delete
-sandboxes, run commands, write files, host ports, and read snapshots before it
-saves the account. Updating is how T3 Code pushes back Boat's own stop time
-while agents work. The key and any
-environment variable values stay in that environment's secret store, not in its
-settings. You can add more than one account, such as a personal and a work
-account.
+Open **Settings → Sandboxes** and choose **Add account**. Pick a provider:
+
+- **Local Docker**: Runs each sandbox in a Docker container on the host using a
+  configured image (for example `t3code/sandbox:latest`). No cloud API key is
+  required.
+- **Custom Command**: Delegates sandbox lifecycle operations (`create`, `exec`,
+  `host`, `stop`, `resume`, `destroy`, `list-templates`) to a JSON-over-stdio
+  program you provide.
+- **Boat**: Creates cloud sandboxes with a Boat API key. T3 Code checks that the key
+  can create, read, update, stop, resume, and delete sandboxes, run commands, write
+  files, host ports, and read snapshots before saving the account.
+
+For accounts with **Exposed host ports**, list local TCP ports from the host
+machine that sandboxes may dial at `127.43.0.1:<port>` inside the sandbox
+(unlisted host ports are refused by the hub).
+
+The API key and any environment variable values stay in that environment's secret
+store, not in its settings. You can add more than one account, such as a personal
+and a work account.
 
 In the project's settings, use **Sandboxes** to choose a template for each
-account. The template menu lists the selected account's ready Boat snapshots.
-A snapshot of another sandbox keeps its files and installed tools, but the new
-sandbox starts T3 Code without that sandbox's threads and fetches the branch it
-starts from into the snapshot's clone of the repository.
+account. For Boat accounts, the template menu lists the selected account's ready
+Boat snapshots. A snapshot of another sandbox keeps its files and installed tools,
+but the new sandbox starts T3 Code without that sandbox's threads and fetches the
+branch it starts from into the snapshot's clone of the repository.
 You can also override the account's machine size and stop time there.
 These defaults apply to new sandboxes for every checkout of that repository.
 Reset them to use the account defaults and start without a template.
@@ -31,7 +45,7 @@ machine setup script alone and keep it out of the agents' environment. This is
 not a hard boundary: the sandbox's user has passwordless `sudo` and can read the
 file that holds it.
 
-The sandbox clones the repository itself, so it needs its own access to private
+When cloning a remote repository, the sandbox needs its own access to private
 repositories. For GitHub, choose **Connect GitHub** in **Settings → Sandboxes**.
 T3 Code creates a GitHub App on your account, and you pick the repositories it
 can reach; **Manage repositories** changes that later. Every sandbox is then
@@ -46,12 +60,17 @@ script.
 ## Start a sandbox
 
 In a new thread in a project, open the environment picker and choose
-**New sandbox · _account_**, then send your message. The sandbox clones the
-repository the project's `origin` remote points to, such as your fork, and
-starts a new branch from that repository's default branch. Choose another remote
-branch in the branch control next to the picker. Your local checkout is never
-copied, so its uncommitted or unpushed work is not included. The first message
-cannot carry attachments or context.
+**New sandbox · _account_**, then send your message. T3 Code opens the thread
+immediately at `/_env/<environmentId>` and buffers turns until the sandbox
+finishes booting. First-turn images and composer context are sent into the sandbox
+when the thread starts.
+
+- If your project has a remote repository, the sandbox clones that remote onto a
+  new branch from the selected base branch. Turn on **Include uncommitted** when
+  you want to overlay your uncommitted local changes on top.
+- If your project is a local folder on the same host with no remote repository,
+  **Local checkout** packs a compressed overlay of that workspace into the
+  sandbox automatically.
 
 To work on a repository you have not opened, run **New sandbox from repository**
 from the command palette and enter `owner/repo` or a Git URL.
@@ -60,8 +79,21 @@ The project's setup scripts in `t3.json` run in the sandbox. Install the tools
 they need in the account's machine setup script, or start from a template that
 has them.
 
-Every device connected to the environment that owns the sandbox pairs with it
-automatically.
+The owning hub automatically creates internal peer links to each running sandbox,
+so an orchestrator thread on the hub (or `delegate_task` with
+`isolation: "sandbox"`) can delegate subtasks into isolated sandboxes without
+manual pairing steps.
+
+## Portals and persistent runners
+
+Services listening inside a running sandbox can be opened through authenticated
+hub **Portals** at `/_env/<environmentId>/portal/<port>/`.
+
+To connect your own always-on Linux or macOS workstation to the hub instead of
+spawning ephemeral containers, run `t3 runner start` with a hub address and
+pairing token. Runners connect outbound over WebSocket and serve all HTTP,
+WebSocket, preview, and portal traffic under `/_env/<environmentId>/...` with
+their own local session and device authority.
 
 ## Stop, resume, and delete
 
@@ -71,33 +103,32 @@ has worked for its **Stop after inactivity** time. An agent that is running, or
 waiting for your answer, counts as working, so a sandbox does not stop in the
 middle of a turn. A sandbox set to **Never** runs until you stop it.
 
-A sandbox that stopped on its own is asleep: its threads stay in the sidebar,
-and sending a message in one wakes the sandbox first, which takes a minute or
-two. The message stays in the composer until it goes, and editing it or leaving
-the thread before then cancels the send. On a device that has yet to load its
-threads, the sandbox is listed in their place, and opening it wakes it. A
-sandbox you stopped by archiving its last thread is listed in
-**Settings → Archive**. Both are listed in **Settings → Sandboxes**, where you
-can resume them.
+A sandbox that stopped on its own is asleep: its threads remain readable from
+the hub cache without waking the sandbox. Sending a message in one wakes the
+sandbox, queues your command idempotently in the hub inbox, drains it once the
+sandbox connects, and splices live events onto open clients. Use **Wake** in the
+composer banner if you want to wake a stopped sandbox before sending. A sandbox
+you stopped by archiving its last thread is listed in **Settings → Archive**.
+Both are listed in **Settings → Sandboxes**, where you can resume them.
 
 The environment that owns the sandbox checks on it about once a minute and stops
 it once it has been idle long enough. This has two limits:
 
 - A message sent in the few seconds between that check and the machine stopping
   can be cut off.
-- While the owning environment is offline, such as on a laptop that is asleep,
-  Boat stops the sandbox on its own, even in the middle of a turn. It does so
-  within 10 minutes after the stop time runs out, counted from the last agent
-  activity the owning environment saw, and no sooner than 40 minutes after the
-  sandbox started or resumed.
+- For cloud Boat sandboxes, while the owning environment is offline (such as on a
+  laptop that is asleep), Boat stops the sandbox on its own within 10 minutes
+  after its stop deadline expires.
 
 **Delete sandbox**, in a sandbox thread's menu or in Settings, destroys the
-machine and everything on it, including its threads.
+container or VM, deletes cached hub state and sibling peer links, and removes
+its `/_env/<environmentId>` route.
 
 ## Access
 
-A sandbox's T3 Code server has a public address on Boat and requires T3 Code
-sign-in, which devices get by pairing through the owning environment.
-Revoking a device on the owning environment does not end the sessions it
-already holds in its sandboxes. Delete a sandbox to cut off every device's
-access to it.
+Hub-managed sandboxes terminate client sessions, DPoP proofs, and pairing links
+at the owning hub server, while self-hosted runners (`t3 runner start`) retain
+their own local session authority. Revoking a client session on the hub closes
+its active sandbox WebSockets immediately and rejects further requests, without
+needing to wake the sandbox. Delete a sandbox to destroy the machine and all
+threads inside it.

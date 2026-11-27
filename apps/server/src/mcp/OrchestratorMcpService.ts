@@ -56,6 +56,10 @@ import {
   type ProviderOptionSelection,
   ProviderRequestKind,
   type RuntimeMode,
+  SandboxAccountId,
+  SandboxId,
+  SandboxRemoteUrl,
+  type SandboxSource,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
   scheduledTaskThreadMode,
@@ -73,6 +77,7 @@ import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { threadPullRequestUpdatedAtMs } from "@t3tools/shared/threadPullRequests";
+import { sandboxSourceForProject } from "@t3tools/shared/sandboxProject";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
@@ -144,6 +149,7 @@ import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlTo
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as SandboxService from "../sandbox/SandboxService.ts";
 
 // Return recoverable handles before common MCP client timeouts expire.
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -1365,6 +1371,7 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
+  const maybeSandboxService = yield* Effect.serviceOption(SandboxService.SandboxService);
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2988,6 +2995,135 @@ const make = Effect.gen(function* () {
         parent.thread.interactionMode,
         input.interactionMode,
       );
+      if (input.isolation === "sandbox") {
+        yield* requireCapability(callerScope);
+        if (Option.isNone(maybeSandboxService)) {
+          return yield* failure("invalid_request", "Sandboxes are not available on this server.");
+        }
+        const configuredSettings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+        );
+        const firstAccountEntry = Object.entries(configuredSettings.sandboxAccounts).sort(
+          ([a], [b]) => a.localeCompare(b),
+        )[0];
+        if (firstAccountEntry === undefined) {
+          return yield* failure(
+            "invalid_request",
+            "No sandbox account is configured on this server. Add one in Settings -> Sandboxes.",
+          );
+        }
+        const accountId = SandboxAccountId.make(firstAccountEntry[0]);
+        const targetDriverKind =
+          providers.find((provider) => provider.instanceId === target.modelSelection.instanceId)
+            ?.driver ??
+          configuredSettings.providerInstances?.[target.modelSelection.instanceId]?.driver;
+        if (targetDriverKind === undefined) {
+          return yield* failure(
+            "provider_unavailable",
+            `Provider ${target.modelSelection.instanceId} is not configured.`,
+          );
+        }
+        const project = yield* requireProject(parent.thread.projectId);
+        const parentCwd = parent.thread.worktreePath ?? project.workspaceRoot;
+        const remoteSource = sandboxSourceForProject(project.repositoryIdentity ?? null);
+        const fallbackSlug =
+          parentCwd
+            .split(/[\\/]/)
+            .filter(Boolean)
+            .pop()
+            ?.toLowerCase()
+            .replace(/[^a-z0-9._-]+/g, "-")
+            .replace(/^-+|-+$/g, "") || "project";
+        const source: SandboxSource = remoteSource ?? {
+          remoteUrl: SandboxRemoteUrl.make(`https://local.t3.invalid/local/${fallbackSlug}`),
+          base: { _tag: "default" },
+        };
+        const sanitizedCommand = stableCommandId({
+          scope,
+          requestKey: key,
+          operation: "delegate-sandbox",
+        }).replace(/[^A-Za-z0-9_-]/g, "_");
+        const sandboxId = SandboxId.make(`dlg-${sanitizedCommand}`.slice(0, 64));
+        const launched = yield* maybeSandboxService.value
+          .launch({
+            id: sandboxId,
+            accountId,
+            title: input.title ?? "Delegated sandbox task",
+            message: taskPrompt(input),
+            source,
+            driver: targetDriverKind,
+            model: target.modelSelection.model,
+            runtimeMode,
+            interactionMode,
+            skipSeedThread: true,
+            localCheckout: { cwd: parentCwd, includeUncommitted: true },
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure("orchestration_error", `Unable to launch sandbox: ${error.message}`),
+            ),
+          );
+        const readyView =
+          launched.status._tag === "ready" &&
+          launched.environmentId !== null &&
+          launched.projectId !== undefined
+            ? launched
+            : yield* maybeSandboxService.value.subscribe().pipe(
+                Stream.map(
+                  (views) => views.find((candidate) => candidate.id === sandboxId) ?? null,
+                ),
+                Stream.filter(
+                  (candidate) =>
+                    candidate === null ||
+                    candidate.status._tag === "ready" ||
+                    candidate.status._tag === "failed" ||
+                    candidate.status._tag === "destroyed",
+                ),
+                Stream.runHead,
+                Effect.mapError((error) =>
+                  failure("orchestration_error", `Unable to wait for sandbox: ${error.message}`),
+                ),
+                Effect.flatMap((head) => {
+                  if (Option.isNone(head) || head.value === null) {
+                    return Effect.fail(
+                      failure("orchestration_error", "Delegated sandbox disappeared before ready."),
+                    );
+                  }
+                  const view = head.value;
+                  if (view.status._tag !== "ready") {
+                    return Effect.fail(
+                      failure(
+                        "orchestration_error",
+                        view.status._tag === "failed"
+                          ? view.status.message
+                          : `Delegated sandbox entered ${view.status._tag} state.`,
+                      ),
+                    );
+                  }
+                  return Effect.succeed(view);
+                }),
+              );
+        if (readyView.environmentId === null || readyView.projectId === undefined) {
+          return yield* failure(
+            "orchestration_error",
+            "Delegated sandbox became ready without an environment or project id.",
+          );
+        }
+        const { taskId } = yield* remoteDelegation.delegate(scope, {
+          ...input,
+          isolation: "shared",
+          target: {
+            environmentId: readyView.environmentId,
+            projectId: readyView.projectId,
+            driverKind: targetDriverKind,
+            model: target.modelSelection.model,
+            ...(input.target?.options === undefined ? {} : { options: input.target.options }),
+          },
+        });
+        return yield* input.mode === "wait"
+          ? awaitTask(scope, taskId, key, input.timeoutMs)
+          : readTask(scope, taskId, false, true);
+      }
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
       if (
         input.isolation === "worktree" &&
