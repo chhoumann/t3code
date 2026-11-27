@@ -4188,6 +4188,7 @@ export const make = Effect.gen(function* () {
     settings: SourceControlTextGenerationSettings,
     cwd: string,
     branch: string | null,
+    recordCheckout: (branch: string) => Effect.Effect<void>,
     commitMessage?: string,
     filePaths?: readonly string[],
   ) {
@@ -4212,7 +4213,18 @@ export const make = Effect.gen(function* () {
     const resolvedBranch = resolveAutoFeatureBranchName(existingBranchNames, preferredBranch);
 
     yield* gitCore.createRef({ cwd, refName: resolvedBranch });
-    yield* Effect.scoped(gitCore.switchRef({ cwd, refName: resolvedBranch }));
+    yield* Effect.scoped(gitCore.switchRef({ cwd, refName: resolvedBranch })).pipe(
+      Effect.tap(() => recordCheckout(resolvedBranch)),
+      // A failing post-checkout hook can leave HEAD on the new branch.
+      Effect.tapError(() =>
+        gitCore.readCurrentBranch(cwd).pipe(
+          Effect.flatMap((branch) =>
+            branch === resolvedBranch ? recordCheckout(resolvedBranch) : Effect.void,
+          ),
+          Effect.ignore,
+        ),
+      ),
+    );
 
     return {
       branchStep: { status: "created" as const, name: resolvedBranch },
@@ -4225,6 +4237,7 @@ export const make = Effect.gen(function* () {
     function* (input, options) {
       const progress = yield* createProgressEmitter(input, options);
       const currentPhase = yield* Ref.make<Option.Option<GitActionProgressPhase>>(Option.none());
+      const createdBranch = yield* Ref.make<string | undefined>(undefined);
 
       const runAction = Effect.fn("runStackedAction.runAction")(function* (): Effect.fn.Return<
         GitRunStackedActionResult,
@@ -4320,6 +4333,7 @@ export const make = Effect.gen(function* () {
             textGenerationSettings,
             input.cwd,
             initialStatus.branch,
+            (branch) => Ref.set(createdBranch, branch),
             input.commitMessage,
             input.filePaths,
           );
@@ -4424,13 +4438,16 @@ export const make = Effect.gen(function* () {
       return yield* runAction().pipe(
         Effect.ensuring(invalidateStatus(input.cwd)),
         Effect.tapError((error) =>
-          Effect.flatMap(Ref.get(currentPhase), (phase) =>
-            progress.emit({
+          Effect.gen(function* () {
+            const phase = yield* Ref.get(currentPhase);
+            const branch = yield* Ref.get(createdBranch);
+            yield* progress.emit({
               kind: "action_failed",
               phase: Option.getOrNull(phase),
               message: error.message,
-            }),
-          ),
+              ...(branch !== undefined ? { createdBranch: branch } : {}),
+            });
+          }),
         ),
       );
     },
